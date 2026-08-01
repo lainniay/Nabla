@@ -1,0 +1,275 @@
+import type { ContextSnapshot } from "../context-manager.ts";
+import type {
+  AgentConfigDiagnostic,
+  AgentProfile,
+  GoalSnapshot,
+  ResourceSnapshot,
+} from "../harness.ts";
+import type { PlanArtifactV2 } from "../plan.ts";
+import type { IsolationBackend, IntegrationStatus } from "../worktree.ts";
+import {
+  isJsonObject,
+  requireArray,
+  requireBoolean,
+  requireFiniteNumber,
+  requireObject,
+  requireString,
+  requireStringArray,
+  type JsonObject,
+} from "./validation.ts";
+
+export interface HostPlanModeSnapshot {
+  active: boolean;
+  activeTools: string[];
+}
+
+export interface AgentProfileSnapshot {
+  name: string;
+  description: string;
+  source: string;
+  model: string | null;
+  thinkingLevel: AgentProfile["thinkingLevel"] | null;
+  skills: string[];
+  tools: string[];
+  permission: string;
+  maxParallel: number;
+  maxTurns: number;
+  isolation: AgentProfile["isolation"];
+  disabled: boolean;
+  unavailableReason: string | null;
+}
+
+export interface ActiveAgentSnapshot {
+  id: string;
+  profile: string;
+  task: string;
+  taskId?: string;
+  goalId?: string;
+  lifecycle: string;
+  startedAt: string;
+  turns: number;
+  maxTurns: number;
+  model: string;
+  originSessionId: string;
+  isolationBackend: IsolationBackend;
+  integrationStatus: IntegrationStatus;
+  isolationWarning: string | null;
+}
+
+export interface WorktreeIntegrationSnapshot {
+  backend: IsolationBackend;
+  status: IntegrationStatus;
+  warning: string | null;
+  artifactId: string | null;
+  changedPaths: string[];
+  patchBytes: number;
+  excludedPaths: string[];
+  resolverAvailable: boolean;
+}
+
+export interface AgentsSnapshot {
+  scopeId: string;
+  revision: number;
+  maxParallel: number;
+  profiles: AgentProfileSnapshot[];
+  active: ActiveAgentSnapshot[];
+  pending: ActiveAgentSnapshot[];
+  diagnostics: AgentConfigDiagnostic[];
+}
+
+export interface PendingIntegrationSnapshot {
+  agent: ActiveAgentSnapshot;
+  integration: WorktreeIntegrationSnapshot;
+}
+
+export interface BootstrapState {
+  scopeId: string;
+  planMode: HostPlanModeSnapshot;
+  plan: { artifact: PlanArtifactV2 | null };
+  resources: ResourceSnapshot;
+  goal: GoalSnapshot;
+  agents: AgentsSnapshot;
+  context: ContextSnapshot;
+  pendingIntegrations: PendingIntegrationSnapshot[];
+  warnings: string[];
+}
+
+export function parseBootstrapState(value: unknown): BootstrapState {
+  if (!isJsonObject(value)) throw new Error("bootstrap must be an object");
+  requireString(value, "scopeId", "bootstrap");
+  const planMode = requireObject(value, "planMode", "bootstrap");
+  requireBoolean(planMode, "active", "bootstrap.planMode");
+  requireStringArray(planMode, "activeTools", "bootstrap.planMode");
+
+  const plan = requireObject(value, "plan", "bootstrap");
+  if (plan.artifact !== null) validatePlanArtifact(plan.artifact);
+  validateResources(requireObject(value, "resources", "bootstrap"));
+  validateGoalSnapshot(requireObject(value, "goal", "bootstrap"));
+  validateAgents(requireObject(value, "agents", "bootstrap"));
+  validateContext(requireObject(value, "context", "bootstrap"));
+
+  for (const [index, entry] of requireArray(
+    value,
+    "pendingIntegrations",
+    "bootstrap",
+  ).entries()) {
+    if (!isJsonObject(entry)) {
+      throw new Error(`bootstrap.pendingIntegrations[${index}] must be an object`);
+    }
+    validateAgent(
+      requireObject(entry, "agent", `bootstrap.pendingIntegrations[${index}]`),
+      `bootstrap.pendingIntegrations[${index}].agent`,
+    );
+    validateIntegration(
+      requireObject(
+        entry,
+        "integration",
+        `bootstrap.pendingIntegrations[${index}]`,
+      ),
+      `bootstrap.pendingIntegrations[${index}].integration`,
+    );
+  }
+  requireStringArray(value, "warnings", "bootstrap");
+  return value as unknown as BootstrapState;
+}
+
+function validatePlanArtifact(value: unknown): void {
+  if (!isJsonObject(value)) throw new Error("bootstrap.plan.artifact must be an object or null");
+  for (const field of [
+    "id",
+    "status",
+    "title",
+    "summary",
+    "bodyMarkdown",
+    "sourceSessionId",
+    "createdAt",
+    "updatedAt",
+  ]) {
+    requireString(value, field, "bootstrap.plan.artifact");
+  }
+  requireFiniteNumber(value, "schemaVersion", "bootstrap.plan.artifact");
+  requireFiniteNumber(value, "revision", "bootstrap.plan.artifact");
+  requireStringArray(value, "assumptions", "bootstrap.plan.artifact");
+  requireStringArray(value, "testPlan", "bootstrap.plan.artifact");
+}
+
+function validateResources(value: JsonObject): void {
+  requireString(value, "scopeId", "bootstrap.resources");
+  requireBoolean(value, "trusted", "bootstrap.resources");
+  for (const field of [
+    "contextFiles",
+    "skills",
+    "prompts",
+    "extensions",
+    "commands",
+    "diagnostics",
+  ]) {
+    requireArray(value, field, "bootstrap.resources");
+  }
+  requireFiniteNumber(value, "revision", "bootstrap.resources");
+}
+
+function validateGoalSnapshot(value: JsonObject): void {
+  requireString(value, "scopeId", "bootstrap.goal");
+  requireString(value, "statePath", "bootstrap.goal");
+  if (value.goal === null) return;
+  if (!isJsonObject(value.goal)) {
+    throw new Error("bootstrap.goal.goal must be an object or null");
+  }
+  const goal = value.goal;
+  for (const field of [
+    "id",
+    "workspace",
+    "sessionId",
+    "objective",
+    "stage",
+    "createdAt",
+    "updatedAt",
+  ]) {
+    requireString(goal, field, "bootstrap.goal.goal");
+  }
+  requireFiniteNumber(goal, "schemaVersion", "bootstrap.goal.goal");
+  requireFiniteNumber(goal, "revision", "bootstrap.goal.goal");
+  for (const field of [
+    "constraints",
+    "acceptanceCriteria",
+    "tasks",
+    "reviews",
+    "verification",
+  ]) {
+    requireArray(goal, field, "bootstrap.goal.goal");
+  }
+}
+
+function validateAgents(value: JsonObject): void {
+  requireString(value, "scopeId", "bootstrap.agents");
+  requireFiniteNumber(value, "revision", "bootstrap.agents");
+  requireFiniteNumber(value, "maxParallel", "bootstrap.agents");
+  requireArray(value, "profiles", "bootstrap.agents");
+  for (const field of ["active", "pending"] as const) {
+    for (const [index, agent] of requireArray(
+      value,
+      field,
+      "bootstrap.agents",
+    ).entries()) {
+      if (!isJsonObject(agent)) {
+        throw new Error(`bootstrap.agents.${field}[${index}] must be an object`);
+      }
+      validateAgent(agent, `bootstrap.agents.${field}[${index}]`);
+    }
+  }
+  requireArray(value, "diagnostics", "bootstrap.agents");
+}
+
+function validateAgent(value: JsonObject, context: string): void {
+  for (const field of [
+    "id",
+    "profile",
+    "task",
+    "lifecycle",
+    "startedAt",
+    "model",
+    "originSessionId",
+    "isolationBackend",
+    "integrationStatus",
+  ]) {
+    requireString(value, field, context);
+  }
+  requireFiniteNumber(value, "turns", context);
+  requireFiniteNumber(value, "maxTurns", context);
+}
+
+function validateIntegration(value: JsonObject, context: string): void {
+  requireString(value, "backend", context);
+  requireString(value, "status", context);
+  requireStringArray(value, "changedPaths", context);
+  requireStringArray(value, "excludedPaths", context);
+  requireFiniteNumber(value, "patchBytes", context);
+  requireBoolean(value, "resolverAvailable", context);
+}
+
+function validateContext(value: JsonObject): void {
+  requireString(value, "scopeId", "bootstrap.context");
+  requireFiniteNumber(value, "revision", "bootstrap.context");
+  requireString(value, "usageState", "bootstrap.context");
+  for (const field of [
+    "estimatedUnfilteredTokens",
+    "estimatedNextRequestTokens",
+    "estimatedPrunedThisRequestTokens",
+    "estimatedCurrentlyPrunableTokens",
+    "estimatedCumulativeAvoidedTokens",
+    "compactionCount",
+    "epoch",
+  ]) {
+    requireFiniteNumber(value, field, "bootstrap.context");
+  }
+  for (const field of [
+    "categories",
+    "pruning",
+    "topConsumers",
+    "recentCompactions",
+  ]) {
+    requireArray(value, field, "bootstrap.context");
+  }
+  requireObject(value, "policy", "bootstrap.context");
+}

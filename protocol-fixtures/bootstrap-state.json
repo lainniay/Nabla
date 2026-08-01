@@ -1,0 +1,348 @@
+{
+  "scopeId": "session-contract",
+  "planMode": {
+    "active": false,
+    "activeTools": ["read", "grep", "delegate_task"]
+  },
+  "plan": {
+    "artifact": {
+      "schemaVersion": 2,
+      "id": "plan-contract",
+      "revision": 3,
+      "status": "submitted",
+      "title": "Contract plan",
+      "summary": "Exercise every Plan field",
+      "bodyMarkdown": "# Contract plan\n\nImplement it.",
+      "assumptions": ["The fixture is versioned"],
+      "testPlan": ["Round-trip both protocol implementations"],
+      "sourceSessionId": "session-contract",
+      "createdAt": "2026-07-31T00:00:00.000Z",
+      "updatedAt": "2026-07-31T00:01:00.000Z",
+      "lastExecutionError": "previous failure"
+    }
+  },
+  "resources": {
+    "scopeId": "session-contract",
+    "trusted": true,
+    "contextFiles": ["AGENTS.md"],
+    "skills": [
+      {
+        "name": "contract-skill",
+        "path": "/workspace/.agents/skills/contract/SKILL.md",
+        "description": "Contract skill"
+      }
+    ],
+    "prompts": [
+      {
+        "name": "contract-prompt",
+        "path": "/workspace/.agents/prompts/contract.md",
+        "description": "Contract prompt"
+      }
+    ],
+    "extensions": ["/workspace/.agents/extensions/contract.ts"],
+    "commands": [
+      {
+        "name": "contract",
+        "description": "Contract command",
+        "source": "extension"
+      }
+    ],
+    "diagnostics": [
+      {
+        "type": "warning",
+        "message": "fixture diagnostic",
+        "path": "/workspace/AGENTS.md"
+      }
+    ],
+    "revision": 7
+  },
+  "goal": {
+    "scopeId": "session-contract",
+    "goal": {
+      "schemaVersion": 2,
+      "id": "goal-contract",
+      "workspace": "/workspace",
+      "sessionId": "session-contract",
+      "objective": "Exercise every Goal field",
+      "stage": "paused",
+      "previousStage": "executing",
+      "revision": 9,
+      "constraints": ["Keep Plan and Goal separate"],
+      "acceptanceCriteria": ["Protocol round-trips"],
+      "sourcePlan": {
+        "id": "plan-contract",
+        "revision": 3,
+        "sourceSessionId": "session-contract",
+        "artifact": {
+          "schemaVersion": 2,
+          "id": "plan-contract",
+          "revision": 3,
+          "status": "submitted",
+          "title": "Contract plan",
+          "summary": "Exercise every Plan field",
+          "bodyMarkdown": "# Contract plan",
+          "assumptions": [],
+          "testPlan": [],
+          "sourceSessionId": "session-contract",
+          "createdAt": "2026-07-31T00:00:00.000Z",
+          "updatedAt": "2026-07-31T00:01:00.000Z",
+          "lastExecutionError": "previous failure"
+        }
+      },
+      "spec": {
+        "revision": 2,
+        "summary": "Contract goal specification",
+        "acceptanceCriteria": ["All fields survive"],
+        "allowedTools": ["read", "edit"],
+        "allowedPaths": ["src/**"],
+        "allowedCommands": ["cargo test"],
+        "sourcePlan": {
+          "id": "plan-contract",
+          "revision": 3
+        },
+        "tasks": [
+          {
+            "id": "task-contract",
+            "title": "Contract task",
+            "description": "Verify the contract",
+            "profile": "worker",
+            "dependsOn": [],
+            "allowedPaths": ["src/**"],
+            "acceptanceCriteria": ["Pass"]
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "id": "task-contract",
+          "title": "Contract task",
+          "description": "Verify the contract",
+          "profile": "worker",
+          "dependsOn": [],
+          "allowedPaths": ["src/**"],
+          "acceptanceCriteria": ["Pass"],
+          "status": "completed",
+          "result": {
+            "status": "completed",
+            "summary": "done",
+            "evidence": ["test"],
+            "changedPaths": ["src/lib.rs"],
+            "verification": [],
+            "blockers": []
+          }
+        }
+      ],
+      "lease": {
+        "specRevision": 2,
+        "allowedTools": ["read", "edit"]
+      },
+      "reviews": [
+        {
+          "cycle": 1,
+          "verdict": "pass",
+          "summary": "looks good",
+          "findings": []
+        }
+      ],
+      "verification": [
+        {
+          "cycle": 1,
+          "result": {
+            "status": "completed",
+            "summary": "verified"
+          }
+        }
+      ],
+      "repairCycles": 1,
+      "lastError": "paused for inspection",
+      "createdAt": "2026-07-31T00:02:00.000Z",
+      "updatedAt": "2026-07-31T00:03:00.000Z"
+    },
+    "statePath": "/workspace/.nabla/goals/goal-contract.json"
+  },
+  "agents": {
+    "scopeId": "session-contract",
+    "revision": 5,
+    "maxParallel": 4,
+    "profiles": [
+      {
+        "name": "worker",
+        "description": "Write a bounded change",
+        "source": "builtin",
+        "model": "provider/model",
+        "thinkingLevel": "high",
+        "skills": ["contract-skill"],
+        "tools": ["read", "edit", "bash"],
+        "permission": "configured",
+        "maxParallel": 2,
+        "maxTurns": 8,
+        "isolation": {
+          "mode": "worktree",
+          "integration": "ask"
+        },
+        "disabled": false,
+        "unavailableReason": "fixture reason"
+      }
+    ],
+    "active": [
+      {
+        "id": "agent-active",
+        "profile": "worker",
+        "task": "Active task",
+        "taskId": "task-contract",
+        "goalId": "goal-contract",
+        "lifecycle": "running",
+        "startedAt": "2026-07-31T00:04:00.000Z",
+        "turns": 2,
+        "maxTurns": 8,
+        "model": "provider/model",
+        "originSessionId": "session-contract",
+        "isolationBackend": "worktree",
+        "integrationStatus": "none",
+        "isolationWarning": "fixture warning"
+      }
+    ],
+    "pending": [
+      {
+        "id": "agent-pending",
+        "profile": "worker",
+        "task": "Pending integration",
+        "taskId": "task-contract",
+        "goalId": "goal-contract",
+        "lifecycle": "awaiting_integration",
+        "startedAt": "2026-07-31T00:05:00.000Z",
+        "turns": 4,
+        "maxTurns": 8,
+        "model": "provider/model",
+        "originSessionId": "session-contract",
+        "isolationBackend": "worktree",
+        "integrationStatus": "pending",
+        "isolationWarning": "pending warning"
+      }
+    ],
+    "diagnostics": [
+      {
+        "type": "warning",
+        "message": "agent diagnostic",
+        "path": "/workspace/.nabla/agents.json",
+        "profile": "worker"
+      }
+    ]
+  },
+  "context": {
+    "scopeId": "session-contract",
+    "revision": 11,
+    "usageState": "actual",
+    "actualTokens": 47000,
+    "actualPercent": 47.0,
+    "contextWindow": 100000,
+    "estimatedUnfilteredTokens": 52000,
+    "estimatedNextRequestTokens": 44000,
+    "categories": [
+      {
+        "category": "user",
+        "messageCount": 2,
+        "estimatedTokens": 1000
+      },
+      {
+        "category": "assistant",
+        "messageCount": 3,
+        "estimatedTokens": 3000
+      },
+      {
+        "category": "toolResult",
+        "messageCount": 4,
+        "estimatedTokens": 40000
+      },
+      {
+        "category": "other",
+        "messageCount": 1,
+        "estimatedTokens": 4000
+      }
+    ],
+    "estimatedSystemToolOtherTokens": 9000,
+    "estimatedPrunedThisRequestTokens": 8000,
+    "estimatedCurrentlyPrunableTokens": 12000,
+    "estimatedCumulativeAvoidedTokens": 24000,
+    "pruning": [
+      {
+        "reason": "hard_limit",
+        "count": 1,
+        "estimatedTokensSaved": 8000
+      },
+      {
+        "reason": "history_budget",
+        "count": 2,
+        "estimatedTokensSaved": 20000
+      },
+      {
+        "reason": "superseded",
+        "count": 1,
+        "estimatedTokensSaved": 1000
+      }
+    ],
+    "topConsumers": [
+      {
+        "category": "toolResult",
+        "label": "read src/main.ts",
+        "estimatedTokens": 12000,
+        "toolCallId": "tool-contract"
+      }
+    ],
+    "compactionCount": 1,
+    "recentCompactions": [
+      {
+        "reason": "manual",
+        "firstKeptEntryId": "entry-contract",
+        "tokensBefore": 82000,
+        "estimatedTokensAfter": 31000,
+        "tokensSaved": 51000,
+        "savedPercent": 62.2,
+        "fileCount": 14,
+        "readFileCount": 10,
+        "modifiedFileCount": 4
+      }
+    ],
+    "policy": {
+      "enabled": true,
+      "recentToolResultTokens": 40000,
+      "minimumBatchSavingsTokens": 20000,
+      "minimumToolResultTokens": 50,
+      "successToolResultLimitTokens": 12000,
+      "searchToolResultLimitTokens": 6000,
+      "errorToolResultLimitTokens": 8000
+    },
+    "epoch": 3
+  },
+  "pendingIntegrations": [
+    {
+      "agent": {
+        "id": "agent-pending",
+        "profile": "worker",
+        "task": "Pending integration",
+        "taskId": "task-contract",
+        "goalId": "goal-contract",
+        "lifecycle": "awaiting_integration",
+        "startedAt": "2026-07-31T00:05:00.000Z",
+        "turns": 4,
+        "maxTurns": 8,
+        "model": "provider/model",
+        "originSessionId": "session-contract",
+        "isolationBackend": "worktree",
+        "integrationStatus": "pending",
+        "isolationWarning": "pending warning"
+      },
+      "integration": {
+        "backend": "worktree",
+        "status": "pending",
+        "warning": "pending warning",
+        "artifactId": "worktree-contract",
+        "changedPaths": ["src/lib.rs"],
+        "patchBytes": 512,
+        "excludedPaths": ["node_modules"],
+        "resolverAvailable": true
+      }
+    }
+  ],
+  "warnings": ["recovered pending integration"]
+}

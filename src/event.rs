@@ -1,0 +1,113 @@
+use crossterm::event::Event as TerminalEvent;
+use serde_json::Value;
+
+use crate::{
+    host::{
+        ApprovalDecision, AuthLoginData, AuthProvider, HostPlanModeData, ModelListData,
+        PlanExecutionData, PlanStateData, QueueClearData, SessionCommandData, SubagentStartData,
+        TreeNavigateData,
+    },
+    rpc::RpcEvent,
+    state::{
+        AgentsSnapshot, ContextSnapshot, GoalSnapshot, GoalsSnapshot, PlanExecutionTarget,
+        ResourceSnapshot, SessionBrowserSnapshot, TreeSnapshot,
+    },
+    ui_types::UiInputEvent,
+};
+
+/// The only event type allowed to enter the application reducer.
+#[derive(Debug, Clone)]
+pub enum AppEvent {
+    /// Keyboard, paste, resize, focus, and mouse events from Crossterm.
+    Terminal(TerminalEvent),
+    /// Asynchronous lifecycle and streaming events emitted by Pi.
+    Pi(RpcEvent),
+    /// Asynchronous host-control events such as authentication and approvals.
+    Host(RpcEvent),
+    /// Completion of a command previously requested through an `AppEffect`.
+    Command(CommandEvent),
+    /// Process and transport events that are not Pi protocol events.
+    Runtime(RuntimeEvent),
+    /// Mouse coordinates translated through the renderer's semantic hit map.
+    UiInput(UiInputEvent),
+    /// A render cadence signal. It must not mutate application state by itself.
+    Tick,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CommandEvent {
+    PromptFinished(Result<(), String>),
+    AbortFinished(Result<(), String>),
+    CompactFinished(Result<Value, String>),
+    ContextStateFinished(Result<Box<ContextSnapshot>, String>),
+    ResourcesFinished(Result<Box<ResourceSnapshot>, String>),
+    ResourceReloadFinished(Result<Box<ResourceSnapshot>, String>),
+    WorkspaceTrustFinished(Result<Box<ResourceSnapshot>, String>),
+    GoalStateFinished(Result<Box<GoalSnapshot>, String>),
+    GoalsFinished(Result<Box<GoalsSnapshot>, String>),
+    GoalStarted(Result<Box<GoalSnapshot>, String>),
+    GoalActionFinished(Result<Box<GoalSnapshot>, String>),
+    GoalApproved(Result<Box<GoalSnapshot>, String>),
+    QueueCleared(Result<Box<QueueClearData>, String>),
+    AbortAndQueueCleared(Result<Box<QueueClearData>, String>),
+    ModelsFinished(Result<Box<ModelListData>, String>),
+    ModelSetFinished(Result<Value, String>),
+    ThinkingSetFinished(Result<Value, String>),
+    AgentsFinished(Result<Box<AgentsSnapshot>, String>),
+    AgentsReloaded(Result<Box<AgentsSnapshot>, String>),
+    SubagentStarted(Result<Box<SubagentStartData>, String>),
+    SubagentCancelled(Result<(), String>),
+    SubagentIntegrated(Result<Value, String>),
+    SessionBrowserOpened(Result<Box<SessionBrowserSnapshot>, String>),
+    SessionBrowserQueryFinished {
+        generation: u64,
+        result: Result<Box<SessionBrowserSnapshot>, String>,
+    },
+    SessionBrowserClosed(Result<(), String>),
+    NewSessionFinished(Result<Box<SessionCommandData>, String>),
+    ResumeSessionFinished(Result<Box<SessionCommandData>, String>),
+    TreeStateFinished {
+        generation: u64,
+        result: Result<Box<TreeSnapshot>, String>,
+    },
+    TreeLabelFinished(Result<(), String>),
+    TreeCopyFinished(Result<(), String>),
+    TreeNavigateFinished(Result<Box<TreeNavigateData>, String>),
+    TreeAbortFinished(Result<(), String>),
+    AuthProvidersFinished(Result<Vec<AuthProvider>, String>),
+    AuthLoginFinished(Result<AuthLoginData, String>),
+    AuthReplyFinished(Result<(), String>),
+    AuthCancelFinished(Result<(), String>),
+    OpenUrlFinished(Result<(), String>),
+    SetPlanModeFinished {
+        requested: bool,
+        result: Result<HostPlanModeData, String>,
+    },
+    PlanStateFinished(Result<Box<PlanStateData>, String>),
+    QuestionReplyFinished(Result<(), String>),
+    PlanExecutionFinished {
+        target: PlanExecutionTarget,
+        result: Result<Box<PlanExecutionData>, String>,
+    },
+    ApprovalReplyFinished {
+        approval_id: String,
+        decision: ApprovalDecision,
+        result: Result<(), String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeEvent {
+    PiStderr(String),
+    PiRpcError(String),
+    PiDisconnected,
+    HostDisconnected,
+    TerminalError(String),
+    TerminalClosed,
+}
+
+impl AppEvent {
+    pub fn is_tick(&self) -> bool {
+        matches!(self, Self::Tick)
+    }
+}
