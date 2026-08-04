@@ -2,9 +2,11 @@
 
 ## Project Structure & Module Organization
 
-Nabla has two cooperating runtimes:
+Nabla has a Rust core library and a cooperating TypeScript host:
 
-- `src/` contains the Rust terminal client. `app.rs` handles input and state transitions, `ui.rs` renders the TUI, `state.rs` defines UI/protocol state, and `host.rs`, `pi_process.rs`, and `rpc.rs` handle JSONL communication.
+- `src/app.rs` is the application reducer facade; `src/app/` contains submodules split by input, workflow, and protocol event source.
+- `src/state.rs` is the state facade; `src/state/` groups sessions, context, resources, goals, agents, planning, authentication, navigation, and transcript concerns.
+- `host.rs`, `pi_process.rs`, and `rpc.rs` handle JSONL communication with Pi and the TypeScript host.
 - `agent-host/src/` contains the TypeScript Pi host. Domain logic lives in files such as `context-manager.ts`, `harness.ts`, and `worktree.ts`; shared validation, policy, and persistence utilities live under `protocol/`, `policy/`, and `persistence/`.
 - TypeScript tests are colocated as `*.test.ts`. Rust unit tests are generally colocated in their source modules.
 - `protocol-fixtures/` holds cross-language golden fixtures. `SUBAGENTS.md` documents subagent configuration and behavior.
@@ -14,7 +16,6 @@ Nabla has two cooperating runtimes:
 Run from the repository root unless noted:
 
 ```sh
-cargo run                              # build and launch the TUI
 cargo check                            # fast Rust compile validation
 cargo test                             # run Rust tests
 cargo fmt --all -- --check             # verify Rust formatting
@@ -40,4 +41,4 @@ Keep Plan and Goal as separate workflows. Pi remains the source of truth for ses
 
 ## Commit & Pull Request Guidelines
 
-This repository currently has no Git history, so no established convention can be inferred. Use short imperative subjects, optionally scoped, for example `worktree: make integration idempotent`. Pull requests should describe behavior and state-transition risks, list verification commands, link relevant issues, include TUI screenshots for visual changes, and call out protocol or fixture updates.
+This repository currently has no Git history, so no established convention can be inferred. Use short imperative subjects, optionally scoped, for example `worktree: make integration idempotent`. Pull requests should describe behavior and state-transition risks, list verification commands, link relevant issues, and call out protocol or fixture updates.

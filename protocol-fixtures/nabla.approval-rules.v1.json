@@ -1,0 +1,15 @@
+{
+  "workspace": "/workspace",
+  "rules": [
+    {
+      "id": "rule-contract",
+      "workspace": "/workspace",
+      "toolName": "bash",
+      "kind": "command_prefix",
+      "value": "cargo test",
+      "recursive": false,
+      "summary": "cargo test …",
+      "createdAt": "2026-08-04T00:00:00.000Z"
+    }
+  ]
+}

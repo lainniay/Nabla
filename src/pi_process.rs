@@ -19,6 +19,7 @@ use tokio::{
 };
 
 use crate::{
+    file_references::ImageContent,
     host::{HostClient, HostConnectionGuard, HostEventReceiver, HostRuntime},
     rpc::{
         DEFAULT_REQUEST_TIMEOUT, JsonLineRpcPeer, PiState, RPC_EVENT_BUFFER, RpcError, RpcEvent,
@@ -41,8 +42,10 @@ pub struct PiProcessConfig {
 }
 
 impl PiProcessConfig {
-    /// UI configuration backed by the repository-local TypeScript host.
-    pub fn local_ui(cwd: PathBuf) -> Self {
+    /// Local interactive configuration backed by the repository TypeScript host.
+    // INFO: Each runtime gets a unique control socket to prevent cross-session
+    // host events from reaching the wrong reducer.
+    pub fn local(cwd: PathBuf) -> Self {
         Self::local_base(cwd)
     }
 
@@ -197,24 +200,45 @@ impl PiClient {
         self.request_data("get_state", Map::new()).await
     }
 
-    pub async fn prompt(&self, message: impl Into<String>) -> Result<(), RpcError> {
-        let mut parameters = Map::new();
-        parameters.insert("message".to_owned(), Value::String(message.into()));
-        self.request("prompt", parameters).await?.ensure_success()
+    pub async fn prompt(
+        &self,
+        message: impl Into<String>,
+        images: Option<Vec<ImageContent>>,
+    ) -> Result<(), RpcError> {
+        self.deliver("prompt", message.into(), images).await
     }
 
-    pub async fn steer(&self, message: impl Into<String>) -> Result<(), RpcError> {
-        let mut parameters = Map::new();
-        parameters.insert("message".to_owned(), Value::String(message.into()));
-        self.request("steer", parameters).await?.ensure_success()
+    pub async fn steer(
+        &self,
+        message: impl Into<String>,
+        images: Option<Vec<ImageContent>>,
+    ) -> Result<(), RpcError> {
+        self.deliver("steer", message.into(), images).await
     }
 
-    pub async fn follow_up(&self, message: impl Into<String>) -> Result<(), RpcError> {
+    pub async fn follow_up(
+        &self,
+        message: impl Into<String>,
+        images: Option<Vec<ImageContent>>,
+    ) -> Result<(), RpcError> {
+        self.deliver("follow_up", message.into(), images).await
+    }
+
+    async fn deliver(
+        &self,
+        command: &str,
+        message: String,
+        images: Option<Vec<ImageContent>>,
+    ) -> Result<(), RpcError> {
         let mut parameters = Map::new();
-        parameters.insert("message".to_owned(), Value::String(message.into()));
-        self.request("follow_up", parameters)
-            .await?
-            .ensure_success()
+        parameters.insert("message".to_owned(), Value::String(message));
+        if let Some(images) = images.filter(|images| !images.is_empty()) {
+            parameters.insert(
+                "images".to_owned(),
+                serde_json::to_value(images).map_err(|error| RpcError::Json(error.to_string()))?,
+            );
+        }
+        self.request(command, parameters).await?.ensure_success()
     }
 
     pub async fn abort(&self) -> Result<(), RpcError> {
@@ -357,21 +381,22 @@ mod tests {
 
     #[test]
     fn local_configs_use_repo_local_host_and_unique_control_sockets() {
-        let ui = PiProcessConfig::local_ui(PathBuf::from("/tmp/project"));
+        let local = PiProcessConfig::local(PathBuf::from("/tmp/project"));
         let smoke = PiProcessConfig::local_smoke(PathBuf::from("/tmp/project"));
 
-        assert_eq!(ui.executable, PathBuf::from("node"));
+        assert_eq!(local.executable, PathBuf::from("node"));
         assert!(
-            ui.args
+            local
+                .args
                 .first()
                 .is_some_and(|arg| arg.ends_with("agent-host/src/main.ts"))
         );
-        assert_eq!(ui.cwd, PathBuf::from("/tmp/project"));
-        assert!(ui.control_socket.starts_with("/tmp"));
-        assert_ne!(ui.control_socket, smoke.control_socket);
-        assert!(ui.session_dir.is_none());
+        assert_eq!(local.cwd, PathBuf::from("/tmp/project"));
+        assert!(local.control_socket.starts_with("/tmp"));
+        assert_ne!(local.control_socket, smoke.control_socket);
+        assert!(local.session_dir.is_none());
         assert!(smoke.session_dir.is_some());
-        assert!(!ui.offline);
+        assert!(!local.offline);
         assert!(smoke.offline);
     }
 

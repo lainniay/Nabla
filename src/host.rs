@@ -12,10 +12,10 @@ use tokio::{
 use crate::rpc::PiState;
 use crate::rpc::{JsonLineRpcPeer, RPC_EVENT_BUFFER, RpcError, RpcEvent, RpcResponse};
 use crate::state::{
-    ActiveAgentSnapshot, AgentsSnapshot, ContextSnapshot, GoalSnapshot, GoalsSnapshot,
-    PlanArtifact, PlanExecutionTarget, QuestionAnswer, ResourceSnapshot, SessionBrowserSnapshot,
-    SessionHistoryItem, SessionScope, SessionSortMode, TreeFilterMode, TreeSnapshot,
-    WorktreeIntegrationSnapshot,
+    ActiveAgentSnapshot, AgentsSnapshot, ApprovalRulesSnapshot, ContextSnapshot, GoalSnapshot,
+    GoalsSnapshot, PlanArtifact, PlanExecutionTarget, QuestionAnswer, ResourceSnapshot,
+    SessionBrowserSnapshot, SessionHistoryItem, SessionScope, SessionSortMode, TreeFilterMode,
+    TreeSnapshot, WorktreeIntegrationSnapshot,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -170,7 +170,9 @@ pub struct ModelListData {
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
     Allow,
+    AllowSession,
     AllowGoal,
+    AllowForever,
     Deny,
 }
 
@@ -243,6 +245,26 @@ impl HostClient {
         let mut parameters = Map::new();
         parameters.insert("trusted".to_owned(), Value::Bool(trusted));
         self.request_data("workspace_trust", parameters, SESSION_TIMEOUT)
+            .await
+    }
+
+    pub async fn get_approval_rules(&self) -> Result<ApprovalRulesSnapshot, RpcError> {
+        self.request_data("approval_rules", Map::new(), self.request_timeout)
+            .await
+    }
+
+    pub async fn revoke_approval_rule(
+        &self,
+        rule_id: String,
+    ) -> Result<ApprovalRulesSnapshot, RpcError> {
+        let mut parameters = Map::new();
+        parameters.insert("ruleId".to_owned(), Value::String(rule_id));
+        self.request_data("approval_rule_revoke", parameters, self.request_timeout)
+            .await
+    }
+
+    pub async fn clear_approval_rules(&self) -> Result<ApprovalRulesSnapshot, RpcError> {
+        self.request_data("approval_rules_clear", Map::new(), self.request_timeout)
             .await
     }
 
@@ -680,8 +702,16 @@ mod tests {
             serde_json::json!("allow")
         );
         assert_eq!(
+            serde_json::to_value(ApprovalDecision::AllowSession).unwrap(),
+            serde_json::json!("allow_session")
+        );
+        assert_eq!(
             serde_json::to_value(ApprovalDecision::AllowGoal).unwrap(),
             serde_json::json!("allow_goal")
+        );
+        assert_eq!(
+            serde_json::to_value(ApprovalDecision::AllowForever).unwrap(),
+            serde_json::json!("allow_forever")
         );
     }
 
@@ -779,6 +809,44 @@ mod tests {
         let round_trip = serde_json::to_value(state).unwrap();
 
         assert_eq!(round_trip, fixture);
+    }
+
+    #[test]
+    fn shared_turn_boundary_fixture_accepts_future_fields() {
+        let history: Vec<SessionHistoryItem> = serde_json::from_str(include_str!(
+            "../protocol-fixtures/session-history-turn-boundary.json"
+        ))
+        .expect("turn boundary fixture");
+        assert_eq!(
+            history,
+            vec![
+                SessionHistoryItem::TurnBoundary {
+                    turn_id: "turn-exact".to_owned(),
+                    started_at: "2026-08-04T01:02:03.000Z".to_owned(),
+                    ended_at: "2026-08-04T01:03:08.000Z".to_owned(),
+                    duration_ms: 65_000,
+                    estimated: false,
+                },
+                SessionHistoryItem::TurnBoundary {
+                    turn_id: "legacy-entry-1".to_owned(),
+                    started_at: "2026-08-04T02:00:00.000Z".to_owned(),
+                    ended_at: "2026-08-04T02:00:12.000Z".to_owned(),
+                    duration_ms: 12_000,
+                    estimated: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn shared_persistent_approval_fixture_matches_rust_contract() {
+        let snapshot: ApprovalRulesSnapshot = serde_json::from_str(include_str!(
+            "../protocol-fixtures/nabla.approval-rules.v1.json"
+        ))
+        .unwrap();
+        assert_eq!(snapshot.workspace, "/workspace");
+        assert_eq!(snapshot.rules[0].kind, "command_prefix");
+        assert_eq!(snapshot.rules[0].tool_name, "bash");
     }
 
     #[test]

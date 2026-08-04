@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   compactionFileDetails,
+  displayMessageText,
   messageContentText,
 } from "./protocol/message-content.ts";
 import { isJsonObject as isRecord } from "./protocol/validation.ts";
@@ -21,6 +22,15 @@ export type TreeFilterMode =
   | "user-only"
   | "labeled-only"
   | "all";
+
+export const TURN_METRICS_ENTRY_TYPE = "nabla.turn-metrics.v1";
+
+export interface TurnMetrics {
+  turnId: string;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+}
 
 export interface SessionSummary {
   path: string;
@@ -61,6 +71,7 @@ export type SessionHistoryItem =
       id: string;
       name: string;
       output: string;
+      details?: unknown;
       isError: boolean;
     }
   | { kind: "notice"; text: string }
@@ -69,6 +80,14 @@ export type SessionHistoryItem =
       firstKeptEntryId: string;
       tokensBefore: number;
       fileCount: number;
+    }
+  | {
+      kind: "turnBoundary";
+      turnId: string;
+      startedAt: string;
+      endedAt: string;
+      durationMs: number;
+      estimated: boolean;
     }
   | { kind: "branchSummary"; summary: string };
 
@@ -217,11 +236,74 @@ export function projectSessionHistory(
   entries: readonly SessionEntry[],
 ): SessionHistoryItem[] {
   const result: SessionHistoryItem[] = [];
+  let legacyTurn:
+    | {
+        turnId: string;
+        startedAt: string;
+        endedAt?: string;
+        insertAt?: number;
+      }
+    | undefined;
+  const flushLegacyTurn = (): void => {
+    if (!legacyTurn?.endedAt) {
+      legacyTurn = undefined;
+      return;
+    }
+    const startedAtMs = Date.parse(legacyTurn.startedAt);
+    const endedAtMs = Date.parse(legacyTurn.endedAt);
+    if (!Number.isFinite(startedAtMs) || !Number.isFinite(endedAtMs)) {
+      legacyTurn = undefined;
+      return;
+    }
+    const boundary: SessionHistoryItem = {
+      kind: "turnBoundary",
+      turnId: legacyTurn.turnId,
+      startedAt: legacyTurn.startedAt,
+      endedAt: legacyTurn.endedAt,
+      durationMs: Math.max(0, endedAtMs - startedAtMs),
+      estimated: true,
+    };
+    result.splice(legacyTurn.insertAt ?? result.length, 0, boundary);
+    legacyTurn = undefined;
+  };
+
   for (const entry of entries) {
     switch (entry.type) {
-      case "message":
+      case "message": {
+        const role = isRecord(entry.message)
+          ? stringValue(entry.message.role)
+          : "";
+        if (role === "user") {
+          flushLegacyTurn();
+          legacyTurn = {
+            turnId: `legacy-${entry.id}`,
+            startedAt: entry.timestamp,
+          };
+        }
         projectMessage(entry.message, result);
+        if (
+          legacyTurn &&
+          (role === "assistant" ||
+            role === "toolResult" ||
+            role === "bashExecution")
+        ) {
+          legacyTurn.endedAt = entry.timestamp;
+          legacyTurn.insertAt = result.length;
+        }
         break;
+      }
+      case "custom": {
+        if (entry.customType !== TURN_METRICS_ENTRY_TYPE) break;
+        const metrics = parseTurnMetrics(entry.data);
+        if (!metrics) break;
+        legacyTurn = undefined;
+        result.push({
+          kind: "turnBoundary",
+          ...metrics,
+          estimated: false,
+        });
+        break;
+      }
       case "custom_message":
         if (entry.display) {
           result.push({
@@ -250,7 +332,32 @@ export function projectSessionHistory(
         break;
     }
   }
+  flushLegacyTurn();
   return result;
+}
+
+function parseTurnMetrics(value: unknown): TurnMetrics | undefined {
+  if (!isRecord(value)) return undefined;
+  const turnId = stringValue(value.turnId);
+  const startedAt = stringValue(value.startedAt);
+  const endedAt = stringValue(value.endedAt);
+  const durationMs = value.durationMs;
+  if (
+    !turnId ||
+    !startedAt ||
+    !endedAt ||
+    typeof durationMs !== "number" ||
+    !Number.isFinite(durationMs) ||
+    durationMs < 0
+  ) {
+    return undefined;
+  }
+  return {
+    turnId,
+    startedAt,
+    endedAt,
+    durationMs: Math.round(durationMs),
+  };
 }
 
 export function buildTreeSnapshot(
@@ -384,10 +491,12 @@ function projectMessage(message: unknown, result: SessionHistoryItem[]): void {
   if (role === "user") {
     result.push({
       kind: "user",
-      text: messageContentText(message.content, {
-        imageMarker: "[image]",
-        includeThinking: true,
-      }),
+      text: displayMessageText(
+        messageContentText(message.content, {
+          imageMarker: "[image]",
+          includeThinking: true,
+        }),
+      ),
     });
     return;
   }
@@ -430,6 +539,7 @@ function projectMessage(message: unknown, result: SessionHistoryItem[]): void {
         imageMarker: "[image]",
         includeThinking: true,
       }),
+      ...(message.details === undefined ? {} : { details: message.details }),
       isError: message.isError === true,
     });
     return;
@@ -795,21 +905,19 @@ function treeSearchText(node: SessionTreeNode): string {
 }
 
 function treePreview(node: SessionTreeNode): string {
-  const prefix = node.label ? `[${node.label}] ` : "";
   const entry = node.entry;
   if (entry.type === "message") {
-    const role = entryRole(entry);
     const content = copyTextForEntry(entry) ?? "";
-    return `${prefix}${role ?? "message"}: ${truncatePreview(content)}`;
+    return truncatePreview(content);
   }
   if (entry.type === "compaction") {
-    return `${prefix}[compaction: ${Math.round(entry.tokensBefore / 1_000)}k tokens]`;
+    return `[compaction: ${Math.round(entry.tokensBefore / 1_000)}k tokens]`;
   }
   if (entry.type === "branch_summary") {
-    return `${prefix}[branch summary] ${truncatePreview(entry.summary)}`;
+    return `[branch summary] ${truncatePreview(entry.summary)}`;
   }
   if (entry.type === "custom_message") {
-    return `${prefix}[${entry.customType}] ${truncatePreview(
+    return `[${entry.customType}] ${truncatePreview(
       messageContentText(entry.content, {
         imageMarker: "[image]",
         includeThinking: true,
@@ -817,9 +925,9 @@ function treePreview(node: SessionTreeNode): string {
     )}`;
   }
   if (entry.type === "session_info") {
-    return `${prefix}[session name] ${entry.name ?? ""}`;
+    return `[session name] ${entry.name ?? ""}`;
   }
-  return `${prefix}[${entry.type}]`;
+  return `[${entry.type}]`;
 }
 
 function entryRole(entry: SessionEntry): string | undefined {

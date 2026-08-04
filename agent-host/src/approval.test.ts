@@ -72,3 +72,41 @@ test("approval queue preserves agent and Goal metadata for a scoped decision", a
   assert.equal(queue.reply(String(event?.approvalId), "allow_goal"), true);
   assert.equal(await result, "allow_goal");
 });
+
+test("approval queue carries an explicit persistent decision", async () => {
+  const queue = new ApprovalQueue();
+  let event: Record<string, unknown> | undefined;
+  const result = queue.request(
+    {
+      toolCallId: "tool-forever",
+      toolName: "write",
+      input: { path: "src/main.ts" },
+      risk: "normal",
+    },
+    undefined,
+    (value) => {
+      event = value;
+    },
+  );
+  assert.equal(queue.reply(String(event?.approvalId), "allow_forever"), true);
+  assert.equal(await result, "allow_forever");
+});
+
+test("approval queue carries a session-scoped decision", async () => {
+  const queue = new ApprovalQueue();
+  let event: Record<string, unknown> | undefined;
+  const result = queue.request(
+    {
+      toolCallId: "tool-session",
+      toolName: "bash",
+      input: { command: "wc -l src/*.rs" },
+      risk: "normal",
+    },
+    undefined,
+    (value) => {
+      event = value;
+    },
+  );
+  assert.equal(queue.reply(String(event?.approvalId), "allow_session"), true);
+  assert.equal(await result, "allow_session");
+});

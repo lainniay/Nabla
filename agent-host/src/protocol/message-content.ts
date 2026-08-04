@@ -1,5 +1,46 @@
 import { isJsonObject, stringArray } from "./validation.ts";
 
+export const FILE_REFERENCE_ENVELOPE_PREFIX = "NABLA_FILE_REFERENCES_V1\n";
+
+export interface FileReferenceEnvelope {
+  version: 1;
+  message: string;
+  references: Array<{
+    path: string;
+    mode: "snapshot" | "path" | "image";
+    size: number;
+    reason?: string;
+    content?: string;
+  }>;
+}
+
+export function parseFileReferenceEnvelope(
+  text: string,
+): FileReferenceEnvelope | undefined {
+  if (!text.startsWith(FILE_REFERENCE_ENVELOPE_PREFIX)) return undefined;
+  try {
+    const payload = text
+      .slice(FILE_REFERENCE_ENVELOPE_PREFIX.length)
+      .split("\n", 1)[0];
+    const value: unknown = JSON.parse(payload);
+    if (
+      !isJsonObject(value) ||
+      value.version !== 1 ||
+      typeof value.message !== "string" ||
+      !Array.isArray(value.references)
+    ) {
+      return undefined;
+    }
+    return value as unknown as FileReferenceEnvelope;
+  } catch {
+    return undefined;
+  }
+}
+
+export function displayMessageText(text: string): string {
+  return parseFileReferenceEnvelope(text)?.message ?? text;
+}
+
 export interface CompactionFileDetails {
   readFiles: string[];
   modifiedFiles: string[];

@@ -8,6 +8,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import {
   SessionCatalog,
+  TURN_METRICS_ENTRY_TYPE,
   buildTreeSnapshot,
   copyTextForEntry,
   createStartupSessionManager,
@@ -166,6 +167,20 @@ test("history projection follows Pi context entries and hides model-only custom 
   );
 });
 
+test("history projection hides file-reference snapshots and restores original input", () => {
+  const envelope =
+    'NABLA_FILE_REFERENCES_V1\n{"version":1,"message":"Review @src/lib.rs","references":[{"path":"src/lib.rs","mode":"snapshot","size":18,"content":"private snapshot"}]}';
+  const manager = SessionManager.inMemory("/tmp");
+  manager.appendMessage(user(envelope));
+  const history = projectSessionHistory(manager.buildContextEntries());
+  assert.ok(
+    history.some(
+      (item) => item.kind === "user" && item.text === "Review @src/lib.rs",
+    ),
+  );
+  assert.ok(!JSON.stringify(history).includes("private snapshot"));
+});
+
 test("history projection preserves assistant text and tool-call ordering", () => {
   const history = projectSessionHistory([
     {
@@ -205,6 +220,121 @@ test("history projection preserves assistant text and tool-call ordering", () =>
   });
 });
 
+test("history projection preserves structured tool result details", () => {
+  const details = {
+    diff: " 9 before\n-10 old\n+10 new",
+    patch: "--- src/lib.rs\n+++ src/lib.rs\n@@ -9,2 +9,2 @@\n-old\n+new\n",
+  };
+  const history = projectSessionHistory([
+    {
+      type: "message",
+      id: "entry-tool-result",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      message: {
+        role: "toolResult",
+        toolCallId: "edit-1",
+        toolName: "edit",
+        content: [{ type: "text", text: "Edited src/lib.rs" }],
+        details,
+        isError: false,
+        timestamp: Date.now(),
+      },
+    },
+  ] as never);
+
+  assert.deepEqual(history[0], {
+    kind: "toolResult",
+    id: "edit-1",
+    name: "edit",
+    output: "Edited src/lib.rs",
+    details,
+    isError: false,
+  });
+});
+
+test("history projection restores exact turn metrics and estimates legacy turns", () => {
+  const exact = projectSessionHistory([
+    {
+      type: "message",
+      id: "user-exact",
+      parentId: null,
+      timestamp: "2026-08-04T01:02:03.000Z",
+      message: user("exact"),
+    },
+    {
+      type: "message",
+      id: "assistant-exact",
+      parentId: "user-exact",
+      timestamp: "2026-08-04T01:03:00.000Z",
+      message: assistant("done"),
+    },
+    {
+      type: "custom",
+      id: "metrics-exact",
+      parentId: "assistant-exact",
+      timestamp: "2026-08-04T01:03:08.000Z",
+      customType: TURN_METRICS_ENTRY_TYPE,
+      data: {
+        turnId: "turn-exact",
+        startedAt: "2026-08-04T01:02:03.000Z",
+        endedAt: "2026-08-04T01:03:08.000Z",
+        durationMs: 65_000,
+        futureField: "ignored",
+      },
+    },
+  ] as never);
+  assert.deepEqual(exact.at(-1), {
+    kind: "turnBoundary",
+    turnId: "turn-exact",
+    startedAt: "2026-08-04T01:02:03.000Z",
+    endedAt: "2026-08-04T01:03:08.000Z",
+    durationMs: 65_000,
+    estimated: false,
+  });
+
+  const legacy = projectSessionHistory([
+    {
+      type: "message",
+      id: "entry-legacy",
+      parentId: null,
+      timestamp: "2026-08-04T02:00:00.000Z",
+      message: user("legacy"),
+    },
+    {
+      type: "message",
+      id: "legacy-result",
+      parentId: "entry-legacy",
+      timestamp: "2026-08-04T02:00:12.000Z",
+      message: assistant("done"),
+    },
+    {
+      type: "custom_message",
+      id: "legacy-notice",
+      parentId: "legacy-result",
+      timestamp: "2026-08-04T02:00:13.000Z",
+      customType: "visible",
+      content: "after turn",
+      display: true,
+    },
+  ] as never);
+  assert.deepEqual(
+    legacy.find((item) => item.kind === "turnBoundary"),
+    {
+    kind: "turnBoundary",
+    turnId: "legacy-entry-legacy",
+    startedAt: "2026-08-04T02:00:00.000Z",
+    endedAt: "2026-08-04T02:00:12.000Z",
+    durationMs: 12_000,
+    estimated: true,
+    },
+  );
+  assert.deepEqual(
+    legacy.map((item) => item.kind),
+    ["user", "assistant", "turnBoundary", "notice"],
+  );
+});
+
 test("tree snapshot keeps active path, filters, folding, labels, and copy text", () => {
   const manager = SessionManager.inMemory("/tmp");
   const root = manager.appendMessage(user("root prompt"));
@@ -218,6 +348,14 @@ test("tree snapshot keeps active path, filters, folding, labels, and copy text",
 
   const all = buildTreeSnapshot(manager, "default", "", []);
   assert.ok(all.items.some((item) => item.entryId === abandoned));
+  assert.equal(
+    all.items.find((item) => item.entryId === root)?.preview,
+    "root prompt",
+  );
+  assert.equal(
+    all.items.find((item) => item.entryId === firstAnswer)?.preview,
+    "first answer",
+  );
   assert.ok(
     all.items.some(
       (item) => item.entryId === active && item.isActivePath && item.label === "checkpoint",
@@ -271,6 +409,10 @@ test("tree snapshot keeps active path, filters, folding, labels, and copy text",
   assert.ok(!folded.items.some((item) => item.entryId === active));
   assert.equal(
     copyTextForEntry(manager.getEntry(active)!),
+    "active branch",
+  );
+  assert.equal(
+    all.items.find((item) => item.entryId === active)?.preview,
     "active branch",
   );
 });

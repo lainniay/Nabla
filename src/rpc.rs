@@ -16,7 +16,7 @@ use tokio::{
     time::timeout,
 };
 
-// request timeout time
+// INFO: Keep one shared timeout policy for request/response correlation.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 pub const RPC_EVENT_BUFFER: usize = 2_048;
 
@@ -42,7 +42,7 @@ pub enum RpcError {
     InvalidData { command: String, message: String },
 }
 
-// RpcRequest, rust -> pi
+// INFO: Outbound requests flatten command parameters to match Pi's JSONL protocol.
 #[derive(Debug, Clone, Serialize)]
 pub struct RpcRequest {
     pub id: String,
@@ -70,7 +70,7 @@ impl RpcRequest {
     }
 }
 
-// RpcResponse: pi -> rust
+// INFO: Responses retain the command name so decoding failures remain actionable.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct RpcResponse {
     pub id: Option<String>,
@@ -114,7 +114,7 @@ impl RpcResponse {
     }
 }
 
-// Pi initiatively async event
+// INFO: Unsolicited events bypass request correlation and enter the app reducer.
 #[derive(Debug, Clone)]
 pub struct RpcEvent {
     pub kind: String,

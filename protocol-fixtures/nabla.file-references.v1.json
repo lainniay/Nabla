@@ -1,0 +1,12 @@
+{
+  "wire": "NABLA_FILE_REFERENCES_V1\n{\"version\":1,\"message\":\"Review @src/lib.rs\",\"references\":[{\"path\":\"src/lib.rs\",\"mode\":\"snapshot\",\"size\":12,\"content\":\"pub mod app;\"}]}",
+  "message": "Review @src/lib.rs",
+  "references": [
+    {
+      "path": "src/lib.rs",
+      "mode": "snapshot",
+      "size": 12,
+      "content": "pub mod app;"
+    }
+  ]
+}

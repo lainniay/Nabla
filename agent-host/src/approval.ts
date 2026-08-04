@@ -1,4 +1,9 @@
-export type ApprovalDecision = "allow" | "allow_goal" | "deny";
+export type ApprovalDecision =
+  | "allow"
+  | "allow_session"
+  | "allow_goal"
+  | "allow_forever"
+  | "deny";
 
 export interface ApprovalRequest {
   toolCallId: string;

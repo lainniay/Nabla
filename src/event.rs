@@ -2,6 +2,7 @@ use crossterm::event::Event as TerminalEvent;
 use serde_json::Value;
 
 use crate::{
+    file_references::{FileCandidate, PreparedPrompt, PromptDelivery},
     host::{
         ApprovalDecision, AuthLoginData, AuthProvider, HostPlanModeData, ModelListData,
         PlanExecutionData, PlanStateData, QueueClearData, SessionCommandData, SubagentStartData,
@@ -9,10 +10,9 @@ use crate::{
     },
     rpc::RpcEvent,
     state::{
-        AgentsSnapshot, ContextSnapshot, GoalSnapshot, GoalsSnapshot, PlanExecutionTarget,
-        ResourceSnapshot, SessionBrowserSnapshot, TreeSnapshot,
+        AgentsSnapshot, ApprovalRulesSnapshot, ContextSnapshot, GoalSnapshot, GoalsSnapshot,
+        PlanExecutionTarget, ResourceSnapshot, SessionBrowserSnapshot, TreeSnapshot,
     },
-    ui_types::UiInputEvent,
 };
 
 /// The only event type allowed to enter the application reducer.
@@ -28,14 +28,18 @@ pub enum AppEvent {
     Command(CommandEvent),
     /// Process and transport events that are not Pi protocol events.
     Runtime(RuntimeEvent),
-    /// Mouse coordinates translated through the renderer's semantic hit map.
-    UiInput(UiInputEvent),
-    /// A render cadence signal. It must not mutate application state by itself.
-    Tick,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandEvent {
+    FileSearchFinished {
+        generation: u64,
+        result: Result<Vec<FileCandidate>, String>,
+    },
+    ReferencesPrepared {
+        delivery: PromptDelivery,
+        result: Result<PreparedPrompt, String>,
+    },
     PromptFinished(Result<(), String>),
     AbortFinished(Result<(), String>),
     CompactFinished(Result<Value, String>),
@@ -43,6 +47,9 @@ pub enum CommandEvent {
     ResourcesFinished(Result<Box<ResourceSnapshot>, String>),
     ResourceReloadFinished(Result<Box<ResourceSnapshot>, String>),
     WorkspaceTrustFinished(Result<Box<ResourceSnapshot>, String>),
+    ApprovalRulesFinished(Result<Box<ApprovalRulesSnapshot>, String>),
+    ApprovalRuleRevoked(Result<Box<ApprovalRulesSnapshot>, String>),
+    ApprovalRulesCleared(Result<Box<ApprovalRulesSnapshot>, String>),
     GoalStateFinished(Result<Box<GoalSnapshot>, String>),
     GoalsFinished(Result<Box<GoalsSnapshot>, String>),
     GoalStarted(Result<Box<GoalSnapshot>, String>),
@@ -104,10 +111,4 @@ pub enum RuntimeEvent {
     HostDisconnected,
     TerminalError(String),
     TerminalClosed,
-}
-
-impl AppEvent {
-    pub fn is_tick(&self) -> bool {
-        matches!(self, Self::Tick)
-    }
 }
