@@ -12,8 +12,9 @@ use nabla::{
     pi_process::{PiProcessConfig, PiRuntime},
     runtime::{DispatchOutcome, EffectDispatcher},
     ui::{
-        FrameCoordinator, SceneBuilder, SurfaceKind, SurfaceManager, TerminalDriver, TerminalSize,
-        UiEvent, UiStore, animation_active,
+        CanonicalReflowProjection, CommittedHistoryBlock, FrameCoordinator, SceneBuilder,
+        SurfaceKind, SurfaceManager, TerminalDriver, TerminalSize, TranscriptStore, UiEvent,
+        UiStore, animation_active,
     },
 };
 use tokio::{
@@ -25,6 +26,23 @@ use tokio::{
 struct ResizeDebouncer {
     pending: Option<(TerminalSize, Instant)>,
     delay: Duration,
+}
+
+const CANONICAL_REPLAY_BATCH_ROWS: usize = 256;
+const CANONICAL_REPLAY_BATCH_BYTES: usize = 64 * 1024;
+
+#[derive(Debug)]
+struct CanonicalReplayState {
+    projection: CanonicalReflowProjection,
+    batches: Vec<Vec<CommittedHistoryBlock>>,
+    next_batch: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryProgress {
+    InProgress,
+    RestartRequired,
+    Complete,
 }
 
 impl ResizeDebouncer {
@@ -128,6 +146,7 @@ async fn run(
     let mut terminal_failures = 0usize;
     const RESIZE_DEBOUNCE: Duration = Duration::from_millis(75);
     let mut resize_debouncer = ResizeDebouncer::new(RESIZE_DEBOUNCE);
+    let mut canonical_replay = None;
 
     render(app, ui, terminal, &mut coordinator)?;
 
@@ -170,6 +189,7 @@ async fn run(
                 if let Ok(actual_size) = crossterm::terminal::size() {
                     let actual_size = TerminalSize::from(actual_size);
                     if actual_size != ui.state().terminal.size {
+                        canonical_replay = None;
                         let width_changed = actual_size.width != ui.state().terminal.size.width;
                         ui.reduce(UiEvent::Resize(actual_size));
                         app.set_selection_page_size(
@@ -185,19 +205,32 @@ async fn run(
                     now,
                     animate: animation_active(app.state()),
                 });
-                if resize_debouncer.due(now).is_some() {
-                    match render_resize_reflow(
+                let resize_due = resize_debouncer.due(now).is_some();
+                let recovery_ready = canonical_replay.is_some()
+                    || (ui.state().terminal.projection_requires_rebuild
+                        && (!resize_debouncer.is_pending() || resize_due));
+                if recovery_ready {
+                    match drive_canonical_recovery(
                         app,
                         ui,
                         terminal,
                         &mut coordinator,
                         ui_config.resize_reflow_max_rows,
+                        &mut canonical_replay,
                     ) {
-                        Ok(()) => {
-                            resize_debouncer.clear();
+                        Ok(RecoveryProgress::Complete) => {
+                            if resize_due {
+                                resize_debouncer.clear();
+                            }
                             terminal_failures = 0;
                         }
+                        Ok(RecoveryProgress::InProgress) => {}
+                        Ok(RecoveryProgress::RestartRequired) => {
+                            canonical_replay = None;
+                        }
                         Err(error) => {
+                            canonical_replay = None;
+                            ui.reduce(UiEvent::ProjectionInvalidated);
                             terminal_failures += 1;
                             if terminal_failures >= 3 {
                                 return Err(error.into());
@@ -224,6 +257,7 @@ async fn run(
         };
 
         if let AppEvent::Terminal(TerminalEvent::Resize(columns, rows)) = &event {
+            canonical_replay = None;
             let size = TerminalSize::new(*columns, *rows);
             let width_changed = size.width != ui.state().terminal.size.width;
             ui.reduce(UiEvent::Resize(size));
@@ -248,7 +282,32 @@ async fn run(
             }
         }
 
-        if !resize_debouncer.is_pending() {
+        let recovery_ready = canonical_replay.is_some()
+            || (ui.state().terminal.projection_requires_rebuild && !resize_debouncer.is_pending());
+        if recovery_ready {
+            match drive_canonical_recovery(
+                app,
+                ui,
+                terminal,
+                &mut coordinator,
+                ui_config.resize_reflow_max_rows,
+                &mut canonical_replay,
+            ) {
+                Ok(RecoveryProgress::Complete) => terminal_failures = 0,
+                Ok(RecoveryProgress::InProgress) => {}
+                Ok(RecoveryProgress::RestartRequired) => {
+                    canonical_replay = None;
+                }
+                Err(error) => {
+                    canonical_replay = None;
+                    ui.reduce(UiEvent::ProjectionInvalidated);
+                    terminal_failures += 1;
+                    if terminal_failures >= 3 {
+                        return Err(error.into());
+                    }
+                }
+            }
+        } else if !resize_debouncer.is_pending() {
             match render(app, ui, terminal, &mut coordinator) {
                 Ok(()) => terminal_failures = 0,
                 Err(error) => {
@@ -271,6 +330,11 @@ fn render(
     terminal: &mut TerminalDriver<std::io::Stdout>,
     coordinator: &mut FrameCoordinator,
 ) -> io::Result<()> {
+    if ui.state().terminal.projection_requires_rebuild {
+        return Err(io::Error::other(
+            "incremental render is disabled until canonical recovery",
+        ));
+    }
     let surface = SurfaceManager.route(app.state());
     let current_surface = ui.state().terminal.surface;
     if surface != current_surface {
@@ -285,51 +349,94 @@ fn render(
         ui.state().transcript.pending_history_budget(
             size.width,
             ui.state().revision,
-            1024,
-            512 * 1024,
+            CANONICAL_REPLAY_BATCH_ROWS,
+            CANONICAL_REPLAY_BATCH_BYTES,
         )
     } else {
         Vec::new()
     };
     let frame = SceneBuilder.build_with_history(app.state(), ui.state(), surface, &history);
     let plan = coordinator.plan(frame, surface, history);
-    coordinator.commit(terminal, &mut ui.state_mut().transcript, plan)
+    let result = coordinator.commit(terminal, &mut ui.state_mut().transcript, plan);
+    if result.is_err() {
+        ui.reduce(if surface == SurfaceKind::Primary {
+            UiEvent::ProjectionInvalidated
+        } else {
+            UiEvent::TerminalFailed
+        });
+    }
+    result
 }
 
-fn render_resize_reflow(
+fn drive_canonical_recovery(
     app: &mut App,
     ui: &mut UiStore,
     terminal: &mut TerminalDriver<std::io::Stdout>,
     coordinator: &mut FrameCoordinator,
     maximum_rows: usize,
-) -> io::Result<()> {
-    let size = ui.state().terminal.size;
-    ui.state().transcript.invalidate_render_caches();
-    let projection = ui.state().transcript.canonical_reflow_projection(
-        size.width,
-        ui.state().revision,
-        maximum_rows,
+    replay: &mut Option<CanonicalReplayState>,
+) -> io::Result<RecoveryProgress> {
+    if replay.is_none() {
+        let size = ui.state().terminal.size;
+        ui.state().transcript.invalidate_render_caches();
+        let projection = ui.state().transcript.canonical_reflow_projection(
+            size.width,
+            ui.state().revision,
+            maximum_rows,
+        );
+        let batches = TranscriptStore::canonical_reflow_batches(
+            &projection,
+            CANONICAL_REPLAY_BATCH_ROWS,
+            CANONICAL_REPLAY_BATCH_BYTES,
+        );
+        terminal.begin_canonical_reflow()?;
+        coordinator.invalidate();
+        *replay = Some(CanonicalReplayState {
+            projection,
+            batches,
+            next_batch: 0,
+        });
+    }
+
+    let compatible = ui.state().transcript.reflow_projection_is_compatible(
+        &replay
+            .as_ref()
+            .expect("canonical replay initialized")
+            .projection,
     );
+    if !compatible {
+        *replay = None;
+        return Ok(RecoveryProgress::RestartRequired);
+    }
+    let state = replay.as_mut().expect("canonical replay initialized");
+    if let Some(batch) = state.batches.get(state.next_batch) {
+        terminal.replay_canonical_history_batch(batch)?;
+        state.next_batch += 1;
+        return Ok(RecoveryProgress::InProgress);
+    }
+
+    let projection = state.projection.clone();
     let mut preview = ui.state().clone();
     if !preview.transcript.apply_reflow_projection(&projection) {
         return Err(io::Error::other(
-            "unable to stage canonical resize projection",
+            "canonical history changed incompatibly during replay",
         ));
     }
     let frame = SceneBuilder.build(app.state(), &preview, SurfaceKind::Primary, 0);
-    let plan = coordinator.plan_resize_reflow(frame, &projection);
-    coordinator.commit_resize_reflow(
+    let plan = coordinator.plan_canonical_reflow_frame(frame);
+    coordinator.finish_canonical_reflow(
         terminal,
         &mut ui.state_mut().transcript,
         plan,
         &projection,
     )?;
     ui.reduce(UiEvent::ProjectionRebuilt);
+    *replay = None;
 
     if SurfaceManager.route(app.state()) == SurfaceKind::Alternate {
         render(app, ui, terminal, coordinator)?;
     }
-    Ok(())
+    Ok(RecoveryProgress::Complete)
 }
 
 fn spawn_terminal_reader(events: mpsc::Sender<AppEvent>) {

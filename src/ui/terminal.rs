@@ -195,6 +195,57 @@ impl<W: Write> TerminalDriver<W> {
         }
     }
 
+    pub fn begin_canonical_reflow(&mut self) -> io::Result<()> {
+        self.clear_scrollback_and_visible_screen()?;
+        // The screen is intentionally incomplete until every canonical batch
+        // and the active frame have been committed.
+        self.physical_valid = false;
+        Ok(())
+    }
+
+    pub fn replay_canonical_history_batch(
+        &mut self,
+        blocks: &[CommittedHistoryBlock],
+    ) -> io::Result<()> {
+        self.switch_surface(SurfaceKind::Primary)?;
+        let synchronized = self.capabilities.synchronized_output;
+        let begin_result = if synchronized {
+            queue!(self.output, BeginSynchronizedUpdate)
+        } else {
+            Ok(())
+        };
+        let result = begin_result.and_then(|()| {
+            let rows = blocks
+                .iter()
+                .flat_map(|block| block.rows.iter())
+                .collect::<Vec<_>>();
+            self.append_history_fullscreen(&rows)
+        });
+        let end_result = if synchronized {
+            queue!(self.output, EndSynchronizedUpdate)
+        } else {
+            Ok(())
+        };
+        let flush_result = self.output.flush();
+        let result = result.and(end_result).and(flush_result);
+        if let Err(error) = result {
+            self.physical_valid = false;
+            return Err(error);
+        }
+        // A successful batch is still not a complete physical projection.
+        self.physical_valid = false;
+        Ok(())
+    }
+
+    pub fn commit_canonical_reflow_frame(&mut self, plan: &TerminalCommitPlan) -> io::Result<()> {
+        if plan.surface != SurfaceKind::Primary || !plan.history_blocks.is_empty() {
+            return Err(io::Error::other(
+                "canonical reflow finalization requires a history-free primary frame",
+            ));
+        }
+        self.commit_internal(plan, false)
+    }
+
     fn commit_internal(
         &mut self,
         plan: &TerminalCommitPlan,
@@ -964,6 +1015,21 @@ impl FrameCoordinator {
         }
     }
 
+    pub fn plan_canonical_reflow_frame(&self, frame: VisualFrame) -> TerminalCommitPlan {
+        let cursor = frame.cursor;
+        let panel = frame.panel.clone();
+        TerminalCommitPlan {
+            revision: frame.revision,
+            surface: SurfaceKind::Primary,
+            history_scroll_rows: 0,
+            history_blocks: Vec::new(),
+            frame_update: FrameUpdate::Full(frame),
+            panel,
+            cursor,
+            full_redraw: true,
+        }
+    }
+
     pub fn commit_resize_reflow<W: Write>(
         &mut self,
         driver: &mut TerminalDriver<W>,
@@ -988,6 +1054,39 @@ impl FrameCoordinator {
                 self.terminal_invalid = true;
                 Err(io::Error::other(
                     "canonical transcript changed during resize reflow",
+                ))
+            }
+            Err(error) => {
+                self.terminal_invalid = true;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn finish_canonical_reflow<W: Write>(
+        &mut self,
+        driver: &mut TerminalDriver<W>,
+        transcript: &mut TranscriptStore,
+        plan: TerminalCommitPlan,
+        projection: &CanonicalReflowProjection,
+    ) -> io::Result<()> {
+        let FrameUpdate::Full(next_frame) = &plan.frame_update else {
+            return Err(io::Error::other(
+                "canonical reflow requires a complete active frame",
+            ));
+        };
+        match driver.commit_canonical_reflow_frame(&plan) {
+            Ok(()) if transcript.apply_reflow_projection(projection) => {
+                self.committed_revision = plan.revision;
+                self.previous_frame = Some(next_frame.clone());
+                self.previous_surface = SurfaceKind::Primary;
+                self.terminal_invalid = false;
+                Ok(())
+            }
+            Ok(()) => {
+                self.terminal_invalid = true;
+                Err(io::Error::other(
+                    "canonical transcript changed incompatibly during replay",
                 ))
             }
             Err(error) => {
@@ -1352,7 +1451,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_reflow_purges_before_replaying_canonical_history() {
+    fn destructive_reflow_purges_before_replaying_canonical_history() {
         let mut driver = TerminalDriver::new(
             Vec::<u8>::new(),
             TerminalCapabilities {
@@ -1490,5 +1589,165 @@ mod tests {
         assert_eq!(transcript.committed_cursor(), 1);
         assert_eq!(coordinator.previous_frame.as_ref().unwrap().revision, 7);
         assert!(!coordinator.terminal_invalid);
+    }
+
+    #[test]
+    fn session_replacement_purges_previous_native_history() {
+        fn block(id: &str, text: &str) -> CommittedHistoryBlock {
+            CommittedHistoryBlock {
+                component_id: id.to_owned(),
+                source_revision: 1,
+                row_offset: 0,
+                total_rows: 1,
+                rows: vec![VisualRow {
+                    component_id: id.to_owned(),
+                    logical_line: 0,
+                    wrap_index: 0,
+                    cells: vec![StyledCell::new(
+                        text,
+                        text.len() as u16,
+                        CellStyle::default(),
+                    )],
+                }],
+            }
+        }
+
+        let mut driver = TerminalDriver::new(
+            Vec::<u8>::new(),
+            TerminalCapabilities {
+                synchronized_output: false,
+                true_color: false,
+                mouse: false,
+            },
+            TerminalSize::new(40, 4),
+        );
+        driver.begin_canonical_reflow().unwrap();
+        driver
+            .replay_canonical_history_batch(&[block("a", "session-A")])
+            .unwrap();
+        driver.begin_canonical_reflow().unwrap();
+        driver
+            .replay_canonical_history_batch(&[block("b", "session-B")])
+            .unwrap();
+
+        let output = String::from_utf8_lossy(driver.output_ref());
+        let current_projection = output.rsplit("\u{1b}[3J").next().unwrap();
+        assert!(!current_projection.contains("session-A"));
+        assert_eq!(current_projection.matches("session-B").count(), 1);
+
+        driver.begin_canonical_reflow().unwrap();
+        driver
+            .replay_canonical_history_batch(&[block("b", "session-B")])
+            .unwrap();
+        let output = String::from_utf8_lossy(driver.output_ref());
+        let repeated_projection = output.rsplit("\u{1b}[3J").next().unwrap();
+        assert_eq!(repeated_projection.matches("session-B").count(), 1);
+    }
+
+    #[test]
+    fn terminal_failure_after_partial_history_batch_requires_a_fresh_destructive_replay() {
+        #[derive(Default)]
+        struct FailOnceOnSecondRow {
+            output: Vec<u8>,
+            failed: bool,
+        }
+
+        impl Write for FailOnceOnSecondRow {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                if !self.failed && buffer.windows(6).any(|window| window == b"second") {
+                    self.failed = true;
+                    return Err(io::Error::other("injected row failure"));
+                }
+                self.output.extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let rows = ["first", "second"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| VisualRow {
+                component_id: "large".to_owned(),
+                logical_line: index,
+                wrap_index: 0,
+                cells: vec![StyledCell::new(
+                    text,
+                    text.len() as u16,
+                    CellStyle::default(),
+                )],
+            })
+            .collect::<Vec<_>>();
+        let batch = vec![CommittedHistoryBlock {
+            component_id: "large".to_owned(),
+            source_revision: 1,
+            row_offset: 0,
+            total_rows: 2,
+            rows,
+        }];
+        let mut driver = TerminalDriver::new(
+            FailOnceOnSecondRow::default(),
+            TerminalCapabilities {
+                synchronized_output: true,
+                true_color: false,
+                mouse: false,
+            },
+            TerminalSize::new(40, 4),
+        );
+        driver.begin_canonical_reflow().unwrap();
+
+        assert!(driver.replay_canonical_history_batch(&batch).is_err());
+        assert!(!driver.physical_valid());
+        assert!(String::from_utf8_lossy(&driver.output_ref().output).contains("\u{1b}[?2026l"));
+
+        driver.begin_canonical_reflow().unwrap();
+        driver.replay_canonical_history_batch(&batch).unwrap();
+        let output = String::from_utf8_lossy(&driver.output_ref().output);
+        let recovered = output.rsplit("\u{1b}[3J").next().unwrap();
+        assert_eq!(recovered.matches("first").count(), 1);
+        assert_eq!(recovered.matches("second").count(), 1);
+    }
+
+    #[test]
+    fn flush_failure_ends_synchronized_output_and_invalidates_physical_state() {
+        #[derive(Default)]
+        struct FailFirstFlush {
+            output: Vec<u8>,
+            failed: bool,
+        }
+
+        impl Write for FailFirstFlush {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                self.output.extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                if !self.failed {
+                    self.failed = true;
+                    return Err(io::Error::other("injected flush failure"));
+                }
+                Ok(())
+            }
+        }
+
+        let mut driver = TerminalDriver::new(
+            FailFirstFlush::default(),
+            TerminalCapabilities {
+                synchronized_output: true,
+                true_color: false,
+                mouse: false,
+            },
+            TerminalSize::new(40, 4),
+        );
+
+        assert!(driver.begin_canonical_reflow().is_err());
+        let output = String::from_utf8_lossy(&driver.output_ref().output);
+        assert!(output.contains("\u{1b}[?2026h"));
+        assert!(output.contains("\u{1b}[?2026l"));
+        assert!(!driver.physical_valid());
     }
 }

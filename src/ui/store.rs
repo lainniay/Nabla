@@ -7,7 +7,7 @@ use crate::state::AppState;
 
 use super::{
     transcript::TranscriptStore,
-    types::{ComponentId, SurfaceKind, TerminalSize},
+    types::{ComponentId, SurfaceKind, TerminalSize, TranscriptSyncOutcome},
 };
 
 pub type OverlayId = u64;
@@ -189,7 +189,7 @@ pub struct TerminalUiState {
     pub size: TerminalSize,
     pub surface: SurfaceKind,
     pub terminal_invalid: bool,
-    pub projection_reflow_pending: bool,
+    pub projection_requires_rebuild: bool,
 }
 
 impl Default for TerminalUiState {
@@ -198,7 +198,7 @@ impl Default for TerminalUiState {
             size: TerminalSize::new(1, 1),
             surface: SurfaceKind::Primary,
             terminal_invalid: true,
-            projection_reflow_pending: false,
+            projection_requires_rebuild: false,
         }
     }
 }
@@ -313,21 +313,32 @@ impl UiStore {
     }
 
     pub fn synchronize(&mut self, domain: &AppState) -> ReduceResult {
-        if self.state.transcript.sync(domain) {
-            self.bump();
-            ReduceResult {
-                changed: true,
-                invalidation: Invalidation {
-                    scene: true,
-                    layout: true,
-                    terminal: true,
-                    full_redraw: false,
-                },
-            }
-        } else {
-            ReduceResult {
+        let outcome = self.state.transcript.sync(domain);
+        match outcome {
+            TranscriptSyncOutcome::Unchanged => ReduceResult {
                 changed: false,
                 invalidation: Invalidation::default(),
+            },
+            TranscriptSyncOutcome::AppendOnly => {
+                self.bump();
+                ReduceResult {
+                    changed: true,
+                    invalidation: Invalidation {
+                        scene: true,
+                        layout: true,
+                        terminal: true,
+                        full_redraw: false,
+                    },
+                }
+            }
+            TranscriptSyncOutcome::ProjectionInvalidated => {
+                self.state.terminal.terminal_invalid = true;
+                self.state.terminal.projection_requires_rebuild = true;
+                self.bump();
+                ReduceResult {
+                    changed: true,
+                    invalidation: Invalidation::all(),
+                }
             }
         }
     }
@@ -341,7 +352,7 @@ impl UiStore {
                 self.state.terminal.size = size;
                 self.state.terminal.terminal_invalid = true;
                 if width_changed {
-                    self.state.terminal.projection_reflow_pending = true;
+                    self.state.terminal.projection_requires_rebuild = true;
                 }
                 invalidation = Invalidation::all();
                 true
@@ -349,14 +360,14 @@ impl UiStore {
             UiEvent::Resize(_) => false,
             UiEvent::ProjectionInvalidated => {
                 self.state.terminal.terminal_invalid = true;
-                self.state.terminal.projection_reflow_pending = true;
+                self.state.terminal.projection_requires_rebuild = true;
                 invalidation = Invalidation::all();
                 true
             }
             UiEvent::ProjectionRebuilt => {
-                let changed = self.state.terminal.projection_reflow_pending
+                let changed = self.state.terminal.projection_requires_rebuild
                     || self.state.terminal.terminal_invalid;
-                self.state.terminal.projection_reflow_pending = false;
+                self.state.terminal.projection_requires_rebuild = false;
                 self.state.terminal.terminal_invalid = false;
                 changed
             }
@@ -417,12 +428,18 @@ impl UiStore {
             UiEvent::EnterAlternate | UiEvent::LeaveAlternate => false,
             UiEvent::TerminalFailed => {
                 self.state.terminal.terminal_invalid = true;
+                if self.state.terminal.surface == SurfaceKind::Primary {
+                    self.state.terminal.projection_requires_rebuild = true;
+                }
                 invalidation.full_redraw = true;
                 true
             }
             UiEvent::TerminalRecovered => {
-                let changed = self.state.terminal.terminal_invalid;
-                self.state.terminal.terminal_invalid = false;
+                let changed = self.state.terminal.terminal_invalid
+                    && !self.state.terminal.projection_requires_rebuild;
+                if changed {
+                    self.state.terminal.terminal_invalid = false;
+                }
                 changed
             }
             UiEvent::AsyncResult {
@@ -449,6 +466,27 @@ impl UiStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        rpc::PiState,
+        state::{AppState, TranscriptItem},
+    };
+
+    fn domain() -> AppState {
+        AppState::new(PiState {
+            model: None,
+            thinking_level: "off".to_owned(),
+            is_streaming: false,
+            is_compacting: false,
+            steering_mode: "one-at-a-time".to_owned(),
+            follow_up_mode: "one-at-a-time".to_owned(),
+            session_file: None,
+            session_id: "store-test".to_owned(),
+            session_name: None,
+            auto_compaction_enabled: true,
+            message_count: 0,
+            pending_message_count: 0,
+        })
+    }
 
     #[test]
     fn resize_derives_the_full_viewport_and_invalidates_old_geometry() {
@@ -457,6 +495,43 @@ mod tests {
         assert!(result.changed);
         assert!(result.invalidation.full_redraw);
         assert_eq!(store.state().terminal.size, TerminalSize::new(80, 24));
+        assert!(store.state().terminal.projection_requires_rebuild);
+    }
+
+    #[test]
+    fn session_replacement_marks_projection_for_destructive_rebuild() {
+        let mut domain = domain();
+        domain
+            .transcript
+            .push(TranscriptItem::Notice("session A".to_owned()));
+        let mut store = UiStore::new(TerminalSize::new(80, 24));
+        store.synchronize(&domain);
+        store.reduce(UiEvent::ProjectionRebuilt);
+        assert!(!store.state().terminal.projection_requires_rebuild);
+
+        domain.session_epoch += 1;
+        domain.transcript[0] = TranscriptItem::Notice("session B".to_owned());
+        let result = store.synchronize(&domain);
+
+        assert!(result.invalidation.full_redraw);
+        assert!(store.state().terminal.projection_requires_rebuild);
+        assert!(store.state().terminal.terminal_invalid);
+    }
+
+    #[test]
+    fn primary_terminal_failure_requires_canonical_rebuild() {
+        let mut store = UiStore::new(TerminalSize::new(80, 24));
+        store.reduce(UiEvent::TerminalFailed);
+        assert!(store.state().terminal.terminal_invalid);
+        assert!(store.state().terminal.projection_requires_rebuild);
+
+        store.reduce(UiEvent::TerminalRecovered);
+        assert!(store.state().terminal.terminal_invalid);
+        assert!(store.state().terminal.projection_requires_rebuild);
+
+        store.reduce(UiEvent::ProjectionRebuilt);
+        assert!(!store.state().terminal.terminal_invalid);
+        assert!(!store.state().terminal.projection_requires_rebuild);
     }
 
     #[test]

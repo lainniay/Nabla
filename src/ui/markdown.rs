@@ -249,15 +249,45 @@ pub fn scan(source: &str, finished: bool) -> MarkdownScan {
         });
     }
 
-    let stable_prefix_bytes = blocks
+    let mut stable_prefix_bytes = blocks
         .iter()
         .take_while(|block| block.complete)
         .last()
         .map_or(0, |block| block.end);
+    if !finished
+        && let Some(reference_sensitive) = blocks.iter().find(|block| {
+            block.end <= stable_prefix_bytes
+                && contains_reference_sensitive_syntax(&source[block.start..block.end])
+        })
+    {
+        // CommonMark reference definitions are document-global: a later
+        // `[label]: url` can change how an earlier `[text][label]` or
+        // shortcut `[label]` renders. Keep that block and everything after it
+        // mutable until the message is sealed.
+        stable_prefix_bytes = reference_sensitive.start;
+    }
     MarkdownScan {
         blocks,
         stable_prefix_bytes,
     }
+}
+
+fn contains_reference_sensitive_syntax(source: &str) -> bool {
+    source.lines().any(|line| {
+        let mut rest = line;
+        while let Some(open) = rest.find('[') {
+            rest = &rest[open + 1..];
+            let Some(close) = rest.find(']') else {
+                break;
+            };
+            let after = rest[close + 1..].chars().next();
+            if after != Some('(') {
+                return true;
+            }
+            rest = &rest[close + 1..];
+        }
+        false
+    })
 }
 
 /// Render CommonMark plus the extensions used by Codex into terminal-native
@@ -1468,6 +1498,53 @@ mod tests {
                 MarkdownBlockKind::Html,
             ]
         );
+    }
+
+    #[test]
+    fn stable_prefix_rows_are_suffix_invariant_across_markdown_structures() {
+        let cases = [
+            ("- item\n  continuation\n\nmutable", " tail"),
+            ("> quote\n> continuation\n\nmutable", " tail"),
+            ("```rust\nfn main() {}\n```\n\nmutable", " tail"),
+            ("| a | b |\n|---|---|\n| 1 | 2 |\n\nmutable", " tail"),
+            ("<div>\nbody\n</div>\n\nmutable", " tail"),
+            ("你好 👩🏽‍💻 wide text\n\nmutable", " 尾部"),
+        ];
+        for (prefix, suffix) in cases {
+            let mut incremental = IncrementalMarkdown::default();
+            let scan = incremental.update(prefix, false);
+            assert!(
+                scan.stable_prefix_bytes > 0,
+                "case did not expose a stable prefix: {prefix:?}"
+            );
+            let stable = render(
+                &prefix[..scan.stable_prefix_bytes],
+                "suffix-invariance",
+                18,
+                CellStyle::foreground(Color::White),
+            );
+            let full = render(
+                &format!("{prefix}{suffix}"),
+                "suffix-invariance",
+                18,
+                CellStyle::foreground(Color::White),
+            );
+            assert_eq!(
+                full.get(..stable.len()),
+                Some(stable.as_slice()),
+                "stable rows changed after suffix growth for {prefix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reference_style_links_remain_mutable_until_completion() {
+        let source = "Earlier [documentation][docs].\n\nmutable";
+        let partial = scan(source, false);
+        assert_eq!(partial.stable_prefix_bytes, 0);
+
+        let completed = format!("{source}\n\n[docs]: https://example.com");
+        assert_eq!(scan(&completed, true).stable_prefix_bytes, completed.len());
     }
 
     #[test]

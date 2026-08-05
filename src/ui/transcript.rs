@@ -14,7 +14,8 @@ use super::{
     text::{display_width, truncate, wrap_file_references, wrap_styled_lines, wrap_text},
     types::{
         AssistantContentKind, AssistantSegment, AssistantSegmentPhase, CanonicalReflowProjection,
-        CellStyle, Color, CommittedHistoryBlock, ComponentId, StyledCell, VisualRow,
+        CellStyle, Color, CommittedHistoryBlock, ComponentId, StyledCell, TranscriptSyncOutcome,
+        VisualRow,
     },
 };
 
@@ -158,7 +159,7 @@ pub struct TranscriptStore {
 }
 
 impl TranscriptStore {
-    pub fn sync(&mut self, state: &AppState) -> bool {
+    pub fn sync(&mut self, state: &AppState) -> TranscriptSyncOutcome {
         let epoch_changed = self.session_epoch != state.session_epoch;
         if epoch_changed {
             self.session_epoch = state.session_epoch;
@@ -261,8 +262,11 @@ impl TranscriptStore {
                             .zip(components.get(new_id))
                             .is_some_and(|(old, new)| old.as_ref() == new.as_ref())
                 });
-        if !prefix_unchanged || !partial_component_unchanged || order.len() < self.committed_cursor
-        {
+        let projection_invalidated = epoch_changed
+            || !prefix_unchanged
+            || !partial_component_unchanged
+            || order.len() < self.committed_cursor;
+        if projection_invalidated {
             self.committed_cursor = 0;
             self.committed_row_offset = 0;
             self.phases.clear();
@@ -275,7 +279,13 @@ impl TranscriptStore {
             self.revision = self.revision.saturating_add(1);
             self.refresh_phases();
         }
-        changed
+        if projection_invalidated {
+            TranscriptSyncOutcome::ProjectionInvalidated
+        } else if changed {
+            TranscriptSyncOutcome::AppendOnly
+        } else {
+            TranscriptSyncOutcome::Unchanged
+        }
     }
 
     fn refresh_phases(&mut self) {
@@ -544,6 +554,7 @@ impl TranscriptStore {
 
         CanonicalReflowProjection {
             canonical_revision: self.revision,
+            session_epoch: self.session_epoch,
             source_revision,
             width,
             omitted_components: selected_start,
@@ -554,7 +565,22 @@ impl TranscriptStore {
     }
 
     pub fn apply_reflow_projection(&mut self, projection: &CanonicalReflowProjection) -> bool {
-        if projection.canonical_revision != self.revision
+        if !self.reflow_projection_is_compatible(projection) {
+            return false;
+        }
+
+        self.committed_cursor = projection.history_end_cursor;
+        self.committed_row_offset = 0;
+        self.phases.clear();
+        self.refresh_phases();
+        for id in &self.order[..self.committed_cursor] {
+            self.phases.insert(id.clone(), ComponentPhase::Committed);
+        }
+        true
+    }
+
+    pub fn reflow_projection_is_compatible(&self, projection: &CanonicalReflowProjection) -> bool {
+        if projection.session_epoch != self.session_epoch
             || projection.history_end_cursor > self.order.len()
             || projection.omitted_components > projection.history_end_cursor
         {
@@ -570,15 +596,91 @@ impl TranscriptStore {
         {
             return false;
         }
-
-        self.committed_cursor = projection.history_end_cursor;
-        self.committed_row_offset = 0;
-        self.phases.clear();
-        self.refresh_phases();
-        for id in &self.order[..self.committed_cursor] {
-            self.phases.insert(id.clone(), ComponentPhase::Committed);
+        if projected_ids
+            .iter()
+            .zip(&projection.history_blocks)
+            .any(|(id, block)| {
+                self.components.get(id).is_none_or(|component| {
+                    let rows = component.render(projection.width);
+                    rows != block.rows || rows.len() != block.total_rows
+                })
+            })
+        {
+            return false;
         }
         true
+    }
+
+    pub fn canonical_reflow_batches(
+        projection: &CanonicalReflowProjection,
+        maximum_rows: usize,
+        maximum_bytes: usize,
+    ) -> Vec<Vec<CommittedHistoryBlock>> {
+        let maximum_rows = maximum_rows.max(1);
+        let maximum_bytes = maximum_bytes.max(1);
+        let mut batches = Vec::<Vec<CommittedHistoryBlock>>::new();
+        let mut current = Vec::<CommittedHistoryBlock>::new();
+        let mut current_rows = 0usize;
+        let mut current_bytes = 0usize;
+
+        for block in &projection.history_blocks {
+            let mut row_offset = 0usize;
+            while row_offset < block.rows.len() {
+                let row = &block.rows[row_offset];
+                let row_bytes = row
+                    .cells
+                    .iter()
+                    .map(|cell| cell.symbol.len())
+                    .sum::<usize>();
+                if !current.is_empty()
+                    && (current_rows >= maximum_rows
+                        || current_bytes.saturating_add(row_bytes) > maximum_bytes)
+                {
+                    batches.push(std::mem::take(&mut current));
+                    current_rows = 0;
+                    current_bytes = 0;
+                }
+
+                let physical_offset = row_offset;
+                let mut selected = Vec::new();
+                while row_offset < block.rows.len() && current_rows < maximum_rows {
+                    let candidate = &block.rows[row_offset];
+                    let candidate_bytes = candidate
+                        .cells
+                        .iter()
+                        .map(|cell| cell.symbol.len())
+                        .sum::<usize>();
+                    if !selected.is_empty()
+                        && current_bytes.saturating_add(candidate_bytes) > maximum_bytes
+                    {
+                        break;
+                    }
+                    selected.push(candidate.clone());
+                    row_offset += 1;
+                    current_rows += 1;
+                    current_bytes = current_bytes.saturating_add(candidate_bytes);
+                    if current_bytes >= maximum_bytes {
+                        break;
+                    }
+                }
+                current.push(CommittedHistoryBlock {
+                    component_id: block.component_id.clone(),
+                    source_revision: block.source_revision,
+                    row_offset: physical_offset,
+                    total_rows: block.total_rows,
+                    rows: selected,
+                });
+                if current_rows >= maximum_rows || current_bytes >= maximum_bytes {
+                    batches.push(std::mem::take(&mut current));
+                    current_rows = 0;
+                    current_bytes = 0;
+                }
+            }
+        }
+        if !current.is_empty() {
+            batches.push(current);
+        }
+        batches
     }
 }
 
@@ -1852,7 +1954,7 @@ mod tests {
             TranscriptItem::Notice("later".to_owned()),
         ];
         let mut store = TranscriptStore::default();
-        assert!(store.sync(&state));
+        assert_eq!(store.sync(&state), TranscriptSyncOutcome::AppendOnly);
         let pending = store.pending_history(80, 1, 24);
         assert_eq!(pending.len(), 1);
         assert_eq!(store.committed_cursor(), 0);
@@ -2099,6 +2201,66 @@ mod tests {
     }
 
     #[test]
+    fn projection_invalid_sync_outcomes_distinguish_safe_tail_updates() {
+        let mut state = state();
+        state.transcript = vec![
+            TranscriptItem::Notice("committed".to_owned()),
+            TranscriptItem::Assistant(AssistantMessage {
+                id: 91,
+                text: "live".to_owned(),
+                text_revision: 1,
+                complete: false,
+                ..AssistantMessage::default()
+            }),
+        ];
+        let mut store = TranscriptStore::default();
+        assert_eq!(store.sync(&state), TranscriptSyncOutcome::AppendOnly);
+        let pending = store.pending_history(40, 1, 100);
+        store.acknowledge_history(&pending);
+        assert_eq!(store.committed_cursor(), 1);
+        let replay = store.canonical_reflow_projection(40, 2, 0);
+
+        let TranscriptItem::Assistant(message) = state.transcript.last_mut().unwrap() else {
+            unreachable!()
+        };
+        message.text.push_str(" tail");
+        message.text_revision += 1;
+        assert_eq!(store.sync(&state), TranscriptSyncOutcome::AppendOnly);
+        assert_eq!(store.committed_cursor(), 1);
+        assert!(store.reflow_projection_is_compatible(&replay));
+
+        state
+            .transcript
+            .push(TranscriptItem::Notice("appended".to_owned()));
+        assert_eq!(store.sync(&state), TranscriptSyncOutcome::AppendOnly);
+        assert_eq!(store.committed_cursor(), 1);
+
+        state.transcript[0] = TranscriptItem::Notice("replaced".to_owned());
+        assert_eq!(
+            store.sync(&state),
+            TranscriptSyncOutcome::ProjectionInvalidated
+        );
+        assert_eq!(store.committed_cursor(), 0);
+        assert!(!store.reflow_projection_is_compatible(&replay));
+    }
+
+    #[test]
+    fn session_epoch_change_always_invalidates_projection() {
+        let mut state = state();
+        state
+            .transcript
+            .push(TranscriptItem::Notice("session A".to_owned()));
+        let mut store = TranscriptStore::default();
+        assert_eq!(store.sync(&state), TranscriptSyncOutcome::AppendOnly);
+        state.session_epoch += 1;
+        state.transcript[0] = TranscriptItem::Notice("session B".to_owned());
+        assert_eq!(
+            store.sync(&state),
+            TranscriptSyncOutcome::ProjectionInvalidated
+        );
+    }
+
+    #[test]
     fn resize_reflow_limit_keeps_recent_complete_components() {
         let mut state = state();
         state.transcript = vec![
@@ -2149,6 +2311,41 @@ mod tests {
             store.render_canonical_history(12).len(),
             projection.history_blocks[0].rows.len()
         );
+    }
+
+    #[test]
+    fn canonical_replay_batches_split_physical_rows_without_loss() {
+        let mut state = state();
+        state.transcript.push(TranscriptItem::User(UserMessage {
+            text: (0..10_100)
+                .map(|line| format!("line-{line}\n"))
+                .collect::<String>(),
+            status: UserMessageStatus::Accepted,
+        }));
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+        let projection = store.canonical_reflow_projection(80, 1, 0);
+        let batches = TranscriptStore::canonical_reflow_batches(&projection, 128, 64 * 1024);
+
+        assert!(batches.len() > 70);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| { batch.iter().map(|block| block.rows.len()).sum::<usize>() <= 128 })
+        );
+        let replayed = batches
+            .iter()
+            .flat_map(|batch| batch.iter())
+            .flat_map(|block| block.rows.iter())
+            .map(VisualRow::plain_text)
+            .collect::<Vec<_>>();
+        let canonical = projection
+            .history_blocks
+            .iter()
+            .flat_map(|block| block.rows.iter())
+            .map(VisualRow::plain_text)
+            .collect::<Vec<_>>();
+        assert_eq!(replayed, canonical);
     }
 
     #[test]

@@ -2,6 +2,13 @@ use std::collections::HashMap;
 
 pub type ComponentId = String;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptSyncOutcome {
+    Unchanged,
+    AppendOnly,
+    ProjectionInvalidated,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AssistantContentKind {
     Thinking,
@@ -303,6 +310,7 @@ pub struct CommittedHistoryBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalReflowProjection {
     pub canonical_revision: u64,
+    pub session_epoch: u64,
     pub source_revision: u64,
     pub width: u16,
     /// Canonical prefix omitted by the configured physical replay window.
