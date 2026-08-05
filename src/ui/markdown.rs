@@ -40,6 +40,64 @@ pub struct MarkdownScan {
     pub stable_prefix_bytes: usize,
 }
 
+/// Append-oriented scanner state. Once a block has crossed
+/// `stable_prefix_bytes`, later updates never scan it again.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IncrementalMarkdown {
+    source: String,
+    stable_blocks: Vec<MarkdownBlock>,
+    stable_prefix_bytes: usize,
+    scanned_bytes: usize,
+}
+
+impl IncrementalMarkdown {
+    pub fn update(&mut self, source: &str, finished: bool) -> MarkdownScan {
+        let append = source.starts_with(&self.source)
+            && self.stable_prefix_bytes <= source.len()
+            && source.is_char_boundary(self.stable_prefix_bytes);
+        if !append {
+            self.stable_blocks.clear();
+            self.stable_prefix_bytes = 0;
+        }
+
+        let tail_start = self.stable_prefix_bytes;
+        let tail = &source[tail_start..];
+        self.scanned_bytes = self.scanned_bytes.saturating_add(tail.len());
+        let tail_scan = scan(tail, finished);
+        let mut blocks = self.stable_blocks.clone();
+        blocks.extend(tail_scan.blocks.into_iter().map(|mut block| {
+            block.start += tail_start;
+            block.end += tail_start;
+            block
+        }));
+        let stable_prefix_bytes = tail_start.saturating_add(tail_scan.stable_prefix_bytes);
+
+        self.stable_blocks = blocks
+            .iter()
+            .take_while(|block| block.complete && block.end <= stable_prefix_bytes)
+            .cloned()
+            .collect();
+        self.stable_prefix_bytes = stable_prefix_bytes;
+        self.source.clear();
+        self.source.push_str(source);
+
+        debug_assert!(source.is_char_boundary(stable_prefix_bytes));
+        MarkdownScan {
+            blocks,
+            stable_prefix_bytes,
+        }
+    }
+
+    pub fn stable_prefix_bytes(&self) -> usize {
+        self.stable_prefix_bytes
+    }
+
+    #[cfg(test)]
+    fn scanned_bytes(&self) -> usize {
+        self.scanned_bytes
+    }
+}
+
 pub fn scan(source: &str, finished: bool) -> MarkdownScan {
     let lines = line_ranges(source);
     let mut blocks = Vec::new();
@@ -72,7 +130,7 @@ pub fn scan(source: &str, finished: bool) -> MarkdownScan {
                 kind: MarkdownBlockKind::Fence,
                 start: block_start,
                 end: block_end,
-                complete: closed || finished,
+                complete: finished || (closed && block_end < source.len()),
             });
             continue;
         }
@@ -100,7 +158,7 @@ pub fn scan(source: &str, finished: bool) -> MarkdownScan {
                 kind: MarkdownBlockKind::Html,
                 start: block_start,
                 end: block_end,
-                complete: closed || finished,
+                complete: finished || (closed && block_end < source.len()),
             });
             continue;
         }
@@ -138,7 +196,7 @@ pub fn scan(source: &str, finished: bool) -> MarkdownScan {
                 kind: MarkdownBlockKind::Heading,
                 start,
                 end,
-                complete: finished || end < source.len() || source.ends_with('\n'),
+                complete: finished || end < source.len(),
             });
             index += 1;
             continue;
@@ -1312,6 +1370,77 @@ mod tests {
 
         let stable = scan("Hello | world\n\nnext", false);
         assert!(stable.stable_prefix_bytes >= "Hello | world\n".len());
+    }
+
+    #[test]
+    fn stable_paragraph_is_not_reparsed_after_tail_growth() {
+        let mut incremental = IncrementalMarkdown::default();
+        let first = "stable paragraph\n\nmutable";
+        let scan = incremental.update(first, false);
+        assert_eq!(scan.stable_prefix_bytes, "stable paragraph\n".len());
+        let scanned = incremental.scanned_bytes();
+
+        let second = "stable paragraph\n\nmutable tail";
+        incremental.update(second, false);
+        assert_eq!(
+            incremental.scanned_bytes() - scanned,
+            second.len() - "stable paragraph\n".len()
+        );
+    }
+
+    #[test]
+    fn unfinished_paragraph_remains_mutable() {
+        let mut incremental = IncrementalMarkdown::default();
+        assert_eq!(
+            incremental
+                .update("still growing", false)
+                .stable_prefix_bytes,
+            0
+        );
+    }
+
+    #[test]
+    fn unfinished_fenced_code_remains_mutable() {
+        let mut incremental = IncrementalMarkdown::default();
+        assert_eq!(
+            incremental
+                .update("```rust\nfn main()", false)
+                .stable_prefix_bytes,
+            0
+        );
+    }
+
+    #[test]
+    fn table_rows_remain_mutable_until_table_end() {
+        let mut incremental = IncrementalMarkdown::default();
+        let table = "| a | b |\n|---|---|\n| 1 | 2 |";
+        assert_eq!(incremental.update(table, false).stable_prefix_bytes, 0);
+        assert_eq!(
+            incremental
+                .update(&format!("{table}\n\nnext"), false)
+                .stable_prefix_bytes,
+            table.len() + 1
+        );
+    }
+
+    #[test]
+    fn utf8_stable_boundary_is_valid() {
+        let source = "你好，世界\n\n尾部";
+        let mut incremental = IncrementalMarkdown::default();
+        let scan = incremental.update(source, false);
+        assert!(source.is_char_boundary(scan.stable_prefix_bytes));
+        assert_eq!(&source[..scan.stable_prefix_bytes], "你好，世界\n");
+    }
+
+    #[test]
+    fn completion_seals_remaining_tail() {
+        let mut incremental = IncrementalMarkdown::default();
+        let source = "unfinished paragraph";
+        assert_eq!(incremental.update(source, false).stable_prefix_bytes, 0);
+        assert_eq!(
+            incremental.update(source, true).stable_prefix_bytes,
+            source.len()
+        );
     }
 
     #[test]

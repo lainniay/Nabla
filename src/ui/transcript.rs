@@ -1,4 +1,8 @@
-use std::{collections::HashMap, io, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    sync::{Arc, Mutex},
+};
 
 use crate::state::{
     AppState, ToolDiff, ToolDiffFile, ToolDiffLine, ToolDiffLineKind, ToolExecution, ToolStatus,
@@ -8,7 +12,10 @@ use crate::state::{
 use super::{
     markdown, palette, shell,
     text::{display_width, truncate, wrap_file_references, wrap_styled_lines, wrap_text},
-    types::{CellStyle, Color, CommittedHistoryBlock, ComponentId, StyledCell, VisualRow},
+    types::{
+        AssistantContentKind, AssistantSegment, AssistantSegmentPhase, CanonicalReflowProjection,
+        CellStyle, Color, CommittedHistoryBlock, ComponentId, StyledCell, VisualRow,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,12 +26,27 @@ pub enum ComponentPhase {
     Committed,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+type RenderCacheKey = (u16, u64, u64);
+type RenderCache = Arc<Mutex<HashMap<RenderCacheKey, Vec<VisualRow>>>>;
+
+#[derive(Debug, Clone)]
 pub struct TranscriptBlock {
     pub id: ComponentId,
     pub item: TranscriptItem,
+    pub assistant_segment: Option<AssistantSegment>,
     leading_blank: bool,
     trailing_blank: bool,
+    render_cache: RenderCache,
+}
+
+impl PartialEq for TranscriptBlock {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.item == other.item
+            && self.assistant_segment == other.assistant_segment
+            && self.leading_blank == other.leading_blank
+            && self.trailing_blank == other.trailing_blank
+    }
 }
 
 pub trait TranscriptComponent {
@@ -40,6 +62,14 @@ impl TranscriptComponent for TranscriptBlock {
     }
 
     fn phase(&self) -> ComponentPhase {
+        if let Some(segment) = &self.assistant_segment {
+            return match segment.phase {
+                AssistantSegmentPhase::Streaming => ComponentPhase::Streaming,
+                AssistantSegmentPhase::Stable => ComponentPhase::Stable,
+                AssistantSegmentPhase::Sealed => ComponentPhase::Sealed,
+                AssistantSegmentPhase::Committed => ComponentPhase::Committed,
+            };
+        }
         match &self.item {
             TranscriptItem::User(message) => match message.status {
                 UserMessageStatus::Pending => ComponentPhase::Streaming,
@@ -73,13 +103,40 @@ impl TranscriptComponent for TranscriptBlock {
 
 impl TranscriptBlock {
     pub fn render_animated(&self, width: u16, animation_frame: u8) -> Vec<VisualRow> {
-        let mut rows = render_item(&self.id, &self.item, width, animation_frame);
+        let animated = matches!(
+            &self.item,
+            TranscriptItem::Tool(tool)
+                if matches!(tool.status, ToolStatus::WaitingApproval | ToolStatus::Running)
+        );
+        let cache_key = (
+            width,
+            palette::THEME_REVISION,
+            u64::from(animated) * u64::from(animation_frame),
+        );
+        if let Some(rows) = self
+            .render_cache
+            .lock()
+            .expect("transcript render cache poisoned")
+            .get(&cache_key)
+            .cloned()
+        {
+            return rows;
+        }
+        let mut rows = if let Some(segment) = &self.assistant_segment {
+            render_assistant_segment(&self.id, &self.item, segment, width)
+        } else {
+            render_item(&self.id, &self.item, width, animation_frame)
+        };
         if self.leading_blank {
             rows.insert(0, VisualRow::blank(self.id.clone()));
         }
         if self.trailing_blank {
             rows.push(VisualRow::blank(self.id.clone()));
         }
+        self.render_cache
+            .lock()
+            .expect("transcript render cache poisoned")
+            .insert(cache_key, rows.clone());
         rows
     }
 }
@@ -95,16 +152,51 @@ pub struct TranscriptStore {
     pub revision: u64,
     phases: HashMap<ComponentId, ComponentPhase>,
     committed_cursor: usize,
+    committed_row_offset: usize,
+    session_epoch: u64,
+    assistant_scans: HashMap<(u64, u64, AssistantContentKind), markdown::IncrementalMarkdown>,
 }
 
 impl TranscriptStore {
     pub fn sync(&mut self, state: &AppState) -> bool {
-        let mut changed = self.order.len() != state.transcript.len();
+        let epoch_changed = self.session_epoch != state.session_epoch;
+        if epoch_changed {
+            self.session_epoch = state.session_epoch;
+            self.committed_cursor = 0;
+            self.committed_row_offset = 0;
+            self.phases.clear();
+            self.assistant_scans.clear();
+        }
         let mut order = Vec::with_capacity(state.transcript.len());
         let mut components = HashMap::with_capacity(state.transcript.len());
         let mut occurrences = HashMap::<String, usize>::new();
+        let mut active_scan_keys = HashSet::new();
 
         for (index, item) in state.transcript.iter().enumerate() {
+            let leading_blank = index == 0 && matches!(item, TranscriptItem::User(_))
+                || index > 0
+                    && (transcript_group(&state.transcript[index - 1]) != transcript_group(item)
+                        || matches!(
+                            (&state.transcript[index - 1], item),
+                            (TranscriptItem::Tool(_), TranscriptItem::Tool(_))
+                        ));
+            if let TranscriptItem::Assistant(message) = item {
+                let mut projected = project_assistant(
+                    message,
+                    state.session_epoch,
+                    u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
+                    &mut self.assistant_scans,
+                    &mut active_scan_keys,
+                );
+                if let Some(first) = projected.first_mut() {
+                    first.leading_blank = leading_blank;
+                }
+                for block in projected {
+                    insert_projected_block(block, &self.components, &mut order, &mut components);
+                }
+                continue;
+            }
+
             let base = match item {
                 TranscriptItem::Tool(tool) => format!("tool:{}", tool.id),
                 TranscriptItem::TurnSeparator(separator) => {
@@ -119,29 +211,30 @@ impl TranscriptStore {
                 format!("{base}:{}", *occurrence)
             };
             *occurrence += 1;
-            let block = Arc::new(TranscriptBlock {
+            let block = TranscriptBlock {
                 id: id.clone(),
                 item: item.clone(),
-                leading_blank: index == 0 && matches!(item, TranscriptItem::User(_))
-                    || index > 0
-                        && (transcript_group(&state.transcript[index - 1])
-                            != transcript_group(item)
-                            || matches!(
-                                (&state.transcript[index - 1], item),
-                                (TranscriptItem::Tool(_), TranscriptItem::Tool(_))
-                            )),
+                assistant_segment: None,
+                leading_blank,
                 trailing_blank: false,
-            });
-            changed |= self
-                .components
-                .get(&id)
-                .is_none_or(|previous| previous.as_ref() != block.as_ref());
-            order.push(id.clone());
-            components.insert(id, block);
+                render_cache: Arc::new(Mutex::new(HashMap::new())),
+            };
+            insert_projected_block(block, &self.components, &mut order, &mut components);
         }
+        self.assistant_scans
+            .retain(|key, _| active_scan_keys.contains(key));
+
+        let mut changed = epoch_changed
+            || self.order != order
+            || order.iter().any(|id| {
+                self.components
+                    .get(id)
+                    .zip(components.get(id))
+                    .is_none_or(|(old, new)| old.as_ref() != new.as_ref())
+            });
 
         // A branch/session replacement may reuse positional IDs. Its canonical
-        // projection starts over; committed terminal snapshots remain immutable.
+        // projection starts over; semantic components remain available to reflow.
         let prefix_unchanged = self
             .order
             .iter()
@@ -153,10 +246,25 @@ impl TranscriptStore {
                         .components
                         .get(old_id)
                         .zip(components.get(new_id))
-                        .is_some_and(|(old, new)| old.item == new.item)
+                        .is_some_and(|(old, new)| old.as_ref() == new.as_ref())
             });
-        if !prefix_unchanged || order.len() < self.committed_cursor {
+        let partial_component_unchanged = self.committed_row_offset == 0
+            || self
+                .order
+                .get(self.committed_cursor)
+                .zip(order.get(self.committed_cursor))
+                .is_some_and(|(old_id, new_id)| {
+                    old_id == new_id
+                        && self
+                            .components
+                            .get(old_id)
+                            .zip(components.get(new_id))
+                            .is_some_and(|(old, new)| old.as_ref() == new.as_ref())
+                });
+        if !prefix_unchanged || !partial_component_unchanged || order.len() < self.committed_cursor
+        {
             self.committed_cursor = 0;
+            self.committed_row_offset = 0;
             self.phases.clear();
             changed = true;
         }
@@ -190,6 +298,10 @@ impl TranscriptStore {
         self.committed_cursor
     }
 
+    pub fn committed_row_offset(&self) -> usize {
+        self.committed_row_offset
+    }
+
     pub fn active_components(&self) -> impl Iterator<Item = &Arc<TranscriptBlock>> {
         self.order[self.committed_cursor.min(self.order.len())..]
             .iter()
@@ -209,33 +321,105 @@ impl TranscriptStore {
             .filter_map(|id| self.components.get(id))
     }
 
+    pub fn active_rows_after_history(
+        &self,
+        width: u16,
+        animation_frame: u8,
+        pending: &[CommittedHistoryBlock],
+    ) -> Vec<VisualRow> {
+        let mut rows = Vec::new();
+        for (component_index, id) in self.order.iter().enumerate().skip(self.committed_cursor) {
+            let Some(component) = self.components.get(id) else {
+                continue;
+            };
+            let rendered = component.render_animated(width, animation_frame);
+            let mut start = if component_index == self.committed_cursor {
+                self.committed_row_offset.min(rendered.len())
+            } else {
+                0
+            };
+            if let Some(block) = pending.iter().find(|block| &block.component_id == id)
+                && block.row_offset == start
+            {
+                start = start.saturating_add(block.rows.len()).min(rendered.len());
+            }
+            rows.extend(rendered.into_iter().skip(start));
+        }
+        rows
+    }
+
     pub fn pending_history(
         &self,
         width: u16,
         source_revision: u64,
-        maximum_rows: u16,
+        maximum_rows: usize,
     ) -> Vec<CommittedHistoryBlock> {
+        self.pending_history_budget(width, source_revision, maximum_rows, usize::MAX)
+    }
+
+    pub fn pending_history_budget(
+        &self,
+        width: u16,
+        source_revision: u64,
+        maximum_rows: usize,
+        maximum_bytes: usize,
+    ) -> Vec<CommittedHistoryBlock> {
+        if maximum_rows == 0 || maximum_bytes == 0 {
+            return Vec::new();
+        }
         let mut blocks = Vec::new();
-        let mut rows = 0u16;
-        for id in self.order.iter().skip(self.committed_cursor) {
-            if self.phase(id) != Some(ComponentPhase::Sealed) {
+        let mut remaining_rows = maximum_rows;
+        let mut remaining_bytes = maximum_bytes;
+        for (component_index, id) in self.order.iter().enumerate().skip(self.committed_cursor) {
+            if !matches!(
+                self.phase(id),
+                Some(ComponentPhase::Stable | ComponentPhase::Sealed)
+            ) {
                 break;
             }
             let Some(component) = self.components.get(id) else {
                 break;
             };
             let rendered = component.render(width.max(1));
-            let rendered_rows = u16::try_from(rendered.len()).unwrap_or(u16::MAX);
-            if !blocks.is_empty() && rows.saturating_add(rendered_rows) > maximum_rows {
+            let row_offset = if component_index == self.committed_cursor {
+                self.committed_row_offset.min(rendered.len())
+            } else {
+                0
+            };
+            let mut selected = Vec::new();
+            for row in rendered.iter().skip(row_offset) {
+                if remaining_rows == 0 {
+                    break;
+                }
+                let row_bytes = row
+                    .cells
+                    .iter()
+                    .map(|cell| cell.symbol.len())
+                    .sum::<usize>();
+                if row_bytes > remaining_bytes {
+                    if selected.is_empty() && blocks.is_empty() {
+                        // Always make progress for one oversized physical row.
+                        selected.push(row.clone());
+                        remaining_rows = remaining_rows.saturating_sub(1);
+                        remaining_bytes = 0;
+                    }
+                    break;
+                }
+                selected.push(row.clone());
+                remaining_rows -= 1;
+                remaining_bytes = remaining_bytes.saturating_sub(row_bytes);
+            }
+            if selected.is_empty() {
                 break;
             }
-            rows = rows.saturating_add(rendered_rows);
             blocks.push(CommittedHistoryBlock {
                 component_id: id.clone(),
                 source_revision,
-                rows: rendered,
+                row_offset,
+                total_rows: rendered.len(),
+                rows: selected,
             });
-            if rows >= maximum_rows {
+            if remaining_rows == 0 || remaining_bytes == 0 {
                 break;
             }
         }
@@ -249,16 +433,302 @@ impl TranscriptStore {
             if expected != Some(&block.component_id) {
                 break;
             }
-            self.phases
-                .insert(block.component_id.clone(), ComponentPhase::Committed);
-            self.committed_cursor += 1;
+            if block.row_offset != self.committed_row_offset || block.rows.is_empty() {
+                break;
+            }
+            let acknowledged = block.row_offset.saturating_add(block.rows.len());
+            if acknowledged < block.total_rows {
+                self.committed_row_offset = acknowledged;
+                break;
+            }
+            if acknowledged == block.total_rows {
+                self.phases
+                    .insert(block.component_id.clone(), ComponentPhase::Committed);
+                self.committed_cursor += 1;
+                self.committed_row_offset = 0;
+            } else {
+                break;
+            }
         }
     }
 
     pub fn reset_projection(&mut self) {
         self.committed_cursor = 0;
+        self.committed_row_offset = 0;
         self.phases.clear();
         self.refresh_phases();
+    }
+
+    pub fn render_canonical_history(&self, width: u16) -> Vec<VisualRow> {
+        self.order
+            .iter()
+            .filter_map(|id| self.components.get(id))
+            .flat_map(|component| component.render(width.max(1)))
+            .collect()
+    }
+
+    pub fn rebuild_projection(&mut self, width: u16) -> Vec<VisualRow> {
+        self.reset_projection();
+        self.render_canonical_history(width)
+    }
+
+    pub fn invalidate_render_caches(&self) {
+        for component in self.components.values() {
+            component
+                .render_cache
+                .lock()
+                .expect("transcript render cache poisoned")
+                .clear();
+        }
+    }
+
+    pub fn canonical_reflow_projection(
+        &self,
+        width: u16,
+        source_revision: u64,
+        maximum_rows: usize,
+    ) -> CanonicalReflowProjection {
+        let width = width.max(1);
+        let history_end_cursor = self
+            .order
+            .iter()
+            .position(|id| {
+                !matches!(
+                    self.phase(id),
+                    Some(
+                        ComponentPhase::Stable | ComponentPhase::Sealed | ComponentPhase::Committed
+                    )
+                )
+            })
+            .unwrap_or(self.order.len());
+        let rendered = self.order[..history_end_cursor]
+            .iter()
+            .filter_map(|id| {
+                self.components
+                    .get(id)
+                    .map(|component| (id.clone(), component.render(width)))
+            })
+            .collect::<Vec<_>>();
+
+        let mut selected_start = rendered.len();
+        let mut selected_rows = 0usize;
+        for (index, (_, rows)) in rendered.iter().enumerate().rev() {
+            if maximum_rows > 0
+                && selected_start < rendered.len()
+                && selected_rows.saturating_add(rows.len()) > maximum_rows
+            {
+                break;
+            }
+            selected_start = index;
+            selected_rows = selected_rows.saturating_add(rows.len());
+            if maximum_rows > 0 && selected_rows >= maximum_rows {
+                break;
+            }
+        }
+
+        let history_blocks = rendered[selected_start..]
+            .iter()
+            .map(|(component_id, rows)| CommittedHistoryBlock {
+                component_id: component_id.clone(),
+                source_revision,
+                row_offset: 0,
+                total_rows: rows.len(),
+                rows: rows.clone(),
+            })
+            .collect::<Vec<_>>();
+        let active_rows = self.order[history_end_cursor..]
+            .iter()
+            .filter_map(|id| self.components.get(id))
+            .flat_map(|component| component.render(width))
+            .collect();
+
+        CanonicalReflowProjection {
+            canonical_revision: self.revision,
+            source_revision,
+            width,
+            omitted_components: selected_start,
+            history_end_cursor,
+            history_blocks,
+            active_rows,
+        }
+    }
+
+    pub fn apply_reflow_projection(&mut self, projection: &CanonicalReflowProjection) -> bool {
+        if projection.canonical_revision != self.revision
+            || projection.history_end_cursor > self.order.len()
+            || projection.omitted_components > projection.history_end_cursor
+        {
+            return false;
+        }
+        let projected_ids =
+            &self.order[projection.omitted_components..projection.history_end_cursor];
+        if projected_ids.len() != projection.history_blocks.len()
+            || projected_ids
+                .iter()
+                .zip(&projection.history_blocks)
+                .any(|(id, block)| id != &block.component_id)
+        {
+            return false;
+        }
+
+        self.committed_cursor = projection.history_end_cursor;
+        self.committed_row_offset = 0;
+        self.phases.clear();
+        self.refresh_phases();
+        for id in &self.order[..self.committed_cursor] {
+            self.phases.insert(id.clone(), ComponentPhase::Committed);
+        }
+        true
+    }
+}
+
+fn insert_projected_block(
+    block: TranscriptBlock,
+    previous: &HashMap<ComponentId, Arc<TranscriptBlock>>,
+    order: &mut Vec<ComponentId>,
+    components: &mut HashMap<ComponentId, Arc<TranscriptBlock>>,
+) {
+    let id = block.id.clone();
+    let block = previous
+        .get(&id)
+        .filter(|previous| previous.as_ref() == &block)
+        .cloned()
+        .unwrap_or_else(|| Arc::new(block));
+    order.push(id.clone());
+    components.insert(id, block);
+}
+
+fn project_assistant(
+    message: &crate::state::AssistantMessage,
+    state_epoch: u64,
+    fallback_message_id: u64,
+    scans: &mut HashMap<(u64, u64, AssistantContentKind), markdown::IncrementalMarkdown>,
+    active_keys: &mut HashSet<(u64, u64, AssistantContentKind)>,
+) -> Vec<TranscriptBlock> {
+    let epoch = if message.session_epoch == 0 {
+        state_epoch
+    } else {
+        message.session_epoch
+    };
+    let message_id = if message.id == 0 {
+        fallback_message_id
+    } else {
+        message.id
+    };
+    let mut blocks = Vec::new();
+    project_assistant_content(
+        epoch,
+        message_id,
+        AssistantContentKind::Thinking,
+        &message.thinking,
+        message.thinking_revision,
+        message.complete || !message.text.is_empty(),
+        scans,
+        active_keys,
+        &mut blocks,
+    );
+    project_assistant_content(
+        epoch,
+        message_id,
+        AssistantContentKind::Text,
+        &message.text,
+        message.text_revision,
+        message.complete,
+        scans,
+        active_keys,
+        &mut blocks,
+    );
+    let block_count = blocks.len();
+    for (index, block) in blocks.iter_mut().enumerate() {
+        block.trailing_blank |= index + 1 < block_count;
+    }
+    blocks
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_assistant_content(
+    epoch: u64,
+    message_id: u64,
+    content_kind: AssistantContentKind,
+    source: &str,
+    content_revision: u64,
+    finished: bool,
+    scans: &mut HashMap<(u64, u64, AssistantContentKind), markdown::IncrementalMarkdown>,
+    active_keys: &mut HashSet<(u64, u64, AssistantContentKind)>,
+    output: &mut Vec<TranscriptBlock>,
+) {
+    if source.is_empty() {
+        return;
+    }
+    let key = (epoch, message_id, content_kind);
+    active_keys.insert(key);
+    let scanner = scans.entry(key).or_default();
+    let previously_stable = scanner.stable_prefix_bytes();
+    let scan = scanner.update(source, finished);
+    for (segment_index, block) in scan.blocks.into_iter().enumerate() {
+        if block.start >= block.end || !source.is_char_boundary(block.start) {
+            continue;
+        }
+        let first_in_message = output.is_empty();
+        let phase = if block.complete {
+            if block.end <= previously_stable {
+                AssistantSegmentPhase::Stable
+            } else if finished {
+                AssistantSegmentPhase::Sealed
+            } else {
+                AssistantSegmentPhase::Stable
+            }
+        } else {
+            AssistantSegmentPhase::Streaming
+        };
+        let segment_revision = if block.complete {
+            u64::try_from(block.end).unwrap_or(u64::MAX)
+        } else {
+            content_revision
+        };
+        let content = source[block.start..block.end].to_owned();
+        let mut projected_message = crate::state::AssistantMessage {
+            id: message_id,
+            session_epoch: epoch,
+            complete: block.complete,
+            ..crate::state::AssistantMessage::default()
+        };
+        match content_kind {
+            AssistantContentKind::Thinking => {
+                projected_message.thinking = content;
+                projected_message.thinking_revision = segment_revision;
+            }
+            AssistantContentKind::Text => {
+                projected_message.text = content;
+                projected_message.text_revision = segment_revision;
+            }
+        }
+        let kind = match content_kind {
+            AssistantContentKind::Thinking => "thinking",
+            AssistantContentKind::Text => "text",
+        };
+        let id = format!("assistant:{epoch}:{message_id}:{kind}:segment:{segment_index}");
+        output.push(TranscriptBlock {
+            id,
+            item: TranscriptItem::Assistant(projected_message),
+            assistant_segment: Some(AssistantSegment {
+                message_id,
+                session_epoch: epoch,
+                segment_index,
+                first_in_message,
+                content_kind,
+                byte_start: block.start,
+                byte_end: block.end,
+                content_revision: segment_revision,
+                phase,
+            }),
+            leading_blank: false,
+            trailing_blank: block.complete
+                && source
+                    .get(block.end..)
+                    .is_some_and(|tail| tail.starts_with('\n')),
+            render_cache: Arc::new(Mutex::new(HashMap::new())),
+        });
     }
 }
 
@@ -279,6 +749,33 @@ fn transcript_group(item: &TranscriptItem) -> TranscriptGroup {
         TranscriptItem::TurnSeparator(_) => TranscriptGroup::Turn,
         _ => TranscriptGroup::Other,
     }
+}
+
+fn render_assistant_segment(
+    id: &str,
+    item: &TranscriptItem,
+    segment: &AssistantSegment,
+    width: u16,
+) -> Vec<VisualRow> {
+    let TranscriptItem::Assistant(message) = item else {
+        return render_item(id, item, width, 0);
+    };
+    let marker_style = CellStyle::foreground(Color::Magenta);
+    let content_width = width.saturating_sub(2).max(1);
+    let (source, style) = match segment.content_kind {
+        AssistantContentKind::Thinking => (
+            if segment.segment_index == 0 {
+                format!("*Thinking*\n\n{}", message.thinking)
+            } else {
+                message.thinking.clone()
+            },
+            CellStyle::foreground(palette::THINKING_TEXT).italic(),
+        ),
+        AssistantContentKind::Text => (message.text.clone(), CellStyle::foreground(palette::TEXT)),
+    };
+    let mut rows = markdown::render(&source, id, content_width, style);
+    prefix_assistant_rows(&mut rows, marker_style, style, segment.first_in_message);
+    rows
 }
 
 fn render_item(id: &str, item: &TranscriptItem, width: u16, animation_frame: u8) -> Vec<VisualRow> {
@@ -1368,6 +1865,345 @@ mod tests {
     }
 
     #[test]
+    fn stable_prefix_segments_commit_before_the_streaming_tail() {
+        let mut state = state();
+        state
+            .transcript
+            .push(TranscriptItem::Assistant(AssistantMessage {
+                id: 7,
+                text: "first paragraph\n\nsecond paragraph\n\nmutable".to_owned(),
+                text_revision: 1,
+                complete: false,
+                ..AssistantMessage::default()
+            }));
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+
+        assert_eq!(store.order.len(), 3);
+        assert_eq!(store.phase(&store.order[0]), Some(ComponentPhase::Stable));
+        assert_eq!(store.phase(&store.order[1]), Some(ComponentPhase::Stable));
+        assert_eq!(
+            store.phase(&store.order[2]),
+            Some(ComponentPhase::Streaming)
+        );
+        let stable_ids = store.order[..2].to_vec();
+        let pending = store.pending_history(80, 1, 100);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|block| block.component_id.clone())
+                .collect::<Vec<_>>(),
+            stable_ids
+        );
+        store.acknowledge_history(&pending);
+        assert_eq!(store.committed_cursor(), 2);
+        assert_eq!(store.active_components().count(), 1);
+
+        let TranscriptItem::Assistant(message) = &mut state.transcript[0] else {
+            unreachable!()
+        };
+        message.text.push_str(" tail");
+        message.text_revision += 1;
+        store.sync(&state);
+        assert_eq!(&store.order[..2], stable_ids.as_slice());
+        assert_eq!(store.committed_cursor(), 2);
+    }
+
+    #[test]
+    fn fenced_code_and_tables_remain_streaming_until_structurally_complete() {
+        for source in [
+            "```rust\nfn main() {}",
+            "| key | value |\n|---|---|\n| one | two |",
+        ] {
+            let mut state = state();
+            state
+                .transcript
+                .push(TranscriptItem::Assistant(AssistantMessage {
+                    id: 9,
+                    text: source.to_owned(),
+                    text_revision: 1,
+                    complete: false,
+                    ..AssistantMessage::default()
+                }));
+            let mut store = TranscriptStore::default();
+            store.sync(&state);
+            assert!(store.pending_history(80, 1, 100).is_empty());
+            assert_eq!(
+                store.phase(&store.order[0]),
+                Some(ComponentPhase::Streaming)
+            );
+        }
+    }
+
+    #[test]
+    fn history_batches_acknowledge_rows_before_the_whole_segment() {
+        let mut state = state();
+        let body = (0..64)
+            .map(|index| format!("line {index}\n"))
+            .collect::<String>();
+        state
+            .transcript
+            .push(TranscriptItem::Assistant(AssistantMessage {
+                id: 11,
+                text: format!("```text\n{body}```"),
+                text_revision: 1,
+                complete: true,
+                ..AssistantMessage::default()
+            }));
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+
+        let first = store.pending_history(24, 1, 7);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].row_offset, 0);
+        assert_eq!(first[0].rows.len(), 7);
+        assert!(first[0].total_rows > first[0].rows.len());
+        store.acknowledge_history(&first);
+        assert_eq!(store.committed_cursor(), 0);
+        assert_eq!(store.committed_row_offset(), 7);
+
+        let second = store.pending_history(24, 2, 7);
+        assert_eq!(second[0].row_offset, 7);
+    }
+
+    #[test]
+    fn history_offsets_are_usize_beyond_u16() {
+        let id = "large".to_owned();
+        let block = Arc::new(TranscriptBlock {
+            id: id.clone(),
+            item: TranscriptItem::Notice("large".to_owned()),
+            assistant_segment: None,
+            leading_blank: false,
+            trailing_blank: false,
+            render_cache: Arc::new(Mutex::new(HashMap::new())),
+        });
+        let mut store = TranscriptStore::default();
+        store.order.push(id.clone());
+        store.components.insert(id.clone(), block);
+        store.phases.insert(id.clone(), ComponentPhase::Sealed);
+        store.acknowledge_history(&[CommittedHistoryBlock {
+            component_id: id,
+            source_revision: 1,
+            row_offset: 0,
+            total_rows: 70_000,
+            rows: vec![VisualRow::blank("large"); 65_536],
+        }]);
+        assert_eq!(store.committed_cursor(), 0);
+        assert_eq!(store.committed_row_offset(), 65_536);
+    }
+
+    #[test]
+    fn stable_render_rows_are_cached_per_width() {
+        let mut state = state();
+        state
+            .transcript
+            .push(TranscriptItem::Assistant(AssistantMessage {
+                id: 12,
+                text: "cached paragraph".to_owned(),
+                text_revision: 1,
+                complete: true,
+                ..AssistantMessage::default()
+            }));
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+        let block = store.active_components().next().unwrap();
+        block.render(40);
+        block.render(40);
+        assert_eq!(block.render_cache.lock().unwrap().len(), 1);
+        block.render(20);
+        assert_eq!(block.render_cache.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn projection_reset_reflows_canonical_segments_at_the_new_width() {
+        let mut state = state();
+        state
+            .transcript
+            .push(TranscriptItem::Assistant(AssistantMessage {
+                id: 13,
+                text: "This canonical sentence is intentionally long enough to wrap differently."
+                    .to_owned(),
+                text_revision: 1,
+                complete: true,
+                ..AssistantMessage::default()
+            }));
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+        let ids = store.order.clone();
+        let wide = store.pending_history(80, 1, 100);
+        let wide_rows = wide.iter().map(|block| block.rows.len()).sum::<usize>();
+        store.acknowledge_history(&wide);
+        assert_eq!(store.committed_cursor(), store.order.len());
+
+        store.reset_projection();
+        let narrow = store.pending_history(20, 2, 100);
+        let narrow_rows = narrow.iter().map(|block| block.rows.len()).sum::<usize>();
+        assert_eq!(store.order, ids);
+        assert!(narrow_rows > wide_rows);
+        assert_eq!(store.committed_cursor(), 0);
+    }
+
+    #[test]
+    fn canonical_resize_reflow_preserves_ids_and_separates_active_tail() {
+        let mut state = state();
+        state.transcript = vec![
+            TranscriptItem::User(UserMessage {
+                text: "A user message that wraps at narrow widths".to_owned(),
+                status: UserMessageStatus::Accepted,
+            }),
+            TranscriptItem::Notice("canonical notice".to_owned()),
+            TranscriptItem::Assistant(AssistantMessage {
+                id: 14,
+                text: "mutable streaming tail".to_owned(),
+                text_revision: 1,
+                complete: false,
+                ..AssistantMessage::default()
+            }),
+        ];
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+        let ids = store.order.clone();
+
+        let wide = store.canonical_reflow_projection(80, 1, 0);
+        let narrow = store.canonical_reflow_projection(20, 2, 0);
+        let wide_rows = wide
+            .history_blocks
+            .iter()
+            .map(|block| block.rows.len())
+            .sum::<usize>();
+        let narrow_rows = narrow
+            .history_blocks
+            .iter()
+            .map(|block| block.rows.len())
+            .sum::<usize>();
+
+        assert_eq!(store.order, ids);
+        assert_eq!(
+            wide.history_blocks
+                .iter()
+                .map(|block| &block.component_id)
+                .collect::<Vec<_>>(),
+            narrow
+                .history_blocks
+                .iter()
+                .map(|block| &block.component_id)
+                .collect::<Vec<_>>()
+        );
+        assert!(narrow_rows > wide_rows);
+        assert!(
+            narrow
+                .active_rows
+                .iter()
+                .any(|row| row.plain_text().contains("mutable"))
+        );
+    }
+
+    #[test]
+    fn resize_reflow_limit_keeps_recent_complete_components() {
+        let mut state = state();
+        state.transcript = vec![
+            TranscriptItem::Notice("one".to_owned()),
+            TranscriptItem::Notice("two".to_owned()),
+            TranscriptItem::Notice("three".to_owned()),
+        ];
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+
+        let limited = store.canonical_reflow_projection(80, 1, 2);
+        assert_eq!(limited.omitted_components, 1);
+        assert_eq!(limited.history_blocks.len(), 2);
+        assert_eq!(
+            limited
+                .history_blocks
+                .iter()
+                .map(|block| block.rows[0].plain_text())
+                .collect::<Vec<_>>(),
+            vec!["! Notice · two", "! Notice · three"]
+        );
+
+        let unlimited = store.canonical_reflow_projection(80, 2, 0);
+        assert_eq!(unlimited.omitted_components, 0);
+        assert_eq!(unlimited.history_blocks.len(), 3);
+    }
+
+    #[test]
+    fn resize_reflow_never_splits_an_oversized_component() {
+        let mut state = state();
+        state.transcript.push(TranscriptItem::User(UserMessage {
+            text: "word ".repeat(200),
+            status: UserMessageStatus::Accepted,
+        }));
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+
+        let projection = store.canonical_reflow_projection(12, 1, 3);
+        assert_eq!(projection.history_blocks.len(), 1);
+        assert!(projection.history_blocks[0].rows.len() > 3);
+        assert_eq!(
+            projection.history_blocks[0].rows.len(),
+            projection.history_blocks[0].total_rows
+        );
+        assert!(store.apply_reflow_projection(&projection));
+        assert_eq!(store.committed_cursor(), store.order.len());
+        assert_eq!(
+            store.render_canonical_history(12).len(),
+            projection.history_blocks[0].rows.len()
+        );
+    }
+
+    #[test]
+    fn streaming_resize_then_completion_matches_uninterrupted_rendering() {
+        let initial = "Stable paragraph.\n\n```rust\nfn main() {";
+        let completed = concat!(
+            "Stable paragraph.\n\n",
+            "```rust\nfn main() {}\n```\n\n",
+            "| a | b |\n|---|---|\n| 1 | 2 |\n"
+        );
+        let mut resized_state = state();
+        resized_state
+            .transcript
+            .push(TranscriptItem::Assistant(AssistantMessage {
+                id: 44,
+                text: initial.to_owned(),
+                text_revision: 1,
+                complete: false,
+                ..AssistantMessage::default()
+            }));
+        let mut resized = TranscriptStore::default();
+        resized.sync(&resized_state);
+        let projection = resized.canonical_reflow_projection(24, 1, 0);
+        assert!(resized.apply_reflow_projection(&projection));
+
+        let TranscriptItem::Assistant(message) = resized_state.transcript.last_mut().unwrap()
+        else {
+            unreachable!()
+        };
+        message.text = completed.to_owned();
+        message.text_revision = 2;
+        message.complete = true;
+        resized.sync(&resized_state);
+
+        let mut uninterrupted = TranscriptStore::default();
+        uninterrupted.sync(&resized_state);
+        assert_eq!(
+            resized
+                .render_canonical_history(24)
+                .into_iter()
+                .map(|row| row.plain_text())
+                .collect::<Vec<_>>(),
+            uninterrupted
+                .render_canonical_history(24)
+                .into_iter()
+                .map(|row| row.plain_text())
+                .collect::<Vec<_>>()
+        );
+        let mut unique_ids = resized.order.clone();
+        unique_ids.sort();
+        unique_ids.dedup();
+        assert_eq!(unique_ids.len(), resized.order.len());
+    }
+
+    #[test]
     fn assistant_messages_render_markdown_in_the_primary_transcript() {
         let block = TranscriptBlock {
             id: "assistant:markdown".to_owned(),
@@ -1376,8 +2212,10 @@ mod tests {
                 complete: true,
                 ..AssistantMessage::default()
             }),
+            assistant_segment: None,
             leading_blank: false,
             trailing_blank: false,
+            render_cache: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let rows = block.render(42);
@@ -1810,6 +2648,7 @@ mod tests {
                 text: "final answer".to_owned(),
                 thinking: "consider the options".to_owned(),
                 complete: true,
+                ..AssistantMessage::default()
             }),
             TranscriptItem::Tool(ToolExecution {
                 id: "tool-1".to_owned(),
@@ -1831,10 +2670,22 @@ mod tests {
         let mut store = TranscriptStore::default();
         store.sync(&state);
         let blocks = store.active_components().collect::<Vec<_>>();
-        assert!(blocks[1].render(48)[0].plain_text().is_empty());
-        assert!(blocks[2].render(48)[0].plain_text().is_empty());
+        let first_tool = blocks
+            .iter()
+            .find(|block| block.id == "tool:tool-1")
+            .expect("first tool");
+        let second_tool = blocks
+            .iter()
+            .find(|block| block.id == "tool:tool-2")
+            .expect("second tool");
+        assert!(first_tool.render(48)[0].plain_text().is_empty());
+        assert!(second_tool.render(48)[0].plain_text().is_empty());
 
-        let assistant = blocks[0].render(48);
+        let assistant = blocks
+            .iter()
+            .take_while(|block| block.assistant_segment.is_some())
+            .flat_map(|block| block.render(48))
+            .collect::<Vec<_>>();
         assert!(
             assistant.iter().flat_map(|row| &row.cells).any(|cell| {
                 cell.symbol == "c" && cell.style.foreground == palette::THINKING_TEXT

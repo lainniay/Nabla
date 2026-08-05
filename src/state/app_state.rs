@@ -7,6 +7,9 @@ pub struct AppState {
     pub editor: EditorState,
     pub file_completion: Option<FileCompletionState>,
     pub transcript: Vec<TranscriptItem>,
+    /// Changes whenever canonical session state is replaced.
+    pub session_epoch: u64,
+    pub(crate) next_assistant_message_id: u64,
     pub session: PiState,
     pub run_state: RunState,
     pub connection_state: ConnectionState,
@@ -61,6 +64,8 @@ impl AppState {
             editor: EditorState::default(),
             file_completion: None,
             transcript: Vec::new(),
+            session_epoch: 0,
+            next_assistant_message_id: 1,
             session,
             run_state,
             connection_state: ConnectionState::Connected,

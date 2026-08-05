@@ -169,8 +169,13 @@ pub struct UserMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AssistantMessage {
+    /// Stable inside one application session epoch.
+    pub id: u64,
+    pub session_epoch: u64,
     pub text: String,
     pub thinking: String,
+    pub text_revision: u64,
+    pub thinking_revision: u64,
     pub complete: bool,
 }
 

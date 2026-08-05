@@ -4,6 +4,18 @@ use super::*;
 // without synthesizing completion from request acknowledgements.
 impl App {
     pub(super) fn update_pi(&mut self, event: RpcEvent) {
+        let event_session = event.payload["sessionId"]
+            .as_str()
+            .or_else(|| event.payload["session_id"].as_str());
+        if event_session.is_some_and(|session_id| session_id != self.state.session.session_id) {
+            return;
+        }
+        if event.payload["sessionEpoch"]
+            .as_u64()
+            .is_some_and(|epoch| epoch != self.state.session_epoch)
+        {
+            return;
+        }
         match event.kind.as_str() {
             "agent_start" => {
                 self.state.run_state = RunState::Running;
@@ -163,12 +175,16 @@ impl App {
         match kind {
             "text_delta" => {
                 if let Some(delta) = update["delta"].as_str() {
-                    self.ensure_assistant().text.push_str(delta);
+                    let message = self.ensure_assistant();
+                    message.text.push_str(delta);
+                    message.text_revision = message.text_revision.saturating_add(1);
                 }
             }
             "thinking_delta" => {
                 if let Some(delta) = update["delta"].as_str() {
-                    self.ensure_assistant().thinking.push_str(delta);
+                    let message = self.ensure_assistant();
+                    message.thinking.push_str(delta);
+                    message.thinking_revision = message.thinking_revision.saturating_add(1);
                 }
             }
             "error" => {
@@ -189,9 +205,16 @@ impl App {
             Some(TranscriptItem::Assistant(message)) if !message.complete
         );
         if needs_new {
+            let id = self.state.next_assistant_message_id;
+            self.state.next_assistant_message_id =
+                self.state.next_assistant_message_id.saturating_add(1);
             self.state
                 .transcript
-                .push(TranscriptItem::Assistant(AssistantMessage::default()));
+                .push(TranscriptItem::Assistant(AssistantMessage {
+                    id,
+                    session_epoch: self.state.session_epoch,
+                    ..AssistantMessage::default()
+                }));
         }
         self.last_assistant_mut()
             .expect("assistant item was just inserted")

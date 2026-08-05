@@ -21,8 +21,9 @@ use super::{
     palette,
     transcript::TranscriptStore,
     types::{
-        CellStyle, Color, CommittedHistoryBlock, FrameUpdate, PanelFrame, Rect, StyledCell,
-        SurfaceKind, TerminalCommitPlan, TerminalSize, VisualFrame, VisualRow,
+        CanonicalReflowProjection, CellStyle, Color, CommittedHistoryBlock, CursorPosition,
+        FrameUpdate, PanelFrame, Rect, StyledCell, SurfaceKind, TerminalCommitPlan, TerminalSize,
+        VisualFrame, VisualRow,
     },
 };
 
@@ -61,6 +62,9 @@ pub struct TerminalDriver<W: Write> {
     owned_footer_height: u16,
     claimed_primary: bool,
     mouse_enabled: bool,
+    pending_wrap: bool,
+    physical_cursor: Option<CursorPosition>,
+    physical_valid: bool,
 }
 
 impl TerminalDriver<Stdout> {
@@ -95,6 +99,9 @@ impl<W: Write> TerminalDriver<W> {
             owned_footer_height: 2,
             claimed_primary: false,
             mouse_enabled: false,
+            pending_wrap: false,
+            physical_cursor: None,
+            physical_valid: true,
         }
     }
 
@@ -108,6 +115,10 @@ impl<W: Write> TerminalDriver<W> {
 
     pub fn output_ref(&self) -> &W {
         &self.output
+    }
+
+    pub fn physical_valid(&self) -> bool {
+        self.physical_valid
     }
 
     /// Makes the full visible primary screen application-owned by scrolling
@@ -143,11 +154,60 @@ impl<W: Write> TerminalDriver<W> {
     }
 
     pub fn commit(&mut self, plan: &TerminalCommitPlan) -> io::Result<()> {
+        self.commit_internal(plan, false)
+    }
+
+    pub fn commit_resize_reflow(&mut self, plan: &TerminalCommitPlan) -> io::Result<()> {
+        if plan.surface != SurfaceKind::Primary {
+            return Err(io::Error::other(
+                "destructive resize reflow requires the primary surface",
+            ));
+        }
+        self.commit_internal(plan, true)
+    }
+
+    pub fn clear_scrollback_and_visible_screen(&mut self) -> io::Result<()> {
+        self.switch_surface(SurfaceKind::Primary)?;
+        let synchronized = self.capabilities.synchronized_output;
+        let begin_result = if synchronized {
+            queue!(self.output, BeginSynchronizedUpdate)
+        } else {
+            Ok(())
+        };
+        let result = begin_result.and_then(|()| self.stage_destructive_reset());
+        let end_result = if synchronized {
+            queue!(self.output, EndSynchronizedUpdate)
+        } else {
+            Ok(())
+        };
+        let flush_result = self.output.flush();
+        let result = result.and(end_result).and(flush_result);
+        match result {
+            Ok(()) => {
+                self.reset_physical_projection_state();
+                self.physical_valid = true;
+                Ok(())
+            }
+            Err(error) => {
+                self.physical_valid = false;
+                Err(error)
+            }
+        }
+    }
+
+    fn commit_internal(
+        &mut self,
+        plan: &TerminalCommitPlan,
+        destructive_reflow: bool,
+    ) -> io::Result<()> {
         self.switch_surface(plan.surface)?;
         let previous_screen = self.primary_screen.clone();
         let previous_panel = self.active_panel;
         let previous_size = self.size;
         let previous_viewport = self.primary_viewport;
+        let previous_footer_height = self.owned_footer_height;
+        let previous_pending_wrap = self.pending_wrap;
+        let previous_physical_cursor = self.physical_cursor;
         if let FrameUpdate::Full(frame) = &plan.frame_update {
             self.resize_primary_screen(frame.terminal_size);
             if plan.surface == SurfaceKind::Primary {
@@ -160,21 +220,45 @@ impl<W: Write> TerminalDriver<W> {
             }
         }
         let synchronized = self.capabilities.synchronized_output;
-        if synchronized {
-            queue!(self.output, BeginSynchronizedUpdate)?;
-        }
+        let begin_result = if synchronized {
+            queue!(self.output, BeginSynchronizedUpdate)
+        } else {
+            Ok(())
+        };
 
-        let result: io::Result<()> = (|| {
+        let result: io::Result<()> = begin_result.and_then(|()| {
             let mut released_viewport_rows = None;
             if plan.surface == SurfaceKind::Primary {
-                self.restore_active_panel()?;
-                if let FrameUpdate::Full(frame) = &plan.frame_update {
-                    released_viewport_rows = self.prepare_primary_viewport(frame.viewport)?;
-                }
-                if plan.history_scroll_rows > 0 {
-                    self.append_history(plan, released_viewport_rows)?;
-                } else if let Some(released) = released_viewport_rows {
-                    self.shift_history_region_down(released.bottom(), released.height)?;
+                if destructive_reflow {
+                    self.stage_destructive_reset()?;
+                    self.reset_physical_projection_state();
+                    if let FrameUpdate::Full(frame) = &plan.frame_update {
+                        self.owned_footer_height = frame
+                            .main_layout
+                            .composer
+                            .height
+                            .saturating_add(frame.main_layout.status.height)
+                            .min(self.size.height);
+                    }
+                    let rows = plan
+                        .history_blocks
+                        .iter()
+                        .flat_map(|block| block.rows.iter())
+                        .collect::<Vec<_>>();
+                    self.append_history_fullscreen(&rows)?;
+                    if let FrameUpdate::Full(frame) = &plan.frame_update {
+                        self.primary_viewport = Some(normalize_viewport(frame.viewport, self.size));
+                    }
+                } else {
+                    self.restore_active_panel()?;
+                    if let FrameUpdate::Full(frame) = &plan.frame_update {
+                        released_viewport_rows = self.prepare_primary_viewport(frame.viewport)?;
+                    }
+                    if plan.history_scroll_rows > 0 {
+                        self.append_history(plan, released_viewport_rows)?;
+                    } else if let Some(released) = released_viewport_rows {
+                        self.shift_history_region_down(released.bottom(), released.height)?;
+                    }
                 }
             }
             match &plan.frame_update {
@@ -208,22 +292,26 @@ impl<W: Write> TerminalDriver<W> {
                 queue!(self.output, Hide)?;
             }
             Ok(())
-        })();
+        });
 
-        if synchronized {
-            // Always attempt to terminate synchronized mode. Preserve the
-            // original write error if both operations fail.
-            let end = queue!(self.output, EndSynchronizedUpdate);
-            if result.is_ok() {
-                end?;
-            }
-        }
-        let result = result.and_then(|()| self.output.flush());
+        // Always terminate synchronized mode and flush even after a staged
+        // write fails. `and` preserves the original error when cleanup also
+        // fails.
+        let end_result = if synchronized {
+            queue!(self.output, EndSynchronizedUpdate)
+        } else {
+            Ok(())
+        };
+        let flush_result = self.output.flush();
+        let result = result.and(end_result).and(flush_result);
         match result {
             Ok(()) => {
                 if plan.surface == SurfaceKind::Primary {
                     self.active_panel = plan.panel.as_ref().map(|panel| panel.area);
                 }
+                self.pending_wrap = false;
+                self.physical_cursor = plan.cursor;
+                self.physical_valid = true;
                 Ok(())
             }
             Err(error) => {
@@ -231,9 +319,36 @@ impl<W: Write> TerminalDriver<W> {
                 self.active_panel = previous_panel;
                 self.size = previous_size;
                 self.primary_viewport = previous_viewport;
+                self.owned_footer_height = previous_footer_height;
+                self.pending_wrap = previous_pending_wrap;
+                self.physical_cursor = previous_physical_cursor;
+                self.physical_valid = false;
                 Err(error)
             }
         }
+    }
+
+    fn stage_destructive_reset(&mut self) -> io::Result<()> {
+        self.reset_scroll_region()?;
+        queue!(
+            self.output,
+            ResetColor,
+            SetAttribute(Attribute::Reset),
+            MoveTo(0, 0),
+            Clear(ClearType::All),
+            Clear(ClearType::Purge),
+            MoveTo(0, 0),
+            Hide
+        )
+    }
+
+    fn reset_physical_projection_state(&mut self) {
+        self.primary_screen = blank_screen(self.size);
+        self.primary_viewport = None;
+        self.active_panel = None;
+        self.owned_footer_height = 0;
+        self.pending_wrap = false;
+        self.physical_cursor = None;
     }
 
     fn append_history(
@@ -245,7 +360,7 @@ impl<W: Write> TerminalDriver<W> {
             .history_blocks
             .iter()
             .flat_map(|block| block.rows.iter())
-            .take(usize::from(plan.history_scroll_rows))
+            .take(plan.history_scroll_rows)
             .collect::<Vec<_>>();
         let replacement_rows = released_viewport_rows
             .map_or(0, |released| usize::from(released.height))
@@ -659,6 +774,11 @@ fn blank_screen(size: TerminalSize) -> Vec<VisualRow> {
         .collect()
 }
 
+fn normalize_viewport(viewport: Rect, size: TerminalSize) -> Rect {
+    let height = viewport.height.min(size.height);
+    Rect::new(0, size.height.saturating_sub(height), size.width, height)
+}
+
 fn translate_bottom_aligned(
     area: Rect,
     previous_size: TerminalSize,
@@ -741,8 +861,7 @@ impl FrameCoordinator {
         let history_scroll_rows = history_blocks
             .iter()
             .flat_map(|block| block.rows.iter())
-            .count()
-            .min(usize::from(u16::MAX)) as u16;
+            .count();
         let full_redraw = self.terminal_invalid
             || self.previous_surface != surface
             || history_scroll_rows > 0
@@ -822,6 +941,62 @@ impl FrameCoordinator {
         }
     }
 
+    pub fn plan_resize_reflow(
+        &self,
+        frame: VisualFrame,
+        projection: &CanonicalReflowProjection,
+    ) -> TerminalCommitPlan {
+        let cursor = frame.cursor;
+        let panel = frame.panel.clone();
+        TerminalCommitPlan {
+            revision: frame.revision,
+            surface: SurfaceKind::Primary,
+            history_scroll_rows: projection
+                .history_blocks
+                .iter()
+                .map(|block| block.rows.len())
+                .sum(),
+            history_blocks: projection.history_blocks.clone(),
+            frame_update: FrameUpdate::Full(frame),
+            panel,
+            cursor,
+            full_redraw: true,
+        }
+    }
+
+    pub fn commit_resize_reflow<W: Write>(
+        &mut self,
+        driver: &mut TerminalDriver<W>,
+        transcript: &mut TranscriptStore,
+        plan: TerminalCommitPlan,
+        projection: &CanonicalReflowProjection,
+    ) -> io::Result<()> {
+        let FrameUpdate::Full(next_frame) = &plan.frame_update else {
+            return Err(io::Error::other(
+                "resize reflow requires a complete canonical frame",
+            ));
+        };
+        match driver.commit_resize_reflow(&plan) {
+            Ok(()) if transcript.apply_reflow_projection(projection) => {
+                self.committed_revision = plan.revision;
+                self.previous_frame = Some(next_frame.clone());
+                self.previous_surface = SurfaceKind::Primary;
+                self.terminal_invalid = false;
+                Ok(())
+            }
+            Ok(()) => {
+                self.terminal_invalid = true;
+                Err(io::Error::other(
+                    "canonical transcript changed during resize reflow",
+                ))
+            }
+            Err(error) => {
+                self.terminal_invalid = true;
+                Err(error)
+            }
+        }
+    }
+
     pub fn invalidate(&mut self) {
         self.terminal_invalid = true;
     }
@@ -833,6 +1008,10 @@ mod tests {
 
     use super::*;
     use crate::ui::types::{MainLayout, TerminalSize};
+    use crate::{
+        rpc::PiState,
+        state::{AppState, TranscriptItem},
+    };
 
     fn frame(revision: u64, text: &str) -> VisualFrame {
         VisualFrame {
@@ -1060,6 +1239,8 @@ mod tests {
             history_blocks: vec![CommittedHistoryBlock {
                 component_id: "history".to_owned(),
                 source_revision: 2,
+                row_offset: 0,
+                total_rows: 1,
                 rows: vec![history_row],
             }],
             frame_update: FrameUpdate::Full(resized),
@@ -1080,5 +1261,234 @@ mod tests {
             !output.contains("\u{1b}[4;1H"),
             "history staging addressed a row below the resized viewport"
         );
+    }
+
+    #[test]
+    fn clear_scrollback_resets_all_owned_physical_state_in_order() {
+        let mut driver = TerminalDriver::new(
+            Vec::<u8>::new(),
+            TerminalCapabilities {
+                synchronized_output: true,
+                true_color: false,
+                mouse: false,
+            },
+            TerminalSize::new(20, 4),
+        );
+        driver.primary_screen[0] = VisualRow {
+            component_id: "old".to_owned(),
+            logical_line: 0,
+            wrap_index: 0,
+            cells: vec![StyledCell::new("old", 3, CellStyle::default())],
+        };
+        driver.primary_viewport = Some(Rect::new(0, 0, 20, 2));
+        driver.active_panel = Some(Rect::new(1, 1, 5, 2));
+        driver.owned_footer_height = 3;
+        driver.pending_wrap = true;
+        driver.physical_cursor = Some(CursorPosition { column: 4, row: 2 });
+
+        driver.clear_scrollback_and_visible_screen().unwrap();
+
+        let output = String::from_utf8_lossy(driver.output_ref());
+        let scroll_region = output.find("\u{1b}[r").unwrap();
+        let clear_screen = output.find("\u{1b}[2J").unwrap();
+        let clear_scrollback = output.find("\u{1b}[3J").unwrap();
+        assert!(scroll_region < clear_screen);
+        assert!(clear_screen < clear_scrollback);
+        assert!(output.contains("\u{1b}[?2026h"));
+        assert!(output.contains("\u{1b}[?2026l"));
+        assert!(
+            driver
+                .primary_screen
+                .iter()
+                .all(|row| row.plain_text().is_empty())
+        );
+        assert_eq!(driver.primary_viewport, None);
+        assert_eq!(driver.active_panel, None);
+        assert_eq!(driver.owned_footer_height, 0);
+        assert!(!driver.pending_wrap);
+        assert_eq!(driver.physical_cursor, None);
+        assert!(driver.physical_valid());
+    }
+
+    #[test]
+    fn synchronized_update_is_ended_when_destructive_reset_fails() {
+        #[derive(Default)]
+        struct FailOnClearWriter {
+            output: Vec<u8>,
+            failed: bool,
+        }
+
+        impl Write for FailOnClearWriter {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                if !self.failed && buffer.windows(3).any(|window| window == b"[2J") {
+                    self.failed = true;
+                    return Err(io::Error::other("injected clear failure"));
+                }
+                self.output.extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut driver = TerminalDriver::new(
+            FailOnClearWriter::default(),
+            TerminalCapabilities {
+                synchronized_output: true,
+                true_color: false,
+                mouse: false,
+            },
+            TerminalSize::new(20, 4),
+        );
+
+        assert!(driver.clear_scrollback_and_visible_screen().is_err());
+
+        let output = String::from_utf8_lossy(&driver.output_ref().output);
+        assert!(output.contains("\u{1b}[?2026h"));
+        assert!(output.contains("\u{1b}[?2026l"));
+        assert!(!driver.physical_valid());
+    }
+
+    #[test]
+    fn resize_reflow_purges_before_replaying_canonical_history() {
+        let mut driver = TerminalDriver::new(
+            Vec::<u8>::new(),
+            TerminalCapabilities {
+                synchronized_output: false,
+                true_color: false,
+                mouse: false,
+            },
+            TerminalSize::new(80, 4),
+        );
+        let history_row = VisualRow {
+            component_id: "canonical".to_owned(),
+            logical_line: 0,
+            wrap_index: 0,
+            cells: vec![StyledCell::new(
+                "canonical-history",
+                17,
+                CellStyle::default(),
+            )],
+        };
+        let mut resized = frame(2, "active");
+        resized.terminal_size = TerminalSize::new(40, 4);
+        resized.viewport = Rect::new(0, 0, 40, 4);
+        let plan = TerminalCommitPlan {
+            revision: 2,
+            surface: SurfaceKind::Primary,
+            history_scroll_rows: 1,
+            history_blocks: vec![CommittedHistoryBlock {
+                component_id: "canonical".to_owned(),
+                source_revision: 2,
+                row_offset: 0,
+                total_rows: 1,
+                rows: vec![history_row],
+            }],
+            frame_update: FrameUpdate::Full(resized),
+            panel: None,
+            cursor: None,
+            full_redraw: true,
+        };
+
+        driver.commit_resize_reflow(&plan).unwrap();
+
+        let output = String::from_utf8_lossy(driver.output_ref());
+        let purge = output.find("\u{1b}[3J").unwrap();
+        let replay = output.find("canonical-history").unwrap();
+        assert!(purge < replay);
+        assert_eq!(driver.size, TerminalSize::new(40, 4));
+        assert!(driver.physical_valid());
+    }
+
+    #[test]
+    fn failed_resize_reflow_keeps_canonical_cursor_for_a_clean_retry() {
+        #[derive(Default)]
+        struct FailOnPurgeWriter {
+            output: Vec<u8>,
+            failed: bool,
+        }
+
+        impl Write for FailOnPurgeWriter {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                if !self.failed && buffer.windows(3).any(|window| window == b"[3J") {
+                    self.failed = true;
+                    return Err(io::Error::other("injected purge failure"));
+                }
+                self.output.extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut state = AppState::new(PiState {
+            model: None,
+            thinking_level: "off".to_owned(),
+            is_streaming: false,
+            is_compacting: false,
+            steering_mode: "one-at-a-time".to_owned(),
+            follow_up_mode: "one-at-a-time".to_owned(),
+            session_file: None,
+            session_id: "resize-test".to_owned(),
+            session_name: None,
+            auto_compaction_enabled: true,
+            message_count: 0,
+            pending_message_count: 0,
+        });
+        state
+            .transcript
+            .push(TranscriptItem::Notice("canonical".to_owned()));
+        let mut transcript = TranscriptStore::default();
+        transcript.sync(&state);
+        let projection = transcript.canonical_reflow_projection(40, 7, 0);
+        let mut resized = frame(7, "active");
+        resized.terminal_size = TerminalSize::new(40, 4);
+        resized.viewport = Rect::new(0, 0, 40, 4);
+        let mut coordinator = FrameCoordinator::default();
+        let failed_plan = coordinator.plan_resize_reflow(resized.clone(), &projection);
+        let mut failing_driver = TerminalDriver::new(
+            FailOnPurgeWriter::default(),
+            TerminalCapabilities {
+                synchronized_output: true,
+                true_color: false,
+                mouse: false,
+            },
+            TerminalSize::new(80, 4),
+        );
+
+        assert!(
+            coordinator
+                .commit_resize_reflow(
+                    &mut failing_driver,
+                    &mut transcript,
+                    failed_plan,
+                    &projection,
+                )
+                .is_err()
+        );
+        assert_eq!(transcript.committed_cursor(), 0);
+        assert!(coordinator.previous_frame.is_none());
+        assert!(coordinator.terminal_invalid);
+
+        let retry_plan = coordinator.plan_resize_reflow(resized, &projection);
+        let mut retry_driver = TerminalDriver::new(
+            Vec::<u8>::new(),
+            TerminalCapabilities {
+                synchronized_output: false,
+                true_color: false,
+                mouse: false,
+            },
+            TerminalSize::new(80, 4),
+        );
+        coordinator
+            .commit_resize_reflow(&mut retry_driver, &mut transcript, retry_plan, &projection)
+            .unwrap();
+        assert_eq!(transcript.committed_cursor(), 1);
+        assert_eq!(coordinator.previous_frame.as_ref().unwrap().revision, 7);
+        assert!(!coordinator.terminal_invalid);
     }
 }

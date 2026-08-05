@@ -2,6 +2,33 @@ use std::collections::HashMap;
 
 pub type ComponentId = String;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AssistantContentKind {
+    Thinking,
+    Text,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AssistantSegmentPhase {
+    Streaming,
+    Stable,
+    Sealed,
+    Committed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantSegment {
+    pub message_id: u64,
+    pub session_epoch: u64,
+    pub segment_index: usize,
+    pub first_in_message: bool,
+    pub content_kind: AssistantContentKind,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub content_revision: u64,
+    pub phase: AssistantSegmentPhase,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TerminalSize {
     pub width: u16,
@@ -266,14 +293,31 @@ pub enum FrameUpdate {
 pub struct CommittedHistoryBlock {
     pub component_id: ComponentId,
     pub source_revision: u64,
+    /// Offset into the component's rendered canonical rows.
+    pub row_offset: usize,
+    /// Total rendered rows for the component at the projected width.
+    pub total_rows: usize,
     pub rows: Vec<VisualRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalReflowProjection {
+    pub canonical_revision: u64,
+    pub source_revision: u64,
+    pub width: u16,
+    /// Canonical prefix omitted by the configured physical replay window.
+    pub omitted_components: usize,
+    /// Cursor after all replayed history components and before the active tail.
+    pub history_end_cursor: usize,
+    pub history_blocks: Vec<CommittedHistoryBlock>,
+    pub active_rows: Vec<VisualRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalCommitPlan {
     pub revision: u64,
     pub surface: SurfaceKind,
-    pub history_scroll_rows: u16,
+    pub history_scroll_rows: usize,
     pub history_blocks: Vec<CommittedHistoryBlock>,
     pub frame_update: FrameUpdate,
     pub panel: Option<PanelFrame>,

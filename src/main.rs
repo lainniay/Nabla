@@ -7,6 +7,7 @@ use std::{
 use crossterm::event::Event as TerminalEvent;
 use nabla::{
     app::{App, AppEffect, AppEvent},
+    config::UiConfig,
     event::RuntimeEvent,
     pi_process::{PiProcessConfig, PiRuntime},
     runtime::{DispatchOutcome, EffectDispatcher},
@@ -19,6 +20,39 @@ use tokio::{
     sync::mpsc,
     time::{MissedTickBehavior, interval},
 };
+
+#[derive(Debug)]
+struct ResizeDebouncer {
+    pending: Option<(TerminalSize, Instant)>,
+    delay: Duration,
+}
+
+impl ResizeDebouncer {
+    fn new(delay: Duration) -> Self {
+        Self {
+            pending: None,
+            delay,
+        }
+    }
+
+    fn queue(&mut self, size: TerminalSize, now: Instant) {
+        self.pending = Some((size, now));
+    }
+
+    fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    fn due(&self, now: Instant) -> Option<TerminalSize> {
+        self.pending
+            .filter(|(_, queued_at)| now.duration_since(*queued_at) >= self.delay)
+            .map(|(size, _)| size)
+    }
+
+    fn clear(&mut self) {
+        self.pending = None;
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -39,6 +73,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     app.set_initial_bootstrap_state(bootstrap);
     let mut ui = UiStore::new(size);
     ui.synchronize(app.state());
+    let ui_config = UiConfig::from_env();
 
     let mut terminal = match TerminalDriver::open(size) {
         Ok(terminal) => terminal,
@@ -47,7 +82,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             return Err(format!("failed to initialize terminal: {error}").into());
         }
     };
-    let ui_result = run(&mut app, &mut ui, &mut terminal, &mut runtime, cwd).await;
+    let ui_result = run(
+        &mut app,
+        &mut ui,
+        &mut terminal,
+        &mut runtime,
+        cwd,
+        ui_config,
+    )
+    .await;
     let terminal_result = terminal.finish();
     let shutdown_result = runtime.process.shutdown().await;
 
@@ -66,6 +109,7 @@ async fn run(
     terminal: &mut TerminalDriver<std::io::Stdout>,
     runtime: &mut PiRuntime,
     workspace: std::path::PathBuf,
+    ui_config: UiConfig,
 ) -> Result<(), Box<dyn Error>> {
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(512);
     spawn_terminal_reader(event_tx.clone());
@@ -82,6 +126,8 @@ async fn run(
     let mut host_open = true;
     let mut stderr_open = true;
     let mut terminal_failures = 0usize;
+    const RESIZE_DEBOUNCE: Duration = Duration::from_millis(75);
+    let mut resize_debouncer = ResizeDebouncer::new(RESIZE_DEBOUNCE);
 
     render(app, ui, terminal, &mut coordinator)?;
 
@@ -120,11 +166,47 @@ async fn run(
                 }
             }
             _ = tick.tick() => {
+                let now = Instant::now();
+                if let Ok(actual_size) = crossterm::terminal::size() {
+                    let actual_size = TerminalSize::from(actual_size);
+                    if actual_size != ui.state().terminal.size {
+                        let width_changed = actual_size.width != ui.state().terminal.size.width;
+                        ui.reduce(UiEvent::Resize(actual_size));
+                        app.set_selection_page_size(
+                            usize::from(actual_size.height.saturating_sub(4).max(1))
+                        );
+                        coordinator.invalidate();
+                        if width_changed || resize_debouncer.is_pending() {
+                            resize_debouncer.queue(actual_size, now);
+                        }
+                    }
+                }
                 let tick_result = ui.reduce(UiEvent::Tick {
-                    now: Instant::now(),
+                    now,
                     animate: animation_active(app.state()),
                 });
-                if tick_result.changed || coordinator.terminal_invalid {
+                if resize_debouncer.due(now).is_some() {
+                    match render_resize_reflow(
+                        app,
+                        ui,
+                        terminal,
+                        &mut coordinator,
+                        ui_config.resize_reflow_max_rows,
+                    ) {
+                        Ok(()) => {
+                            resize_debouncer.clear();
+                            terminal_failures = 0;
+                        }
+                        Err(error) => {
+                            terminal_failures += 1;
+                            if terminal_failures >= 3 {
+                                return Err(error.into());
+                            }
+                        }
+                    }
+                } else if !resize_debouncer.is_pending()
+                    && (tick_result.changed || coordinator.terminal_invalid)
+                {
                     if let Err(error) = render(app, ui, terminal, &mut coordinator) {
                         terminal_failures += 1;
                         if terminal_failures >= 3 {
@@ -143,9 +225,13 @@ async fn run(
 
         if let AppEvent::Terminal(TerminalEvent::Resize(columns, rows)) = &event {
             let size = TerminalSize::new(*columns, *rows);
+            let width_changed = size.width != ui.state().terminal.size.width;
             ui.reduce(UiEvent::Resize(size));
             app.set_selection_page_size(usize::from(rows.saturating_sub(4).max(1)));
             coordinator.invalidate();
+            if width_changed || resize_debouncer.is_pending() {
+                resize_debouncer.queue(size, Instant::now());
+            }
         }
 
         let effects = app.update(event);
@@ -162,12 +248,14 @@ async fn run(
             }
         }
 
-        match render(app, ui, terminal, &mut coordinator) {
-            Ok(()) => terminal_failures = 0,
-            Err(error) => {
-                terminal_failures += 1;
-                if terminal_failures >= 3 {
-                    return Err(error.into());
+        if !resize_debouncer.is_pending() {
+            match render(app, ui, terminal, &mut coordinator) {
+                Ok(()) => terminal_failures = 0,
+                Err(error) => {
+                    terminal_failures += 1;
+                    if terminal_failures >= 3 {
+                        return Err(error.into());
+                    }
                 }
             }
         }
@@ -183,17 +271,6 @@ fn render(
     terminal: &mut TerminalDriver<std::io::Stdout>,
     coordinator: &mut FrameCoordinator,
 ) -> io::Result<()> {
-    // Resize events can be coalesced or delayed by terminal multiplexers.
-    // Sampling immediately before layout keeps the owned surface bounded by
-    // the actual viewport even when no Resize event reaches the event loop.
-    if let Ok(actual_size) = crossterm::terminal::size() {
-        let actual_size = TerminalSize::from(actual_size);
-        if actual_size != ui.state().terminal.size {
-            ui.reduce(UiEvent::Resize(actual_size));
-            app.set_selection_page_size(usize::from(actual_size.height.saturating_sub(4).max(1)));
-            coordinator.invalidate();
-        }
-    }
     let surface = SurfaceManager.route(app.state());
     let current_surface = ui.state().terminal.surface;
     if surface != current_surface {
@@ -205,15 +282,54 @@ fn render(
     }
     let size = ui.state().terminal.size;
     let history = if surface == SurfaceKind::Primary {
-        ui.state()
-            .transcript
-            .pending_history(size.width, ui.state().revision, 4096)
+        ui.state().transcript.pending_history_budget(
+            size.width,
+            ui.state().revision,
+            1024,
+            512 * 1024,
+        )
     } else {
         Vec::new()
     };
-    let frame = SceneBuilder.build(app.state(), ui.state(), surface, history.len());
+    let frame = SceneBuilder.build_with_history(app.state(), ui.state(), surface, &history);
     let plan = coordinator.plan(frame, surface, history);
     coordinator.commit(terminal, &mut ui.state_mut().transcript, plan)
+}
+
+fn render_resize_reflow(
+    app: &mut App,
+    ui: &mut UiStore,
+    terminal: &mut TerminalDriver<std::io::Stdout>,
+    coordinator: &mut FrameCoordinator,
+    maximum_rows: usize,
+) -> io::Result<()> {
+    let size = ui.state().terminal.size;
+    ui.state().transcript.invalidate_render_caches();
+    let projection = ui.state().transcript.canonical_reflow_projection(
+        size.width,
+        ui.state().revision,
+        maximum_rows,
+    );
+    let mut preview = ui.state().clone();
+    if !preview.transcript.apply_reflow_projection(&projection) {
+        return Err(io::Error::other(
+            "unable to stage canonical resize projection",
+        ));
+    }
+    let frame = SceneBuilder.build(app.state(), &preview, SurfaceKind::Primary, 0);
+    let plan = coordinator.plan_resize_reflow(frame, &projection);
+    coordinator.commit_resize_reflow(
+        terminal,
+        &mut ui.state_mut().transcript,
+        plan,
+        &projection,
+    )?;
+    ui.reduce(UiEvent::ProjectionRebuilt);
+
+    if SurfaceManager.route(app.state()) == SurfaceKind::Alternate {
+        render(app, ui, terminal, coordinator)?;
+    }
+    Ok(())
 }
 
 fn spawn_terminal_reader(events: mpsc::Sender<AppEvent>) {
@@ -243,4 +359,27 @@ fn spawn_terminal_reader(events: mpsc::Sender<AppEvent>) {
 fn _assert_effect_is_send(effect: AppEffect) {
     fn assert_send<T: Send>(_: T) {}
     assert_send(effect);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resize_reflow_debounce_uses_only_the_final_size() {
+        let start = Instant::now();
+        let mut debounce = ResizeDebouncer::new(Duration::from_millis(75));
+        debounce.queue(TerminalSize::new(80, 24), start);
+        debounce.queue(TerminalSize::new(40, 20), start + Duration::from_millis(30));
+        debounce.queue(
+            TerminalSize::new(120, 36),
+            start + Duration::from_millis(60),
+        );
+
+        assert_eq!(debounce.due(start + Duration::from_millis(100)), None);
+        assert_eq!(
+            debounce.due(start + Duration::from_millis(135)),
+            Some(TerminalSize::new(120, 36))
+        );
+    }
 }

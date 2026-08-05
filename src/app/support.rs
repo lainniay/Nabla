@@ -82,10 +82,6 @@ pub(super) fn string_field(value: &serde_json::Value, name: &str) -> Option<Stri
     value.get(name)?.as_str().map(ToOwned::to_owned)
 }
 
-pub(super) fn short_session_id(session_id: &str) -> String {
-    session_id.chars().take(8).collect()
-}
-
 pub(super) fn tree_branch_segment_index(
     items: &[TreeItem],
     selected: usize,

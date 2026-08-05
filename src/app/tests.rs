@@ -2643,7 +2643,7 @@ fn resume_and_tree_paging_use_the_configured_page_size() {
 }
 
 #[test]
-fn session_activation_preserves_scrollback_and_replays_the_active_branch() {
+fn session_activation_replaces_the_canonical_transcript() {
     let mut app = App::new(state());
     app.state
         .transcript
@@ -2663,17 +2663,16 @@ fn session_activation_preserves_scrollback_and_replays_the_active_branch() {
         ContextUsageState::Recalculating
     );
     assert_eq!(app.state.plan.as_ref().map(|plan| plan.revision), Some(2));
-    assert!(matches!(
-        app.state.transcript.first(),
-        Some(TranscriptItem::Notice(text)) if text == "existing scrollback"
-    ));
-    assert!(app.state.transcript.iter().any(|item| matches!(
+    assert!(!app.state.transcript.iter().any(|item| matches!(
         item,
-        TranscriptItem::SessionBoundary { action, label, cwd }
-            if action == "new session"
-                && label == "Restored work"
-                && cwd == "/workspace/restored"
+        TranscriptItem::Notice(text) if text == "existing scrollback"
     )));
+    assert!(
+        !app.state
+            .transcript
+            .iter()
+            .any(|item| matches!(item, TranscriptItem::SessionBoundary { .. }))
+    );
     assert!(app.state.transcript.iter().any(|item| matches!(
         item,
         TranscriptItem::User(UserMessage { text, status: UserMessageStatus::Accepted })
@@ -2700,6 +2699,74 @@ fn session_activation_preserves_scrollback_and_replays_the_active_branch() {
         item,
         TranscriptItem::BranchSummary(summary) if summary == "restored branch summary"
     )));
+}
+
+#[test]
+fn repeated_resume_is_idempotent_and_advances_session_epoch() {
+    let mut app = App::new(state());
+    for _ in 0..2 {
+        app.update(AppEvent::Command(CommandEvent::ResumeSessionFinished(Ok(
+            Box::new(SessionCommandData {
+                cancelled: false,
+                activation: Some(activation("session-restored")),
+            }),
+        ))));
+    }
+
+    assert_eq!(app.state.session.session_id, "session-restored");
+    assert_eq!(app.state.session_epoch, 2);
+    assert_eq!(
+        app.state
+            .transcript
+            .iter()
+            .filter(|item| matches!(item, TranscriptItem::User(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        app.state
+            .transcript
+            .iter()
+            .filter(|item| matches!(item, TranscriptItem::Assistant(_)))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn failed_resume_preserves_the_previous_canonical_items() {
+    let mut app = App::new(state());
+    app.state
+        .transcript
+        .push(TranscriptItem::Notice("session A".to_owned()));
+
+    app.update(AppEvent::Command(CommandEvent::ResumeSessionFinished(Err(
+        "unavailable".to_owned(),
+    ))));
+
+    assert!(matches!(
+        app.state.transcript.first(),
+        Some(TranscriptItem::Notice(text)) if text == "session A"
+    ));
+    assert_eq!(app.state.session.session_id, "session-1");
+    assert_eq!(app.state.session_epoch, 0);
+}
+
+#[test]
+fn delayed_pi_delta_from_the_previous_session_is_ignored() {
+    let mut app = App::new(state());
+    app.apply_activation("resumed", activation("session-b"));
+    let before = app.state.transcript.clone();
+
+    app.update(AppEvent::Pi(RpcEvent {
+        kind: "message_update".to_owned(),
+        payload: json!({
+            "sessionId": "session-1",
+            "assistantMessageEvent": {"type": "text_delta", "delta": "stale"}
+        }),
+    }));
+
+    assert_eq!(app.state.transcript, before);
 }
 
 #[test]
@@ -2775,7 +2842,7 @@ fn tree_browser_supports_pi_filters_copy_summary_and_abort_flow() {
 }
 
 #[test]
-fn successful_tree_navigation_restores_editor_and_appends_a_boundary() {
+fn successful_tree_navigation_restores_editor_and_replaces_history() {
     let mut app = App::new(state());
     app.state
         .transcript
@@ -2794,14 +2861,16 @@ fn successful_tree_navigation_restores_editor_and_appends_a_boundary() {
 
     assert!(app.state.tree_browser.is_none());
     assert_eq!(app.state.editor.text(), "recovered draft");
-    assert!(matches!(
-        app.state.transcript.first(),
-        Some(TranscriptItem::Notice(text)) if text == "old scrollback"
-    ));
-    assert!(app.state.transcript.iter().any(|item| matches!(
+    assert!(!app.state.transcript.iter().any(|item| matches!(
         item,
-        TranscriptItem::SessionBoundary { action, .. } if action == "tree navigation"
+        TranscriptItem::Notice(text) if text == "old scrollback"
     )));
+    assert!(
+        !app.state
+            .transcript
+            .iter()
+            .any(|item| matches!(item, TranscriptItem::SessionBoundary { .. }))
+    );
 }
 
 #[test]

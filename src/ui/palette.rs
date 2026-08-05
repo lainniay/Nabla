@@ -1,5 +1,8 @@
 use super::types::{CellStyle, Color};
 
+/// Bump when semantic palette values or Markdown styling rules change.
+pub const THEME_REVISION: u64 = 1;
+
 // Catppuccin Mocha — https://catppuccin.com/palette/
 //
 // UI code should use these semantic colors rather than terminal named colors

@@ -58,7 +58,22 @@ impl SceneBuilder {
         pending_history_components: usize,
     ) -> VisualFrame {
         match surface {
-            SurfaceKind::Primary => self.build_primary(domain, ui, pending_history_components),
+            SurfaceKind::Primary => {
+                self.build_primary(domain, ui, pending_history_components, None)
+            }
+            SurfaceKind::Alternate => self.build_alternate(domain, ui),
+        }
+    }
+
+    pub fn build_with_history(
+        self,
+        domain: &AppState,
+        ui: &UiState,
+        surface: SurfaceKind,
+        pending_history: &[super::types::CommittedHistoryBlock],
+    ) -> VisualFrame {
+        match surface {
+            SurfaceKind::Primary => self.build_primary(domain, ui, 0, Some(pending_history)),
             SurfaceKind::Alternate => self.build_alternate(domain, ui),
         }
     }
@@ -68,6 +83,7 @@ impl SceneBuilder {
         domain: &AppState,
         ui: &UiState,
         pending_history_components: usize,
+        pending_history: Option<&[super::types::CommittedHistoryBlock]>,
     ) -> VisualFrame {
         let size = ui.terminal.size;
         let composer_width = composer_content_width(size.width);
@@ -105,13 +121,20 @@ impl SceneBuilder {
         }
 
         let mut canvas = Canvas::new(ui.revision, size, layout);
-        let transcript_rows = ui
-            .transcript
-            .active_components_after(pending_history_components)
-            .flat_map(|component| {
-                component.render_animated(layout.transcript.width, ui.animation_frame)
-            })
-            .collect::<Vec<_>>();
+        let transcript_rows = if let Some(pending_history) = pending_history {
+            ui.transcript.active_rows_after_history(
+                layout.transcript.width,
+                ui.animation_frame,
+                pending_history,
+            )
+        } else {
+            ui.transcript
+                .active_components_after(pending_history_components)
+                .flat_map(|component| {
+                    component.render_animated(layout.transcript.width, ui.animation_frame)
+                })
+                .collect::<Vec<_>>()
+        };
         let transcript_viewport = canvas.place_tail(layout.transcript, &transcript_rows);
 
         canvas.panel = layout
@@ -1969,7 +1992,12 @@ mod tests {
         assert_eq!(frame.revision, store.state().revision);
         assert_eq!(frame.rows.len(), 8);
         assert_eq!(frame.main_layout.status.y, 7);
-        assert!(frame.component_bounds.contains_key("transcript:1"));
+        assert!(
+            frame
+                .component_bounds
+                .keys()
+                .any(|id| id.starts_with("assistant:0:2:text:segment:"))
+        );
         assert!(
             frame
                 .cursor

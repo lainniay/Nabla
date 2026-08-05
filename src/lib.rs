@@ -1,6 +1,7 @@
 pub mod app;
 pub mod browser;
 pub mod command;
+pub mod config;
 pub mod event;
 pub mod file_references;
 pub mod host;

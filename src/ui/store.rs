@@ -189,6 +189,7 @@ pub struct TerminalUiState {
     pub size: TerminalSize,
     pub surface: SurfaceKind,
     pub terminal_invalid: bool,
+    pub projection_reflow_pending: bool,
 }
 
 impl Default for TerminalUiState {
@@ -197,6 +198,7 @@ impl Default for TerminalUiState {
             size: TerminalSize::new(1, 1),
             surface: SurfaceKind::Primary,
             terminal_invalid: true,
+            projection_reflow_pending: false,
         }
     }
 }
@@ -246,6 +248,8 @@ impl UiState {
 pub enum UiEvent {
     DomainChanged,
     Resize(TerminalSize),
+    ProjectionInvalidated,
+    ProjectionRebuilt,
     Tick {
         now: Instant,
         animate: bool,
@@ -333,12 +337,29 @@ impl UiStore {
         let changed = match event {
             UiEvent::DomainChanged => true,
             UiEvent::Resize(size) if size != self.state.terminal.size => {
+                let width_changed = size.width != self.state.terminal.size.width;
                 self.state.terminal.size = size;
                 self.state.terminal.terminal_invalid = true;
+                if width_changed {
+                    self.state.terminal.projection_reflow_pending = true;
+                }
                 invalidation = Invalidation::all();
                 true
             }
             UiEvent::Resize(_) => false,
+            UiEvent::ProjectionInvalidated => {
+                self.state.terminal.terminal_invalid = true;
+                self.state.terminal.projection_reflow_pending = true;
+                invalidation = Invalidation::all();
+                true
+            }
+            UiEvent::ProjectionRebuilt => {
+                let changed = self.state.terminal.projection_reflow_pending
+                    || self.state.terminal.terminal_invalid;
+                self.state.terminal.projection_reflow_pending = false;
+                self.state.terminal.terminal_invalid = false;
+                changed
+            }
             UiEvent::Tick { now, animate } => {
                 let changed = animate
                     && self

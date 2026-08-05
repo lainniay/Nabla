@@ -399,6 +399,8 @@ mod tests {
             history_blocks: vec![CommittedHistoryBlock {
                 component_id: "sealed".to_owned(),
                 source_revision: 2,
+                row_offset: 0,
+                total_rows: 1,
                 rows: vec![row("sealed", "sealed once")],
             }],
             frame_update: FrameUpdate::Full(frame_in_viewport(2, size, viewport, "live")),
@@ -433,6 +435,8 @@ mod tests {
                     history_blocks: vec![CommittedHistoryBlock {
                         component_id: format!("sealed-{index}"),
                         source_revision: index as u64 + 1,
+                        row_offset: 0,
+                        total_rows: 1,
                         rows: vec![row("sealed", text)],
                     }],
                     frame_update: FrameUpdate::Full(frame_in_viewport(
@@ -473,6 +477,8 @@ mod tests {
                 history_blocks: vec![CommittedHistoryBlock {
                     component_id: "older".to_owned(),
                     source_revision: 1,
+                    row_offset: 0,
+                    total_rows: 1,
                     rows: vec![row("older", "older")],
                 }],
                 frame_update: FrameUpdate::Full(frame_in_viewport(
@@ -511,6 +517,8 @@ mod tests {
                 history_blocks: vec![CommittedHistoryBlock {
                     component_id: "final".to_owned(),
                     source_revision: 3,
+                    row_offset: 0,
+                    total_rows: 2,
                     rows: vec![row("final", "final-a"), row("final", "final-b")],
                 }],
                 frame_update: FrameUpdate::Full(frame_in_viewport(
@@ -550,6 +558,8 @@ mod tests {
                 history_blocks: vec![CommittedHistoryBlock {
                     component_id: "history".to_owned(),
                     source_revision: 1,
+                    row_offset: 0,
+                    total_rows: 1,
                     rows: vec![row("history", "history")],
                 }],
                 frame_update: FrameUpdate::Full(frame_in_viewport(
@@ -599,6 +609,8 @@ mod tests {
                 history_blocks: vec![CommittedHistoryBlock {
                     component_id: "history".to_owned(),
                     source_revision: 1,
+                    row_offset: 0,
+                    total_rows: 1,
                     rows: vec![row("history", "history")],
                 }],
                 frame_update: FrameUpdate::Full(frame_in_viewport(1, size, viewport, "footer")),
@@ -742,6 +754,8 @@ mod tests {
                 history_blocks: vec![CommittedHistoryBlock {
                     component_id: "history".to_owned(),
                     source_revision: 1,
+                    row_offset: 0,
+                    total_rows: 1,
                     rows: vec![row("history", "history")],
                 }],
                 frame_update: FrameUpdate::Full(frame_in_viewport(1, size, viewport, "main")),

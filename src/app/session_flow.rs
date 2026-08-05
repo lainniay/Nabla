@@ -697,17 +697,33 @@ impl App {
         }
     }
 
-    pub(super) fn apply_activation(&mut self, action: &str, activation: SessionActivationData) {
-        let label = activation
-            .state
-            .session_name
-            .clone()
-            .unwrap_or_else(|| short_session_id(&activation.state.session_id));
-        self.state.session = activation.state;
-        self.state.plan_mode_active = activation.plan_mode;
-        self.state.context = activation.context;
-        self.state.plan = activation.plan;
-        self.state.goal = Some(activation.goal);
+    pub(super) fn apply_activation(&mut self, _action: &str, activation: SessionActivationData) {
+        let SessionActivationData {
+            state,
+            cwd: _,
+            plan_mode,
+            goal,
+            history,
+            plan,
+            context,
+        } = activation;
+        let epoch = self.state.session_epoch.saturating_add(1);
+        let mut next_assistant_message_id = 1u64;
+        let mut transcript = Vec::with_capacity(history.len());
+        for item in history {
+            append_history_item_to(&mut transcript, item, epoch, &mut next_assistant_message_id);
+        }
+
+        // Construct the target transcript before publishing any session fields.
+        // Observers therefore see either the previous canonical session or the
+        // complete replacement, never an append-only mixture.
+        self.state.session = state;
+        self.state.session_epoch = epoch;
+        self.state.next_assistant_message_id = next_assistant_message_id;
+        self.state.plan_mode_active = plan_mode;
+        self.state.context = context;
+        self.state.plan = plan;
+        self.state.goal = Some(goal);
         self.state.goal_approval = if self
             .state
             .goal
@@ -728,138 +744,155 @@ impl App {
             .as_ref()
             .is_some_and(|plan| plan.status == PlanStatus::Submitted)
             .then_some(PlanReviewState::Menu { selected: 0 });
-        self.state.seen_compactions.clear();
+        self.state.seen_compactions = transcript
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Compaction(record) => Some(record.deduplication_key()),
+                _ => None,
+            })
+            .collect();
         self.state.compact_lifecycle_finished = false;
         self.state.run_state = RunState::Idle;
         self.state.last_error = None;
-        self.state.transcript.push(TranscriptItem::SessionBoundary {
-            action: action.to_owned(),
-            label,
-            cwd: activation.cwd,
-        });
-        for item in activation.history {
-            self.append_history_item(item);
-        }
+        self.state.transcript = transcript;
+        self.state.transcript_viewer = None;
     }
 
+    #[cfg(test)]
     pub(super) fn append_history_item(&mut self, item: SessionHistoryItem) {
-        match item {
-            SessionHistoryItem::User { text } => {
-                self.push_user(text, UserMessageStatus::Accepted);
-            }
-            SessionHistoryItem::Assistant { text, thinking } => {
-                self.state
-                    .transcript
-                    .push(TranscriptItem::Assistant(AssistantMessage {
-                        text,
-                        thinking,
-                        complete: true,
-                    }));
-            }
-            SessionHistoryItem::ToolCall { id, name, args } => {
-                self.state
-                    .transcript
-                    .push(TranscriptItem::Tool(ToolExecution {
-                        id,
-                        name,
-                        args,
-                        output: String::new(),
-                        diff: None,
-                        status: ToolStatus::Running,
-                    }));
-            }
-            SessionHistoryItem::ToolResult {
+        append_history_item_to(
+            &mut self.state.transcript,
+            item,
+            self.state.session_epoch,
+            &mut self.state.next_assistant_message_id,
+        );
+        if let Some(TranscriptItem::Compaction(record)) = self.state.transcript.last() {
+            self.state
+                .seen_compactions
+                .insert(record.deduplication_key());
+        }
+    }
+}
+
+fn append_history_item_to(
+    transcript: &mut Vec<TranscriptItem>,
+    item: SessionHistoryItem,
+    session_epoch: u64,
+    next_assistant_message_id: &mut u64,
+) {
+    match item {
+        SessionHistoryItem::User { text } => {
+            transcript.push(TranscriptItem::User(UserMessage {
+                text,
+                status: UserMessageStatus::Accepted,
+            }));
+        }
+        SessionHistoryItem::Assistant { text, thinking } => {
+            let id = *next_assistant_message_id;
+            *next_assistant_message_id = next_assistant_message_id.saturating_add(1);
+            transcript.push(TranscriptItem::Assistant(AssistantMessage {
+                id,
+                session_epoch,
+                text_revision: u64::from(!text.is_empty()),
+                thinking_revision: u64::from(!thinking.is_empty()),
+                text,
+                thinking,
+                complete: true,
+            }));
+        }
+        SessionHistoryItem::ToolCall { id, name, args } => {
+            transcript.push(TranscriptItem::Tool(ToolExecution {
                 id,
                 name,
-                output,
-                details,
-                is_error,
-            } => {
-                if let Some(tool) = self.find_tool_mut(Some(&id)) {
-                    tool.output = output;
-                    tool.diff = (!is_error)
+                args,
+                output: String::new(),
+                diff: None,
+                status: ToolStatus::Running,
+            }));
+        }
+        SessionHistoryItem::ToolResult {
+            id,
+            name,
+            output,
+            details,
+            is_error,
+        } => {
+            if let Some(tool) = transcript.iter_mut().rev().find_map(|item| match item {
+                TranscriptItem::Tool(tool) if tool.id == id => Some(tool),
+                _ => None,
+            }) {
+                tool.output = output;
+                tool.diff = (!is_error)
+                    .then(|| {
+                        details
+                            .as_ref()
+                            .and_then(|details| parse_tool_diff(&tool.args, details))
+                    })
+                    .flatten();
+                tool.status = if is_error {
+                    ToolStatus::Failed
+                } else {
+                    ToolStatus::Succeeded
+                };
+            } else {
+                transcript.push(TranscriptItem::Tool(ToolExecution {
+                    id,
+                    name,
+                    args: serde_json::Value::Null,
+                    output,
+                    diff: (!is_error)
                         .then(|| {
-                            details
-                                .as_ref()
-                                .and_then(|details| parse_tool_diff(&tool.args, details))
+                            details.as_ref().and_then(|details| {
+                                parse_tool_diff(&serde_json::Value::Null, details)
+                            })
                         })
-                        .flatten();
-                    tool.status = if is_error {
+                        .flatten(),
+                    status: if is_error {
                         ToolStatus::Failed
                     } else {
                         ToolStatus::Succeeded
-                    };
-                } else {
-                    self.state
-                        .transcript
-                        .push(TranscriptItem::Tool(ToolExecution {
-                            id,
-                            name,
-                            args: serde_json::Value::Null,
-                            output,
-                            diff: (!is_error)
-                                .then(|| {
-                                    details.as_ref().and_then(|details| {
-                                        parse_tool_diff(&serde_json::Value::Null, details)
-                                    })
-                                })
-                                .flatten(),
-                            status: if is_error {
-                                ToolStatus::Failed
-                            } else {
-                                ToolStatus::Succeeded
-                            },
-                        }));
-                }
+                    },
+                }));
             }
-            SessionHistoryItem::Notice { text } => {
-                self.state.transcript.push(TranscriptItem::Notice(text));
-            }
-            SessionHistoryItem::Compaction {
+        }
+        SessionHistoryItem::Notice { text } => {
+            transcript.push(TranscriptItem::Notice(text));
+        }
+        SessionHistoryItem::Compaction {
+            first_kept_entry_id,
+            tokens_before,
+            file_count,
+        } => {
+            let record = CompactionRecord {
+                reason: "restored".to_owned(),
                 first_kept_entry_id,
                 tokens_before,
+                estimated_tokens_after: None,
+                tokens_saved: None,
+                saved_percent: None,
                 file_count,
-            } => {
-                let record = CompactionRecord {
-                    reason: "restored".to_owned(),
-                    first_kept_entry_id,
-                    tokens_before,
-                    estimated_tokens_after: None,
-                    tokens_saved: None,
-                    saved_percent: None,
-                    file_count,
-                    read_file_count: 0,
-                    modified_file_count: 0,
-                };
-                self.state
-                    .seen_compactions
-                    .insert(record.deduplication_key());
-                self.state
-                    .transcript
-                    .push(TranscriptItem::Compaction(record));
-            }
-            SessionHistoryItem::TurnBoundary {
+                read_file_count: 0,
+                modified_file_count: 0,
+            };
+            transcript.push(TranscriptItem::Compaction(record));
+        }
+        SessionHistoryItem::TurnBoundary {
+            turn_id,
+            started_at,
+            ended_at,
+            duration_ms,
+            estimated,
+        } => {
+            transcript.push(TranscriptItem::TurnSeparator(TurnSeparator {
                 turn_id,
                 started_at,
                 ended_at,
                 duration_ms,
                 estimated,
-            } => {
-                self.state
-                    .transcript
-                    .push(TranscriptItem::TurnSeparator(TurnSeparator {
-                        turn_id,
-                        started_at,
-                        ended_at,
-                        duration_ms,
-                        estimated,
-                    }));
-            }
-            SessionHistoryItem::BranchSummary { summary } => {
-                self.state
-                    .transcript
-                    .push(TranscriptItem::BranchSummary(summary));
-            }
+            }));
+        }
+        SessionHistoryItem::BranchSummary { summary } => {
+            transcript.push(TranscriptItem::BranchSummary(summary));
         }
     }
 }
