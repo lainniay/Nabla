@@ -43,12 +43,75 @@ impl App {
                 }
             }
             "approval_request" => {
-                let Some(approval_id) = string_field(&event.payload, "approvalId") else {
+                let Some(approval_id) = string_field(&event.payload, "requestId") else {
                     return effects;
                 };
                 let Some(tool_call_id) = string_field(&event.payload, "toolCallId") else {
                     return effects;
                 };
+                let Some(session_id) = string_field(&event.payload, "sessionId") else {
+                    self.set_error("Host sent approval without a sessionId".to_owned());
+                    return effects;
+                };
+                let Some(workspace_id) = string_field(&event.payload, "workspaceId") else {
+                    self.set_error("Host sent approval without a workspaceId".to_owned());
+                    return effects;
+                };
+                let Some(summary) = string_field(&event.payload, "summary") else {
+                    self.set_error("Host sent approval without a summary".to_owned());
+                    return effects;
+                };
+                let Some(intent_digest) = string_field(&event.payload, "intentDigest") else {
+                    self.set_error("Host sent approval without an intentDigest".to_owned());
+                    return effects;
+                };
+                let available_decisions = match serde_json::from_value::<Vec<ApprovalDecision>>(
+                    event.payload["availableDecisions"].clone(),
+                ) {
+                    Ok(decisions)
+                        if !decisions.is_empty()
+                            && decisions.contains(&ApprovalDecision::Deny)
+                            && decisions.contains(&ApprovalDecision::AllowOnce) =>
+                    {
+                        decisions
+                    }
+                    _ => {
+                        self.set_error(
+                            "Host sent invalid or unsupported approval decisions".to_owned(),
+                        );
+                        return effects;
+                    }
+                };
+                let session_grant = match event.payload.get("sessionGrant") {
+                    Some(value) => match serde_json::from_value(value.clone()) {
+                        Ok(proposal) => Some(proposal),
+                        Err(_) => {
+                            self.set_error("Host sent an invalid session grant".to_owned());
+                            return effects;
+                        }
+                    },
+                    None => None,
+                };
+                let workspace_grant = match event.payload.get("workspaceGrant") {
+                    Some(value) => match serde_json::from_value(value.clone()) {
+                        Ok(proposal) => Some(proposal),
+                        Err(_) => {
+                            self.set_error("Host sent an invalid workspace grant".to_owned());
+                            return effects;
+                        }
+                    },
+                    None => None,
+                };
+                if available_decisions.contains(&ApprovalDecision::AllowSession)
+                    != session_grant.is_some()
+                    || available_decisions.contains(&ApprovalDecision::AllowWorkspace)
+                        != workspace_grant.is_some()
+                {
+                    self.set_error(
+                        "Host approval decisions do not match grant proposals".to_owned(),
+                    );
+                    return effects;
+                }
                 let tool_name = string_field(&event.payload, "toolName")
                     .unwrap_or_else(|| "unknown".to_owned());
                 let input = event.payload["input"].clone();
@@ -59,6 +122,8 @@ impl App {
                 self.state.approval = Some(ApprovalState {
                     approval_id,
                     tool_call_id,
+                    session_id,
+                    workspace_id,
                     tool_name,
                     input,
                     agent_id: string_field(&event.payload, "agentId"),
@@ -67,6 +132,11 @@ impl App {
                     goal_id: string_field(&event.payload, "goalId"),
                     reason: string_field(&event.payload, "reason"),
                     risk: string_field(&event.payload, "risk"),
+                    summary,
+                    intent_digest,
+                    available_decisions,
+                    session_grant,
+                    workspace_grant,
                     selected: 0,
                     replying: false,
                 });

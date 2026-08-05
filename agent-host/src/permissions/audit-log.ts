@@ -6,20 +6,47 @@ import type {
   ApprovalDecision,
   PermissionEvaluation,
 } from "./kernel.ts";
-import type { PermissionIntent } from "./model.ts";
+import type {
+  ExecutionProfile,
+  PermissionIntent,
+} from "./model.ts";
 import { digestValue } from "./shell/digest.ts";
 
 export interface PermissionAuditEntry {
   timestamp: string;
+  requestId: string;
   intentId: string;
   toolCallId: string;
   sessionId: string;
   workspaceId: string;
-  digest: string;
+  intentDigest: string;
+  capabilityAtoms: unknown[];
+  risk: "normal" | "elevated" | "high" | "credential" | "outside_workspace";
   effect: "allow" | "ask" | "deny";
   decision?: ApprovalDecision;
-  matchedRuleIds: string[];
+  grantScope?: "once" | "session" | "workspace";
+  executionProfile?: ExecutionProfile;
+  onceConsumed?: boolean;
+  outcome:
+    | "automatic_allow"
+    | "denied"
+    | "authorized"
+    | "preflight_rejected"
+    | "execution_started"
+    | "executed"
+    | "execution_failed";
+  matchedRules: Array<{
+    id: string;
+    source: string;
+    effect: "allow" | "ask" | "deny";
+  }>;
   matchedGrantDigests: string[];
+  matchedGrants: Array<{
+    digest: string;
+    scope: "once" | "session" | "workspace";
+    workspaceId: string;
+    sessionId?: string;
+  }>;
 }
 
 export interface PermissionAuditSink {
@@ -48,27 +75,94 @@ export class MemoryPermissionAuditLog implements PermissionAuditSink {
 }
 
 export function auditEntry(
+  requestId: string,
   intent: PermissionIntent,
   evaluation: PermissionEvaluation,
-  decision?: ApprovalDecision,
+  options: {
+    decision?: ApprovalDecision;
+    risk?: PermissionAuditEntry["risk"];
+    executionProfile?: ExecutionProfile;
+    onceConsumed?: boolean;
+    outcome?: PermissionAuditEntry["outcome"];
+  } = {},
 ): PermissionAuditEntry {
+  const grantScope = options.decision === "allow_once"
+    ? "once"
+    : options.decision === "allow_session"
+      ? "session"
+      : options.decision === "allow_workspace"
+        ? "workspace"
+        : undefined;
   return {
     timestamp: new Date().toISOString(),
+    requestId,
     intentId: intent.id,
     toolCallId: intent.toolCallId,
     sessionId: intent.sessionId,
     workspaceId: intent.workspaceId,
-    digest: intent.digest,
+    intentDigest: intent.digest,
+    capabilityAtoms: intent.atoms.map(redactedAtom),
+    risk: options.risk ?? "normal",
     effect: evaluation.effect,
-    ...(decision ? { decision } : {}),
-    matchedRuleIds: [
-      ...new Set(evaluation.atoms.flatMap((atom) => atom.rules.map((rule) => rule.id))),
+    ...(options.decision ? { decision: options.decision } : {}),
+    ...(grantScope ? { grantScope } : {}),
+    ...(options.executionProfile
+      ? { executionProfile: options.executionProfile }
+      : {}),
+    ...(options.onceConsumed === undefined
+      ? {}
+      : { onceConsumed: options.onceConsumed }),
+    outcome: options.outcome ??
+      (evaluation.effect === "deny"
+        ? "denied"
+        : evaluation.effect === "allow" && !options.decision
+          ? "automatic_allow"
+          : "authorized"),
+    matchedRules: [
+      ...new Map(
+        evaluation.atoms.flatMap((atom) =>
+          atom.rules.map((rule) => [
+            rule.id,
+            { id: rule.id, source: rule.source, effect: rule.effect },
+          ] as const)),
+      ).values(),
     ],
     matchedGrantDigests: [
       ...new Set(
         evaluation.atoms.flatMap((atom) =>
-          atom.grants.map((grant) => digestValue(grant))),
+          atom.grants.map((grant) => digestValue(grant.matcher))),
       ),
     ],
+    matchedGrants: [
+      ...new Map(
+        evaluation.atoms.flatMap((atom) =>
+          atom.grants.map((grant) => {
+            const digest = digestValue(grant.matcher);
+            return [
+              `${grant.scope}:${grant.workspaceId}:${grant.sessionId ?? ""}:${digest}`,
+              {
+                digest,
+                scope: grant.scope,
+                workspaceId: grant.workspaceId,
+                ...(grant.sessionId ? { sessionId: grant.sessionId } : {}),
+              },
+            ] as const;
+          })),
+      ).values(),
+    ],
   };
+}
+
+function redactedAtom(atom: PermissionIntent["atoms"][number]): unknown {
+  if (atom.kind === "exec") {
+    return {
+      kind: atom.kind,
+      executable: atom.executable,
+      argvDigest: digestValue(atom.argv),
+      cwd: atom.cwd,
+      environmentKeys: Object.keys(atom.environment).sort(),
+      environmentDigest: digestValue(atom.environment),
+    };
+  }
+  return atom;
 }

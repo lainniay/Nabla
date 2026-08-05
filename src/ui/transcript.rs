@@ -152,8 +152,8 @@ pub struct TranscriptStore {
     pub components: HashMap<ComponentId, Arc<TranscriptBlock>>,
     pub revision: u64,
     phases: HashMap<ComponentId, ComponentPhase>,
-    committed_cursor: usize,
-    committed_row_offset: usize,
+    scrollback_cursor: usize,
+    scrollback_row_offset: usize,
     session_epoch: u64,
     assistant_scans: HashMap<(u64, u64, AssistantContentKind), markdown::IncrementalMarkdown>,
 }
@@ -163,8 +163,8 @@ impl TranscriptStore {
         let epoch_changed = self.session_epoch != state.session_epoch;
         if epoch_changed {
             self.session_epoch = state.session_epoch;
-            self.committed_cursor = 0;
-            self.committed_row_offset = 0;
+            self.scrollback_cursor = 0;
+            self.scrollback_row_offset = 0;
             self.phases.clear();
             self.assistant_scans.clear();
         }
@@ -240,7 +240,7 @@ impl TranscriptStore {
             .order
             .iter()
             .zip(order.iter())
-            .take(self.committed_cursor)
+            .take(self.scrollback_cursor)
             .all(|(old_id, new_id)| {
                 old_id == new_id
                     && self
@@ -249,11 +249,11 @@ impl TranscriptStore {
                         .zip(components.get(new_id))
                         .is_some_and(|(old, new)| old.as_ref() == new.as_ref())
             });
-        let partial_component_unchanged = self.committed_row_offset == 0
+        let partial_component_unchanged = self.scrollback_row_offset == 0
             || self
                 .order
-                .get(self.committed_cursor)
-                .zip(order.get(self.committed_cursor))
+                .get(self.scrollback_cursor)
+                .zip(order.get(self.scrollback_cursor))
                 .is_some_and(|(old_id, new_id)| {
                     old_id == new_id
                         && self
@@ -265,10 +265,10 @@ impl TranscriptStore {
         let projection_invalidated = epoch_changed
             || !prefix_unchanged
             || !partial_component_unchanged
-            || order.len() < self.committed_cursor;
+            || order.len() < self.scrollback_cursor;
         if projection_invalidated {
-            self.committed_cursor = 0;
-            self.committed_row_offset = 0;
+            self.scrollback_cursor = 0;
+            self.scrollback_row_offset = 0;
             self.phases.clear();
             changed = true;
         }
@@ -304,158 +304,153 @@ impl TranscriptStore {
         self.phases.get(id).copied()
     }
 
-    pub fn committed_cursor(&self) -> usize {
-        self.committed_cursor
+    pub fn scrollback_cursor(&self) -> usize {
+        self.scrollback_cursor
     }
 
-    pub fn committed_row_offset(&self) -> usize {
-        self.committed_row_offset
+    pub fn scrollback_row_offset(&self) -> usize {
+        self.scrollback_row_offset
     }
 
-    pub fn active_components(&self) -> impl Iterator<Item = &Arc<TranscriptBlock>> {
-        self.order[self.committed_cursor.min(self.order.len())..]
+    pub fn uncommitted_components(&self) -> impl Iterator<Item = &Arc<TranscriptBlock>> {
+        self.order[self.scrollback_cursor.min(self.order.len())..]
             .iter()
             .filter_map(|id| self.components.get(id))
     }
 
-    pub fn active_components_after(
-        &self,
-        pending_history: usize,
-    ) -> impl Iterator<Item = &Arc<TranscriptBlock>> {
-        let start = self
-            .committed_cursor
-            .saturating_add(pending_history)
-            .min(self.order.len());
-        self.order[start..]
-            .iter()
-            .filter_map(|id| self.components.get(id))
-    }
-
-    pub fn active_rows_after_history(
+    pub fn project_primary(
         &self,
         width: u16,
-        animation_frame: u8,
-        pending: &[CommittedHistoryBlock],
-    ) -> Vec<VisualRow> {
-        let mut rows = Vec::new();
-        for (component_index, id) in self.order.iter().enumerate().skip(self.committed_cursor) {
-            let Some(component) = self.components.get(id) else {
-                continue;
-            };
-            let rendered = component.render_animated(width, animation_frame);
-            let mut start = if component_index == self.committed_cursor {
-                self.committed_row_offset.min(rendered.len())
-            } else {
-                0
-            };
-            if let Some(block) = pending.iter().find(|block| &block.component_id == id)
-                && block.row_offset == start
-            {
-                start = start.saturating_add(block.rows.len()).min(rendered.len());
-            }
-            rows.extend(rendered.into_iter().skip(start));
-        }
-        rows
-    }
-
-    pub fn pending_history(
-        &self,
-        width: u16,
-        source_revision: u64,
-        maximum_rows: usize,
-    ) -> Vec<CommittedHistoryBlock> {
-        self.pending_history_budget(width, source_revision, maximum_rows, usize::MAX)
-    }
-
-    pub fn pending_history_budget(
-        &self,
-        width: u16,
+        resident_capacity: usize,
         source_revision: u64,
         maximum_rows: usize,
         maximum_bytes: usize,
-    ) -> Vec<CommittedHistoryBlock> {
-        if maximum_rows == 0 || maximum_bytes == 0 {
-            return Vec::new();
+        animation_frame: u8,
+    ) -> super::types::PrimaryTranscriptProjection {
+        struct ProjectedRow {
+            component_id: ComponentId,
+            row_offset: usize,
+            total_rows: usize,
+            phase: ComponentPhase,
+            row: VisualRow,
         }
-        let mut blocks = Vec::new();
-        let mut remaining_rows = maximum_rows;
-        let mut remaining_bytes = maximum_bytes;
-        for (component_index, id) in self.order.iter().enumerate().skip(self.committed_cursor) {
-            if !matches!(
-                self.phase(id),
-                Some(ComponentPhase::Stable | ComponentPhase::Sealed)
-            ) {
-                break;
-            }
+
+        let width = width.max(1);
+        let mut projected = Vec::new();
+        for (component_index, id) in self.order.iter().enumerate().skip(self.scrollback_cursor) {
             let Some(component) = self.components.get(id) else {
-                break;
+                continue;
             };
-            let rendered = component.render(width.max(1));
-            let row_offset = if component_index == self.committed_cursor {
-                self.committed_row_offset.min(rendered.len())
+            let phase = self.phase(id).unwrap_or_else(|| component.phase());
+            let rows = component.render_animated(width, animation_frame);
+            let start = if component_index == self.scrollback_cursor {
+                self.scrollback_row_offset.min(rows.len())
             } else {
                 0
             };
-            let mut selected = Vec::new();
-            for row in rendered.iter().skip(row_offset) {
-                if remaining_rows == 0 {
-                    break;
-                }
-                let row_bytes = row
-                    .cells
-                    .iter()
-                    .map(|cell| cell.symbol.len())
-                    .sum::<usize>();
-                if row_bytes > remaining_bytes {
-                    if selected.is_empty() && blocks.is_empty() {
-                        // Always make progress for one oversized physical row.
-                        selected.push(row.clone());
-                        remaining_rows = remaining_rows.saturating_sub(1);
-                        remaining_bytes = 0;
-                    }
-                    break;
-                }
-                selected.push(row.clone());
-                remaining_rows -= 1;
-                remaining_bytes = remaining_bytes.saturating_sub(row_bytes);
-            }
-            if selected.is_empty() {
+            let total_rows = rows.len();
+            projected.extend(
+                rows.into_iter()
+                    .enumerate()
+                    .skip(start)
+                    .map(|(row_offset, row)| ProjectedRow {
+                        component_id: id.clone(),
+                        row_offset,
+                        total_rows,
+                        phase,
+                        row,
+                    }),
+            );
+        }
+
+        let overflow_needed = projected.len().saturating_sub(resident_capacity);
+        let eligible_rows = projected
+            .iter()
+            .take_while(|row| matches!(row.phase, ComponentPhase::Stable | ComponentPhase::Sealed))
+            .count();
+        let mut selected_rows = 0usize;
+        let mut selected_bytes = 0usize;
+        for row in projected
+            .iter()
+            .take(overflow_needed.min(eligible_rows).min(maximum_rows))
+        {
+            let row_bytes = row
+                .row
+                .cells
+                .iter()
+                .map(|cell| cell.symbol.len())
+                .sum::<usize>();
+            if selected_rows > 0 && selected_bytes.saturating_add(row_bytes) > maximum_bytes {
                 break;
             }
-            blocks.push(CommittedHistoryBlock {
-                component_id: id.clone(),
-                source_revision,
-                row_offset,
-                total_rows: rendered.len(),
-                rows: selected,
-            });
-            if remaining_rows == 0 || remaining_bytes == 0 {
+            if selected_rows == 0 && row_bytes > maximum_bytes {
+                if maximum_bytes == 0 {
+                    break;
+                }
+                selected_rows = 1;
                 break;
+            }
+            selected_rows += 1;
+            selected_bytes = selected_bytes.saturating_add(row_bytes);
+        }
+
+        let mut overflow_blocks = Vec::<CommittedHistoryBlock>::new();
+        for entry in projected.iter().take(selected_rows) {
+            if let Some(block) = overflow_blocks.last_mut()
+                && block.component_id == entry.component_id
+                && block.row_offset.saturating_add(block.rows.len()) == entry.row_offset
+            {
+                block.rows.push(entry.row.clone());
+            } else {
+                overflow_blocks.push(CommittedHistoryBlock {
+                    component_id: entry.component_id.clone(),
+                    source_revision,
+                    row_offset: entry.row_offset,
+                    total_rows: entry.total_rows,
+                    rows: vec![entry.row.clone()],
+                });
             }
         }
-        blocks
+
+        let remaining = &projected[selected_rows..];
+        let resident_start = remaining.len().saturating_sub(resident_capacity);
+        let resident_rows = remaining[resident_start..]
+            .iter()
+            .map(|entry| entry.row.clone())
+            .collect::<Vec<_>>();
+        let bootstrap_padding_rows = resident_capacity.saturating_sub(resident_rows.len());
+
+        super::types::PrimaryTranscriptProjection {
+            overflow_blocks,
+            resident_rows,
+            bootstrap_padding_rows,
+            resident_capacity,
+            scrollback_cursor: self.scrollback_cursor,
+            scrollback_row_offset: self.scrollback_row_offset,
+            canonical_revision: self.revision,
+        }
     }
 
     /// Advances history only after a successful terminal commit.
-    pub fn acknowledge_history(&mut self, blocks: &[CommittedHistoryBlock]) {
+    pub fn acknowledge_overflow(&mut self, blocks: &[CommittedHistoryBlock]) {
         for block in blocks {
-            let expected = self.order.get(self.committed_cursor);
+            let expected = self.order.get(self.scrollback_cursor);
             if expected != Some(&block.component_id) {
                 break;
             }
-            if block.row_offset != self.committed_row_offset || block.rows.is_empty() {
+            if block.row_offset != self.scrollback_row_offset || block.rows.is_empty() {
                 break;
             }
             let acknowledged = block.row_offset.saturating_add(block.rows.len());
             if acknowledged < block.total_rows {
-                self.committed_row_offset = acknowledged;
+                self.scrollback_row_offset = acknowledged;
                 break;
             }
             if acknowledged == block.total_rows {
                 self.phases
                     .insert(block.component_id.clone(), ComponentPhase::Committed);
-                self.committed_cursor += 1;
-                self.committed_row_offset = 0;
+                self.scrollback_cursor += 1;
+                self.scrollback_row_offset = 0;
             } else {
                 break;
             }
@@ -463,8 +458,8 @@ impl TranscriptStore {
     }
 
     pub fn reset_projection(&mut self) {
-        self.committed_cursor = 0;
-        self.committed_row_offset = 0;
+        self.scrollback_cursor = 0;
+        self.scrollback_row_offset = 0;
         self.phases.clear();
         self.refresh_phases();
     }
@@ -495,72 +490,49 @@ impl TranscriptStore {
     pub fn canonical_reflow_projection(
         &self,
         width: u16,
+        resident_capacity: usize,
         source_revision: u64,
-        maximum_rows: usize,
+        _maximum_rows: usize,
     ) -> CanonicalReflowProjection {
         let width = width.max(1);
-        let history_end_cursor = self
-            .order
-            .iter()
-            .position(|id| {
-                !matches!(
-                    self.phase(id),
-                    Some(
-                        ComponentPhase::Stable | ComponentPhase::Sealed | ComponentPhase::Committed
-                    )
-                )
-            })
-            .unwrap_or(self.order.len());
-        let rendered = self.order[..history_end_cursor]
-            .iter()
-            .filter_map(|id| {
-                self.components
-                    .get(id)
-                    .map(|component| (id.clone(), component.render(width)))
-            })
-            .collect::<Vec<_>>();
-
-        let mut selected_start = rendered.len();
-        let mut selected_rows = 0usize;
-        for (index, (_, rows)) in rendered.iter().enumerate().rev() {
-            if maximum_rows > 0
-                && selected_start < rendered.len()
-                && selected_rows.saturating_add(rows.len()) > maximum_rows
-            {
+        let mut canonical = self.clone();
+        canonical.reset_projection();
+        let primary = canonical.project_primary(
+            width,
+            resident_capacity,
+            source_revision,
+            usize::MAX,
+            usize::MAX,
+            0,
+        );
+        let mut scrollback_cursor = 0usize;
+        let mut scrollback_row_offset = 0usize;
+        for block in &primary.overflow_blocks {
+            let Some(id) = canonical.order.get(scrollback_cursor) else {
+                break;
+            };
+            if id != &block.component_id || block.row_offset != scrollback_row_offset {
                 break;
             }
-            selected_start = index;
-            selected_rows = selected_rows.saturating_add(rows.len());
-            if maximum_rows > 0 && selected_rows >= maximum_rows {
-                break;
+            let acknowledged = block.row_offset.saturating_add(block.rows.len());
+            if acknowledged == block.total_rows {
+                scrollback_cursor = scrollback_cursor.saturating_add(1);
+                scrollback_row_offset = 0;
+            } else {
+                scrollback_row_offset = acknowledged;
             }
         }
-
-        let history_blocks = rendered[selected_start..]
-            .iter()
-            .map(|(component_id, rows)| CommittedHistoryBlock {
-                component_id: component_id.clone(),
-                source_revision,
-                row_offset: 0,
-                total_rows: rows.len(),
-                rows: rows.clone(),
-            })
-            .collect::<Vec<_>>();
-        let active_rows = self.order[history_end_cursor..]
-            .iter()
-            .filter_map(|id| self.components.get(id))
-            .flat_map(|component| component.render(width))
-            .collect();
-
         CanonicalReflowProjection {
             canonical_revision: self.revision,
             session_epoch: self.session_epoch,
             source_revision,
             width,
-            omitted_components: selected_start,
-            history_end_cursor,
-            history_blocks,
-            active_rows,
+            scrollback_cursor,
+            scrollback_row_offset,
+            history_blocks: primary.overflow_blocks,
+            resident_rows: primary.resident_rows,
+            bootstrap_padding_rows: primary.bootstrap_padding_rows,
+            resident_capacity,
         }
     }
 
@@ -569,11 +541,11 @@ impl TranscriptStore {
             return false;
         }
 
-        self.committed_cursor = projection.history_end_cursor;
-        self.committed_row_offset = 0;
+        self.scrollback_cursor = projection.scrollback_cursor;
+        self.scrollback_row_offset = projection.scrollback_row_offset;
         self.phases.clear();
         self.refresh_phases();
-        for id in &self.order[..self.committed_cursor] {
+        for id in &self.order[..self.scrollback_cursor.min(self.order.len())] {
             self.phases.insert(id.clone(), ComponentPhase::Committed);
         }
         true
@@ -581,31 +553,22 @@ impl TranscriptStore {
 
     pub fn reflow_projection_is_compatible(&self, projection: &CanonicalReflowProjection) -> bool {
         if projection.session_epoch != self.session_epoch
-            || projection.history_end_cursor > self.order.len()
-            || projection.omitted_components > projection.history_end_cursor
+            || projection.canonical_revision != self.revision
+            || projection.scrollback_cursor > self.order.len()
         {
             return false;
         }
-        let projected_ids =
-            &self.order[projection.omitted_components..projection.history_end_cursor];
-        if projected_ids.len() != projection.history_blocks.len()
-            || projected_ids
-                .iter()
-                .zip(&projection.history_blocks)
-                .any(|(id, block)| id != &block.component_id)
-        {
-            return false;
-        }
-        if projected_ids
-            .iter()
-            .zip(&projection.history_blocks)
-            .any(|(id, block)| {
-                self.components.get(id).is_none_or(|component| {
+        if projection.history_blocks.iter().any(|block| {
+            self.components
+                .get(&block.component_id)
+                .is_none_or(|component| {
                     let rows = component.render(projection.width);
-                    rows != block.rows || rows.len() != block.total_rows
+                    rows.len() != block.total_rows
+                        || rows.get(
+                            block.row_offset..block.row_offset.saturating_add(block.rows.len()),
+                        ) != Some(block.rows.as_slice())
                 })
-            })
-        {
+        }) {
             return false;
         }
         true
@@ -1955,15 +1918,129 @@ mod tests {
         ];
         let mut store = TranscriptStore::default();
         assert_eq!(store.sync(&state), TranscriptSyncOutcome::AppendOnly);
-        let pending = store.pending_history(80, 1, 24);
+        let pending = store
+            .project_primary(80, 0, 1, 24, usize::MAX, 0)
+            .overflow_blocks;
         assert_eq!(pending.len(), 1);
-        assert_eq!(store.committed_cursor(), 0);
-        store.acknowledge_history(&pending);
-        assert_eq!(store.committed_cursor(), 1);
+        assert_eq!(store.scrollback_cursor(), 0);
+        store.acknowledge_overflow(&pending);
+        assert_eq!(store.scrollback_cursor(), 1);
         assert_eq!(
             store.phase(&pending[0].component_id),
             Some(ComponentPhase::Committed)
         );
+    }
+
+    #[test]
+    fn resident_window_stable_rows_overflow_only_after_being_pushed_out() {
+        let mut state = state();
+        state.transcript.push(TranscriptItem::User(UserMessage {
+            text: "oldest".to_owned(),
+            status: UserMessageStatus::Accepted,
+        }));
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+        let resident = store.project_primary(40, 8, 1, 100, usize::MAX, 0);
+        assert!(resident.overflow_blocks.is_empty());
+        assert!(
+            resident
+                .resident_rows
+                .iter()
+                .any(|row| row.plain_text().contains("oldest"))
+        );
+
+        state
+            .transcript
+            .extend((0..12).map(|index| TranscriptItem::Notice(format!("new-{index}"))));
+        store.sync(&state);
+        let overflowed = store.project_primary(40, 8, 2, 100, usize::MAX, 0);
+        assert!(!overflowed.overflow_blocks.is_empty());
+        assert_eq!(overflowed.resident_rows.len(), 8);
+    }
+
+    #[test]
+    fn streaming_rows_never_enter_overflow_even_when_taller_than_resident_window() {
+        let mut state = state();
+        state
+            .transcript
+            .push(TranscriptItem::Assistant(AssistantMessage {
+                text: "```text\none\ntwo\nthree\nfour\nfive\nsix".to_owned(),
+                complete: false,
+                ..AssistantMessage::default()
+            }));
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+        let projection = store.project_primary(40, 3, 1, 100, usize::MAX, 0);
+
+        assert!(projection.overflow_blocks.is_empty());
+        assert_eq!(projection.resident_rows.len(), 3);
+    }
+
+    #[test]
+    fn one_component_can_overflow_at_row_granularity_without_duplication() {
+        let mut state = state();
+        state
+            .transcript
+            .push(TranscriptItem::Assistant(AssistantMessage {
+                text: "```text\none\ntwo\nthree\nfour\nfive\nsix\n```".to_owned(),
+                complete: true,
+                ..AssistantMessage::default()
+            }));
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+        let projection = store.project_primary(40, 3, 1, 100, usize::MAX, 0);
+        let overflow = projection
+            .overflow_blocks
+            .first()
+            .expect("partial component overflow");
+
+        assert_eq!(overflow.row_offset, 0);
+        assert!(overflow.rows.len() < overflow.total_rows);
+        assert_eq!(
+            overflow.rows.len() + projection.resident_rows.len(),
+            overflow.total_rows
+        );
+    }
+
+    #[test]
+    fn bootstrap_padding_is_monotonic_and_never_enters_canonical_projection() {
+        let mut state = state();
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+        let empty = store.project_primary(40, 8, 1, 100, usize::MAX, 0);
+        state
+            .transcript
+            .push(TranscriptItem::Notice("resident".to_owned()));
+        store.sync(&state);
+        let grown = store.project_primary(40, 8, 2, 100, usize::MAX, 0);
+
+        assert!(grown.bootstrap_padding_rows < empty.bootstrap_padding_rows);
+        assert_eq!(store.render_canonical_history(40), grown.resident_rows);
+    }
+
+    #[test]
+    fn phase_changes_do_not_move_resident_rows() {
+        let mut state = state();
+        state
+            .transcript
+            .push(TranscriptItem::Assistant(AssistantMessage {
+                id: 1,
+                text: "same visible row".to_owned(),
+                complete: false,
+                ..AssistantMessage::default()
+            }));
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+        let streaming = store.project_primary(40, 8, 1, 100, usize::MAX, 0);
+        let TranscriptItem::Assistant(message) = &mut state.transcript[0] else {
+            unreachable!()
+        };
+        message.complete = true;
+        store.sync(&state);
+        let sealed = store.project_primary(40, 8, 2, 100, usize::MAX, 0);
+
+        assert_eq!(streaming.resident_rows, sealed.resident_rows);
+        assert!(sealed.overflow_blocks.is_empty());
     }
 
     #[test]
@@ -1989,7 +2066,9 @@ mod tests {
             Some(ComponentPhase::Streaming)
         );
         let stable_ids = store.order[..2].to_vec();
-        let pending = store.pending_history(80, 1, 100);
+        let pending = store
+            .project_primary(80, 0, 1, 100, usize::MAX, 0)
+            .overflow_blocks;
         assert_eq!(
             pending
                 .iter()
@@ -1997,9 +2076,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             stable_ids
         );
-        store.acknowledge_history(&pending);
-        assert_eq!(store.committed_cursor(), 2);
-        assert_eq!(store.active_components().count(), 1);
+        store.acknowledge_overflow(&pending);
+        assert_eq!(store.scrollback_cursor(), 2);
+        assert_eq!(store.uncommitted_components().count(), 1);
 
         let TranscriptItem::Assistant(message) = &mut state.transcript[0] else {
             unreachable!()
@@ -2008,7 +2087,7 @@ mod tests {
         message.text_revision += 1;
         store.sync(&state);
         assert_eq!(&store.order[..2], stable_ids.as_slice());
-        assert_eq!(store.committed_cursor(), 2);
+        assert_eq!(store.scrollback_cursor(), 2);
     }
 
     #[test]
@@ -2029,7 +2108,12 @@ mod tests {
                 }));
             let mut store = TranscriptStore::default();
             store.sync(&state);
-            assert!(store.pending_history(80, 1, 100).is_empty());
+            assert!(
+                store
+                    .project_primary(80, 0, 1, 100, usize::MAX, 0)
+                    .overflow_blocks
+                    .is_empty()
+            );
             assert_eq!(
                 store.phase(&store.order[0]),
                 Some(ComponentPhase::Streaming)
@@ -2055,16 +2139,20 @@ mod tests {
         let mut store = TranscriptStore::default();
         store.sync(&state);
 
-        let first = store.pending_history(24, 1, 7);
+        let first = store
+            .project_primary(24, 0, 1, 7, usize::MAX, 0)
+            .overflow_blocks;
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].row_offset, 0);
         assert_eq!(first[0].rows.len(), 7);
         assert!(first[0].total_rows > first[0].rows.len());
-        store.acknowledge_history(&first);
-        assert_eq!(store.committed_cursor(), 0);
-        assert_eq!(store.committed_row_offset(), 7);
+        store.acknowledge_overflow(&first);
+        assert_eq!(store.scrollback_cursor(), 0);
+        assert_eq!(store.scrollback_row_offset(), 7);
 
-        let second = store.pending_history(24, 2, 7);
+        let second = store
+            .project_primary(24, 0, 2, 7, usize::MAX, 0)
+            .overflow_blocks;
         assert_eq!(second[0].row_offset, 7);
     }
 
@@ -2083,15 +2171,15 @@ mod tests {
         store.order.push(id.clone());
         store.components.insert(id.clone(), block);
         store.phases.insert(id.clone(), ComponentPhase::Sealed);
-        store.acknowledge_history(&[CommittedHistoryBlock {
+        store.acknowledge_overflow(&[CommittedHistoryBlock {
             component_id: id,
             source_revision: 1,
             row_offset: 0,
             total_rows: 70_000,
             rows: vec![VisualRow::blank("large"); 65_536],
         }]);
-        assert_eq!(store.committed_cursor(), 0);
-        assert_eq!(store.committed_row_offset(), 65_536);
+        assert_eq!(store.scrollback_cursor(), 0);
+        assert_eq!(store.scrollback_row_offset(), 65_536);
     }
 
     #[test]
@@ -2108,7 +2196,7 @@ mod tests {
             }));
         let mut store = TranscriptStore::default();
         store.sync(&state);
-        let block = store.active_components().next().unwrap();
+        let block = store.uncommitted_components().next().unwrap();
         block.render(40);
         block.render(40);
         assert_eq!(block.render_cache.lock().unwrap().len(), 1);
@@ -2132,21 +2220,25 @@ mod tests {
         let mut store = TranscriptStore::default();
         store.sync(&state);
         let ids = store.order.clone();
-        let wide = store.pending_history(80, 1, 100);
+        let wide = store
+            .project_primary(80, 0, 1, 100, usize::MAX, 0)
+            .overflow_blocks;
         let wide_rows = wide.iter().map(|block| block.rows.len()).sum::<usize>();
-        store.acknowledge_history(&wide);
-        assert_eq!(store.committed_cursor(), store.order.len());
+        store.acknowledge_overflow(&wide);
+        assert_eq!(store.scrollback_cursor(), store.order.len());
 
         store.reset_projection();
-        let narrow = store.pending_history(20, 2, 100);
+        let narrow = store
+            .project_primary(20, 0, 2, 100, usize::MAX, 0)
+            .overflow_blocks;
         let narrow_rows = narrow.iter().map(|block| block.rows.len()).sum::<usize>();
         assert_eq!(store.order, ids);
         assert!(narrow_rows > wide_rows);
-        assert_eq!(store.committed_cursor(), 0);
+        assert_eq!(store.scrollback_cursor(), 0);
     }
 
     #[test]
-    fn canonical_resize_reflow_preserves_ids_and_separates_active_tail() {
+    fn canonical_resize_reflow_preserves_ids_and_rebuilds_the_resident_tail() {
         let mut state = state();
         state.transcript = vec![
             TranscriptItem::User(UserMessage {
@@ -2166,8 +2258,8 @@ mod tests {
         store.sync(&state);
         let ids = store.order.clone();
 
-        let wide = store.canonical_reflow_projection(80, 1, 0);
-        let narrow = store.canonical_reflow_projection(20, 2, 0);
+        let wide = store.canonical_reflow_projection(80, 3, 1, 0);
+        let narrow = store.canonical_reflow_projection(20, 3, 2, 0);
         let wide_rows = wide
             .history_blocks
             .iter()
@@ -2194,14 +2286,14 @@ mod tests {
         assert!(narrow_rows > wide_rows);
         assert!(
             narrow
-                .active_rows
+                .resident_rows
                 .iter()
                 .any(|row| row.plain_text().contains("mutable"))
         );
     }
 
     #[test]
-    fn projection_invalid_sync_outcomes_distinguish_safe_tail_updates() {
+    fn canonical_recovery_restarts_when_the_resident_tail_changes() {
         let mut state = state();
         state.transcript = vec![
             TranscriptItem::Notice("committed".to_owned()),
@@ -2215,10 +2307,12 @@ mod tests {
         ];
         let mut store = TranscriptStore::default();
         assert_eq!(store.sync(&state), TranscriptSyncOutcome::AppendOnly);
-        let pending = store.pending_history(40, 1, 100);
-        store.acknowledge_history(&pending);
-        assert_eq!(store.committed_cursor(), 1);
-        let replay = store.canonical_reflow_projection(40, 2, 0);
+        let pending = store
+            .project_primary(40, 0, 1, 100, usize::MAX, 0)
+            .overflow_blocks;
+        store.acknowledge_overflow(&pending);
+        assert_eq!(store.scrollback_cursor(), 1);
+        let replay = store.canonical_reflow_projection(40, 0, 2, 0);
 
         let TranscriptItem::Assistant(message) = state.transcript.last_mut().unwrap() else {
             unreachable!()
@@ -2226,21 +2320,21 @@ mod tests {
         message.text.push_str(" tail");
         message.text_revision += 1;
         assert_eq!(store.sync(&state), TranscriptSyncOutcome::AppendOnly);
-        assert_eq!(store.committed_cursor(), 1);
-        assert!(store.reflow_projection_is_compatible(&replay));
+        assert_eq!(store.scrollback_cursor(), 1);
+        assert!(!store.reflow_projection_is_compatible(&replay));
 
         state
             .transcript
             .push(TranscriptItem::Notice("appended".to_owned()));
         assert_eq!(store.sync(&state), TranscriptSyncOutcome::AppendOnly);
-        assert_eq!(store.committed_cursor(), 1);
+        assert_eq!(store.scrollback_cursor(), 1);
 
         state.transcript[0] = TranscriptItem::Notice("replaced".to_owned());
         assert_eq!(
             store.sync(&state),
             TranscriptSyncOutcome::ProjectionInvalidated
         );
-        assert_eq!(store.committed_cursor(), 0);
+        assert_eq!(store.scrollback_cursor(), 0);
         assert!(!store.reflow_projection_is_compatible(&replay));
     }
 
@@ -2261,7 +2355,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_reflow_limit_keeps_recent_complete_components() {
+    fn recovery_row_limit_never_truncates_the_physical_scrollback_cursor() {
         let mut state = state();
         state.transcript = vec![
             TranscriptItem::Notice("one".to_owned()),
@@ -2271,25 +2365,36 @@ mod tests {
         let mut store = TranscriptStore::default();
         store.sync(&state);
 
-        let limited = store.canonical_reflow_projection(80, 1, 2);
-        assert_eq!(limited.omitted_components, 1);
-        assert_eq!(limited.history_blocks.len(), 2);
+        let limited = store.canonical_reflow_projection(80, 0, 1, 2);
+        assert_eq!(limited.history_blocks.len(), 3);
         assert_eq!(
             limited
                 .history_blocks
                 .iter()
                 .map(|block| block.rows[0].plain_text())
                 .collect::<Vec<_>>(),
-            vec!["! Notice · two", "! Notice · three"]
+            vec!["! Notice · one", "! Notice · two", "! Notice · three"]
         );
 
-        let unlimited = store.canonical_reflow_projection(80, 2, 0);
-        assert_eq!(unlimited.omitted_components, 0);
-        assert_eq!(unlimited.history_blocks.len(), 3);
+        let unlimited = store.canonical_reflow_projection(80, 0, 2, 0);
+        assert_eq!(
+            limited
+                .history_blocks
+                .iter()
+                .flat_map(|block| block.rows.iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+            unlimited
+                .history_blocks
+                .iter()
+                .flat_map(|block| block.rows.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
-    fn resize_reflow_never_splits_an_oversized_component() {
+    fn resize_reflow_preserves_every_row_of_an_oversized_component() {
         let mut state = state();
         state.transcript.push(TranscriptItem::User(UserMessage {
             text: "word ".repeat(200),
@@ -2298,18 +2403,18 @@ mod tests {
         let mut store = TranscriptStore::default();
         store.sync(&state);
 
-        let projection = store.canonical_reflow_projection(12, 1, 3);
+        let projection = store.canonical_reflow_projection(12, 0, 1, 3);
         assert_eq!(projection.history_blocks.len(), 1);
-        assert!(projection.history_blocks[0].rows.len() > 3);
+        assert_eq!(projection.history_blocks[0].row_offset, 0);
         assert_eq!(
             projection.history_blocks[0].rows.len(),
             projection.history_blocks[0].total_rows
         );
         assert!(store.apply_reflow_projection(&projection));
-        assert_eq!(store.committed_cursor(), store.order.len());
+        assert_eq!(store.scrollback_cursor(), store.order.len());
         assert_eq!(
             store.render_canonical_history(12).len(),
-            projection.history_blocks[0].rows.len()
+            projection.history_blocks[0].total_rows
         );
     }
 
@@ -2324,7 +2429,7 @@ mod tests {
         }));
         let mut store = TranscriptStore::default();
         store.sync(&state);
-        let projection = store.canonical_reflow_projection(80, 1, 0);
+        let projection = store.canonical_reflow_projection(80, 0, 1, 0);
         let batches = TranscriptStore::canonical_reflow_batches(&projection, 128, 64 * 1024);
 
         assert!(batches.len() > 70);
@@ -2349,6 +2454,29 @@ mod tests {
     }
 
     #[test]
+    fn canonical_projection_handles_more_than_ten_thousand_history_rows() {
+        let mut state = state();
+        state.transcript = (0..10_050)
+            .map(|index| TranscriptItem::Notice(format!("row {index}")))
+            .collect();
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+
+        let projection = store.canonical_reflow_projection(40, 20, 1, 0);
+        let overflow_rows = projection
+            .history_blocks
+            .iter()
+            .map(|block| block.rows.len())
+            .sum::<usize>();
+        assert_eq!(overflow_rows, 10_030);
+        assert_eq!(projection.resident_rows.len(), 20);
+        assert_eq!(
+            projection.resident_rows.last().map(VisualRow::plain_text),
+            Some("! Notice · row 10049".to_owned())
+        );
+    }
+
+    #[test]
     fn streaming_resize_then_completion_matches_uninterrupted_rendering() {
         let initial = "Stable paragraph.\n\n```rust\nfn main() {";
         let completed = concat!(
@@ -2368,7 +2496,7 @@ mod tests {
             }));
         let mut resized = TranscriptStore::default();
         resized.sync(&resized_state);
-        let projection = resized.canonical_reflow_projection(24, 1, 0);
+        let projection = resized.canonical_reflow_projection(24, 0, 1, 0);
         assert!(resized.apply_reflow_projection(&projection));
 
         let TranscriptItem::Assistant(message) = resized_state.transcript.last_mut().unwrap()
@@ -2462,7 +2590,12 @@ mod tests {
         assert_eq!(store.order, vec!["tool:call-1"]);
         assert_eq!(store.phase("tool:call-1"), Some(ComponentPhase::Sealed));
         assert_eq!(
-            store.active_components().next().unwrap().render(40).len(),
+            store
+                .uncommitted_components()
+                .next()
+                .unwrap()
+                .render(40)
+                .len(),
             2
         );
     }
@@ -2827,7 +2960,7 @@ mod tests {
         let mut store = TranscriptStore::default();
         store.sync(&state);
         let rows = store
-            .active_components()
+            .uncommitted_components()
             .flat_map(|component| component.render(40))
             .collect::<Vec<_>>();
         assert!(
@@ -2866,7 +2999,7 @@ mod tests {
         ];
         let mut store = TranscriptStore::default();
         store.sync(&state);
-        let blocks = store.active_components().collect::<Vec<_>>();
+        let blocks = store.uncommitted_components().collect::<Vec<_>>();
         let first_tool = blocks
             .iter()
             .find(|block| block.id == "tool:tool-1")

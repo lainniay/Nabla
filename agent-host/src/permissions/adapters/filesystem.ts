@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 
 import type {
   FileOperation,
@@ -22,20 +23,20 @@ export interface FileToolInput {
 
 export class FileSystemAdapter implements PermissionAdapter<FileToolInput> {
   private readonly tool: string;
-  private readonly operation: FileOperation;
+  private readonly operations: readonly FileOperation[];
 
   constructor(
     tool: string,
-    operation: FileOperation,
+    operation: FileOperation | readonly FileOperation[],
   ) {
     this.tool = tool;
-    this.operation = operation;
+    this.operations = Array.isArray(operation) ? operation : [operation];
   }
 
   normalize(context: ToolContext, input: FileToolInput): PermissionIntent {
-    const path = resolve(context.cwd, input.path);
+    const path = canonicalizePath(context.cwd, input.path);
     const destination = input.destination
-      ? resolve(context.cwd, input.destination)
+      ? canonicalizePath(context.cwd, input.destination)
       : undefined;
     return createIntent(
       context,
@@ -43,14 +44,15 @@ export class FileSystemAdapter implements PermissionAdapter<FileToolInput> {
       {
         ...input,
         path,
+        operations: this.operations,
         ...(destination ? { destination } : {}),
       },
-      [{
-        kind: "file",
-        operation: this.operation,
+      this.operations.map((operation) => ({
+        kind: "file" as const,
+        operation,
         path,
         ...(destination ? { destination } : {}),
-      }],
+      })),
     );
   }
 
@@ -65,9 +67,28 @@ export class FileSystemAdapter implements PermissionAdapter<FileToolInput> {
 
 export const ReadAdapter = new FileSystemAdapter("read", "read");
 export const ListAdapter = new FileSystemAdapter("read", "list");
-export const WriteAdapter = new FileSystemAdapter("write", "write");
-export const CreateAdapter = new FileSystemAdapter("write", "create");
+export const WriteAdapter = new FileSystemAdapter(
+  "write",
+  ["truncate", "write"],
+);
+export const CreateAdapter = new FileSystemAdapter(
+  "write",
+  ["create", "write"],
+);
 export const AppendAdapter = new FileSystemAdapter("write", "append");
 export const EditAdapter = new FileSystemAdapter("edit", "write");
 export const RenameAdapter = new FileSystemAdapter("rename", "rename");
 export const DeleteAdapter = new FileSystemAdapter("delete", "delete");
+
+function canonicalizePath(cwd: string, input: string): string {
+  const absolute = resolve(cwd, input);
+  let existing = absolute;
+  const suffix: string[] = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) return absolute;
+    suffix.unshift(basename(existing));
+    existing = parent;
+  }
+  return resolve(realpathSync(existing), ...suffix);
+}

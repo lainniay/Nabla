@@ -5,7 +5,7 @@ import test from "node:test";
 import { parseBootstrapState } from "./protocol/contracts.ts";
 import { parseFileReferenceEnvelope } from "./protocol/message-content.ts";
 import type { SessionHistoryItem } from "./session-navigation.ts";
-import type { ApprovalRulesSnapshot } from "./approval-store.ts";
+import type { WorkspaceGrantSnapshot } from "./permissions/approvals/workspace-store.ts";
 
 test("shared bootstrap fixture satisfies the TypeScript protocol contract", () => {
   const fixturePath = new URL(
@@ -67,13 +67,13 @@ test("shared persistent-approval fixture uses the cross-language wire shape", ()
   const fixture = JSON.parse(
     readFileSync(
       new URL(
-        "../../protocol-fixtures/nabla.approval-rules.v1.json",
+        "../../protocol-fixtures/nabla.workspace-grants.v3.json",
         import.meta.url,
       ),
       "utf8",
     ),
-  ) as ApprovalRulesSnapshot;
+  ) as WorkspaceGrantSnapshot;
   assert.equal(fixture.workspace, "/workspace");
-  assert.equal(fixture.rules[0]?.kind, "command_prefix");
-  assert.equal(fixture.rules[0]?.toolName, "bash");
+  assert.equal(fixture.grants[0]?.scope, "workspace");
+  assert.equal(fixture.grants[0]?.matchers[0]?.kind, "exec");
 });

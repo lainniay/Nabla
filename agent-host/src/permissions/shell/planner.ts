@@ -1,3 +1,4 @@
+import { globSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
 import type {
@@ -12,8 +13,11 @@ import { parseShell } from "./parser.ts";
 
 export interface ExecutionPlan {
   source: string;
+  cwd: string;
   atoms: CapabilityAtom[];
   commands: ExecCapability[];
+  globExpansions: Record<string, string[]>;
+  readOnly: boolean;
   opaque: boolean;
   requiresShell: boolean;
 }
@@ -33,7 +37,9 @@ export function planParsedShell(
 ): ExecutionPlan {
   const atoms: CapabilityAtom[] = [];
   const commands: ExecCapability[] = [];
-  let currentCwd = resolve(cwd);
+  const globExpansions: Record<string, string[]> = {};
+  const initialCwd = resolve(cwd);
+  let currentCwd = initialCwd;
   let opaque = false;
   let requiresShell =
     script.connectors.length > 0 ||
@@ -43,8 +49,11 @@ export function planParsedShell(
     atoms.push(opaqueAtom("shell", script.source, script.opaqueReason));
     return {
       source: script.source,
+      cwd: initialCwd,
       atoms,
       commands,
+      globExpansions,
+      readOnly: false,
       opaque: true,
       requiresShell: true,
     };
@@ -55,6 +64,7 @@ export function planParsedShell(
       const nested = planParsedShell(node.script, currentCwd, environment);
       atoms.push(...nested.atoms);
       commands.push(...nested.commands);
+      Object.assign(globExpansions, nested.globExpansions);
       opaque ||= nested.opaque;
       requiresShell ||= nested.requiresShell;
       continue;
@@ -62,6 +72,7 @@ export function planParsedShell(
     const planned = planCommand(node, currentCwd, environment);
     atoms.push(...planned.atoms);
     commands.push(...planned.commands);
+    Object.assign(globExpansions, planned.globExpansions);
     opaque ||= planned.opaque;
     requiresShell ||= node.redirections.length > 0 ||
       node.substitutions.length > 0;
@@ -69,16 +80,30 @@ export function planParsedShell(
       currentCwd = resolve(currentCwd, node.argv[1]!);
     }
   }
-  return { source: script.source, atoms, commands, opaque, requiresShell };
+  return {
+    source: script.source,
+    cwd: initialCwd,
+    atoms,
+    commands,
+    globExpansions,
+    readOnly: !opaque && atoms.every((atom) =>
+      atom.kind !== "file" ||
+      atom.operation === "read" ||
+      atom.path === "/dev/null"
+    ),
+    opaque,
+    requiresShell,
+  };
 }
 
 function planCommand(
   command: ShellCommand,
   cwd: string,
   inheritedEnvironment: Record<string, string>,
-): Pick<ExecutionPlan, "atoms" | "commands" | "opaque"> {
+): Pick<ExecutionPlan, "atoms" | "commands" | "globExpansions" | "opaque"> {
   const atoms: CapabilityAtom[] = [];
   const commands: ExecCapability[] = [];
+  const globExpansions: Record<string, string[]> = {};
   let opaque = false;
   if (command.opaqueReason || command.argv.length === 0) {
     atoms.push(
@@ -99,6 +124,17 @@ function planCommand(
     };
     atoms.push(exec);
     commands.push(exec);
+    for (const operand of fileReadOperands(command)) {
+      const expanded = expandOperand(operand, cwd);
+      if (expanded.pattern) {
+        globExpansions[`${cwd}\u0000${operand}`] = expanded.paths;
+      }
+      atoms.push(...expanded.paths.map((path): FileCapability => ({
+        kind: "file",
+        operation: "read",
+        path,
+      })));
+    }
 
     const executable = command.argv[0]!.split("/").at(-1);
     if ((executable === "bash" || executable === "sh") && command.argv[1] === "-c") {
@@ -148,9 +184,55 @@ function planCommand(
     const nested = planParsedShell(substitution, cwd, inheritedEnvironment);
     atoms.push(...nested.atoms);
     commands.push(...nested.commands);
+    Object.assign(globExpansions, nested.globExpansions);
     opaque ||= nested.opaque;
   }
-  return { atoms, commands, opaque };
+  return { atoms, commands, globExpansions, opaque };
+}
+
+function fileReadOperands(command: ShellCommand): string[] {
+  const executable = command.argv[0]?.split("/").at(-1);
+  const argv = command.argv.slice(1);
+  if (executable === "cat") {
+    const separator = argv.indexOf("--");
+    return argv.filter((value, index) =>
+      value !== "-" &&
+      (separator >= 0 ? index > separator : !value.startsWith("-"))
+    );
+  }
+  if (executable !== "head") return [];
+  const operands: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const value = argv[index]!;
+    if (value === "--") {
+      operands.push(...argv.slice(index + 1).filter((item) => item !== "-"));
+      break;
+    }
+    if (value === "-c" || value === "-n") {
+      index += 1;
+      continue;
+    }
+    if (value === "-" || value.startsWith("-")) continue;
+    operands.push(value);
+  }
+  return operands;
+}
+
+function expandOperand(
+  operand: string,
+  cwd: string,
+): { paths: string[]; pattern: boolean } {
+  const pattern = /[*?[\]]/u.test(operand);
+  if (!pattern) {
+    return {
+      paths: [isAbsolute(operand) ? resolve(operand) : resolve(cwd, operand)],
+      pattern: false,
+    };
+  }
+  return {
+    paths: globSync(operand, { cwd }).map((path) => resolve(cwd, path)).sort(),
+    pattern: true,
+  };
 }
 
 function opaqueAtom(

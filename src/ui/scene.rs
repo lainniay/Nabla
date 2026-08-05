@@ -6,9 +6,10 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     command::COMMAND_MENU_VISIBLE_ROWS,
+    host::ApprovalDecision,
     state::{
-        AppState, AuthPromptKind, AuthState, PlanReviewState, TranscriptItem, TranscriptViewMode,
-        TreeItem, TreePhase, UiModalKind, matching_auth_choice_indices,
+        AppState, AuthPromptKind, AuthState, GrantProposal, PlanReviewState, TranscriptItem,
+        TranscriptViewMode, TreeItem, TreePhase, UiModalKind, matching_auth_choice_indices,
     },
 };
 
@@ -50,30 +51,22 @@ pub fn animation_active(state: &AppState) -> bool {
 }
 
 impl SceneBuilder {
-    pub fn build(
-        self,
-        domain: &AppState,
-        ui: &UiState,
-        surface: SurfaceKind,
-        pending_history_components: usize,
-    ) -> VisualFrame {
+    pub fn build(self, domain: &AppState, ui: &UiState, surface: SurfaceKind) -> VisualFrame {
         match surface {
-            SurfaceKind::Primary => {
-                self.build_primary(domain, ui, pending_history_components, None)
-            }
+            SurfaceKind::Primary => self.build_primary(domain, ui, None),
             SurfaceKind::Alternate => self.build_alternate(domain, ui),
         }
     }
 
-    pub fn build_with_history(
+    pub fn build_with_projection(
         self,
         domain: &AppState,
         ui: &UiState,
         surface: SurfaceKind,
-        pending_history: &[super::types::CommittedHistoryBlock],
+        projection: &super::types::PrimaryTranscriptProjection,
     ) -> VisualFrame {
         match surface {
-            SurfaceKind::Primary => self.build_primary(domain, ui, 0, Some(pending_history)),
+            SurfaceKind::Primary => self.build_primary(domain, ui, Some(projection)),
             SurfaceKind::Alternate => self.build_alternate(domain, ui),
         }
     }
@@ -82,8 +75,7 @@ impl SceneBuilder {
         self,
         domain: &AppState,
         ui: &UiState,
-        pending_history_components: usize,
-        pending_history: Option<&[super::types::CommittedHistoryBlock]>,
+        projection: Option<&super::types::PrimaryTranscriptProjection>,
     ) -> VisualFrame {
         let size = ui.terminal.size;
         let composer_width = composer_content_width(size.width);
@@ -121,21 +113,25 @@ impl SceneBuilder {
         }
 
         let mut canvas = Canvas::new(ui.revision, size, layout);
-        let transcript_rows = if let Some(pending_history) = pending_history {
-            ui.transcript.active_rows_after_history(
-                layout.transcript.width,
-                ui.animation_frame,
-                pending_history,
-            )
+        let owned_projection;
+        let projection = if let Some(projection) = projection {
+            projection
         } else {
-            ui.transcript
-                .active_components_after(pending_history_components)
-                .flat_map(|component| {
-                    component.render_animated(layout.transcript.width, ui.animation_frame)
-                })
-                .collect::<Vec<_>>()
+            owned_projection = ui.transcript.project_primary(
+                layout.history_window.width,
+                usize::from(layout.history_window.height),
+                ui.revision,
+                usize::MAX,
+                usize::MAX,
+                ui.animation_frame,
+            );
+            &owned_projection
         };
-        let transcript_viewport = canvas.place_tail(layout.transcript, &transcript_rows);
+        debug_assert_eq!(
+            projection.resident_capacity,
+            usize::from(layout.history_window.height)
+        );
+        canvas.place_tail(layout.history_window, &projection.resident_rows);
 
         canvas.panel = layout
             .panel
@@ -176,18 +172,7 @@ impl SceneBuilder {
             layout.status,
             &[status_row(domain, size.width, ui.animation_frame)],
         );
-        let viewport_top = transcript_viewport
-            .map(|area| area.y)
-            .into_iter()
-            .chain(std::iter::once(layout.composer.y.saturating_sub(1)))
-            .min()
-            .unwrap_or(layout.composer.y);
-        canvas.viewport = Rect::new(
-            0,
-            viewport_top,
-            size.width,
-            size.height.saturating_sub(viewport_top),
-        );
+        canvas.viewport = layout.owned_surface;
         canvas.finish()
     }
 
@@ -204,6 +189,8 @@ impl SceneBuilder {
             .saturating_add(u16::from(size.height > status_height + composer_height));
         let layout = MainLayout {
             transcript: Rect::new(0, 0, size.width, transcript_height),
+            history_window: Rect::new(0, 0, size.width, transcript_height),
+            owned_surface: Rect::new(0, 0, size.width, size.height),
             panel: None,
             composer: Rect::new(0, composer_y, size.width, composer_height),
             status: Rect::new(0, size.height.saturating_sub(1), size.width, 1),
@@ -885,7 +872,7 @@ fn primary_panel_request(state: &AppState, width: u16) -> Option<PanelRequest> {
                     width,
                 ),
             ];
-            if manager.snapshot.rules.is_empty() {
+            if manager.snapshot.grants.is_empty() {
                 rows.push(text_row(
                     "permissions",
                     "No persistent approvals",
@@ -896,14 +883,14 @@ fn primary_panel_request(state: &AppState, width: u16) -> Option<PanelRequest> {
                 rows.extend(
                     manager
                         .snapshot
-                        .rules
+                        .grants
                         .iter()
                         .enumerate()
-                        .map(|(index, rule)| {
+                        .map(|(index, grant)| {
                             panel_choice_row(
                                 "permissions",
-                                &rule.tool_name,
-                                &rule.summary,
+                                &grant.proposal.scope,
+                                &grant_proposal_summary(&grant.proposal),
                                 index == manager.selected,
                                 true,
                                 width,
@@ -912,7 +899,7 @@ fn primary_panel_request(state: &AppState, width: u16) -> Option<PanelRequest> {
                 );
             }
             let selected =
-                (!manager.snapshot.rules.is_empty()).then_some(manager.selected.saturating_add(2));
+                (!manager.snapshot.grants.is_empty()).then_some(manager.selected.saturating_add(2));
             let height = rows.len().min(state.selection_page_size.saturating_add(2));
             PanelRequest::new(rows, selected, height)
         }
@@ -1147,20 +1134,71 @@ fn approval_panel_request(
         },
         width,
     ));
-    rows.push(approval_operation_row(approval, width));
-
-    let mut actions = vec![("[Y] Allow once", "Approve only this request")];
-    if risk == "normal" {
-        actions.push((
-            "[S] Allow for Session",
-            "Reuse matching requests in this session",
+    if risk != "normal"
+        && !approval.summary.is_empty()
+        && approval.summary != approval_summary(approval)
+    {
+        rows.push(text_row(
+            "approval-summary-detail",
+            &approval.summary,
+            CellStyle::foreground(palette::SUBTEXT_0),
+            width,
         ));
     }
-    if risk == "normal" {
-        let (label, scope) = persistent_approval_action(approval);
-        actions.push((label, scope));
+    rows.push(approval_operation_row(approval, width));
+
+    if approval
+        .available_decisions
+        .contains(&ApprovalDecision::AllowSession)
+        && let Some(proposal) = approval.session_grant.as_ref()
+    {
+        rows.push(text_row(
+            "approval-session-grant",
+            &format!("Session saves: {}", grant_proposal_summary(proposal)),
+            CellStyle::foreground(palette::SUBTEXT_0).dim(),
+            width,
+        ));
     }
-    actions.push(("[N] Deny", "Reject this tool request"));
+    if approval
+        .available_decisions
+        .contains(&ApprovalDecision::AllowWorkspace)
+        && let Some(proposal) = approval.workspace_grant.as_ref()
+    {
+        rows.push(text_row(
+            "approval-workspace-grant",
+            &format!("Workspace saves: {}", grant_proposal_summary(proposal)),
+            CellStyle::foreground(palette::SUBTEXT_0).dim(),
+            width,
+        ));
+    }
+
+    let actions = approval
+        .available_decisions
+        .iter()
+        .map(|decision| match decision {
+            ApprovalDecision::AllowOnce => (
+                "[Y] Allow once".to_owned(),
+                "Approve only this request".to_owned(),
+            ),
+            ApprovalDecision::AllowSession => (
+                "[S] Allow for Session".to_owned(),
+                approval.session_grant.as_ref().map_or_else(
+                    || "No session grant was proposed".to_owned(),
+                    grant_proposal_summary,
+                ),
+            ),
+            ApprovalDecision::AllowWorkspace => (
+                "[A] Allow for Workspace".to_owned(),
+                approval.workspace_grant.as_ref().map_or_else(
+                    || "No workspace grant was proposed".to_owned(),
+                    grant_proposal_summary,
+                ),
+            ),
+            ApprovalDecision::Deny => {
+                ("[N] Deny".to_owned(), "Reject this tool request".to_owned())
+            }
+        })
+        .collect::<Vec<_>>();
     let action_offset = rows.len();
     for (index, (label, description)) in actions.iter().enumerate() {
         rows.push(panel_choice_row(
@@ -1180,29 +1218,59 @@ fn approval_panel_request(
     )
 }
 
-fn persistent_approval_action(
-    approval: &crate::state::ApprovalState,
-) -> (&'static str, &'static str) {
-    if approval.tool_name == "bash" {
-        (
-            "[A] Allow for Workspace",
-            "Reuse this exact command in this workspace",
-        )
-    } else if approval
-        .input
-        .get("path")
-        .and_then(|value| value.as_str())
-        .is_some()
-    {
-        (
-            "[A] Allow for Workspace",
-            "Reuse this file operation in this workspace",
-        )
-    } else {
-        (
-            "[A] Allow for Workspace",
-            "Reuse this request in this workspace",
-        )
+fn grant_proposal_summary(proposal: &GrantProposal) -> String {
+    let mut parts = proposal
+        .matchers
+        .iter()
+        .map(grant_matcher_summary)
+        .collect::<Vec<_>>();
+    parts.extend(proposal.invalidation_keys.iter().map(|key| {
+        let kind = key
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("invalidation");
+        let path = key
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if path.is_empty() {
+            format!("{kind}={}", key["value"].as_str().unwrap_or("?"))
+        } else {
+            format!("{kind} {path}={}", key["value"].as_str().unwrap_or("?"))
+        }
+    }));
+    parts.join("; ")
+}
+
+fn grant_matcher_summary(matcher: &serde_json::Value) -> String {
+    match matcher.get("kind").and_then(serde_json::Value::as_str) {
+        Some("exec") => {
+            let executable = matcher["executable"].as_str().unwrap_or("?");
+            let argv = matcher["argv"]
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            let cwd = matcher["cwd"].as_str().unwrap_or("?");
+            format!("exec {executable} {argv} @ {cwd}")
+        }
+        Some("file") => format!(
+            "{} {}",
+            matcher["operation"].as_str().unwrap_or("file"),
+            matcher["path"].as_str().unwrap_or("?")
+        ),
+        Some("opaque_code") => format!(
+            "exact opaque {}:{}",
+            matcher["runtime"].as_str().unwrap_or("?"),
+            matcher["digest"].as_str().unwrap_or("?")
+        ),
+        Some(kind) => format!("{kind} {}", matcher),
+        None => matcher.to_string(),
     }
 }
 
@@ -1212,11 +1280,8 @@ fn approval_summary(approval: &crate::state::ApprovalState) -> &str {
         "credential" => "May access sensitive credentials",
         "high" => "High-risk command",
         "elevated" => "Elevated operation",
-        _ => approval
-            .reason
-            .as_deref()
-            .filter(|reason| !reason.is_empty())
-            .unwrap_or("This action requires approval"),
+        _ if approval.summary.is_empty() => "This action requires approval",
+        _ => &approval.summary,
     }
 }
 
@@ -1981,7 +2046,7 @@ mod tests {
         domain.editor.insert_text("你👩🏽‍💻");
         let mut store = UiStore::new(super::super::types::TerminalSize::new(20, 8));
         store.synchronize(&domain);
-        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
 
         assert_eq!(frame.revision, store.state().revision);
         assert_eq!(frame.rows.len(), 8);
@@ -2000,7 +2065,7 @@ mod tests {
     }
 
     #[test]
-    fn skipping_pending_history_removes_it_from_the_same_committed_frame() {
+    fn stable_history_remains_resident_until_it_leaves_the_fixed_window() {
         let mut domain = state();
         domain.transcript = vec![
             TranscriptItem::Notice("sealed".to_owned()),
@@ -2012,34 +2077,244 @@ mod tests {
         ];
         let mut store = UiStore::new(super::super::types::TerminalSize::new(30, 8));
         store.synchronize(&domain);
-        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 1);
+        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
         let visible = frame
             .rows
             .iter()
             .map(VisualRow::plain_text)
             .collect::<String>();
-        assert!(!visible.contains("sealed"));
+        assert!(visible.contains("sealed"));
         assert!(visible.contains("live"));
     }
 
     #[test]
-    fn empty_primary_surface_owns_only_the_bottom_composer_and_status() {
+    fn empty_primary_surface_owns_the_full_screen_with_fixed_history_geometry() {
         let domain = state();
         let size = super::super::types::TerminalSize::new(40, 12);
         let mut store = UiStore::new(size);
         store.synchronize(&domain);
 
-        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
 
+        assert_eq!(frame.viewport, Rect::new(0, 0, size.width, size.height));
+        assert_eq!(frame.main_layout.owned_surface, frame.viewport);
         assert_eq!(
-            frame.viewport.y.saturating_add(1),
+            frame.main_layout.history_window,
+            frame.main_layout.transcript
+        );
+        assert_eq!(frame.main_layout.history_window.y, 0);
+        assert_eq!(
+            frame.main_layout.history_window.bottom().saturating_add(1),
             frame.main_layout.composer.y
         );
-        assert_eq!(frame.viewport.bottom(), size.height);
         assert!(
-            frame.rows[..usize::from(frame.viewport.y)]
+            frame.rows[..usize::from(frame.main_layout.history_window.bottom())]
                 .iter()
                 .all(|row| row.plain_text().is_empty())
+        );
+    }
+
+    #[test]
+    fn bootstrap_blank_rows_move_up_as_transcript_grows() {
+        let mut domain = state();
+        let size = super::super::types::TerminalSize::new(40, 12);
+        let mut store = UiStore::new(size);
+        store.synchronize(&domain);
+        let empty = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+
+        domain
+            .transcript
+            .push(TranscriptItem::Assistant(AssistantMessage {
+                text: "first\n\nsecond\n\nthird".to_owned(),
+                complete: false,
+                ..AssistantMessage::default()
+            }));
+        store.synchronize(&domain);
+        let grown = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+
+        assert_eq!(empty.viewport, Rect::new(0, 0, size.width, size.height));
+        assert_eq!(grown.viewport, empty.viewport);
+        let first_content = grown
+            .rows
+            .iter()
+            .position(|row| !row.plain_text().is_empty())
+            .expect("resident transcript content");
+        assert!(first_content > 0);
+        assert!(
+            grown.rows[..first_content]
+                .iter()
+                .all(|row| row.plain_text().is_empty())
+        );
+    }
+
+    #[test]
+    fn claimed_primary_surface_never_exposes_shell_rows() {
+        let domain = state();
+        let size = super::super::types::TerminalSize::new(40, 12);
+        let mut store = UiStore::new(size);
+        store.synchronize(&domain);
+        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+
+        assert_eq!(frame.viewport, Rect::new(0, 0, size.width, size.height));
+        assert_eq!(frame.main_layout.transcript.y, 0);
+        assert_eq!(frame.main_layout.status.bottom(), size.height);
+    }
+
+    #[test]
+    fn message_completion_preserves_visible_row_positions() {
+        let mut domain = state();
+        domain
+            .transcript
+            .push(TranscriptItem::Assistant(AssistantMessage {
+                id: 1,
+                text: "```text\none\ntwo\nthree\nfour\nfive".to_owned(),
+                complete: false,
+                ..AssistantMessage::default()
+            }));
+        let size = super::super::types::TerminalSize::new(48, 14);
+        let mut store = UiStore::new(size);
+        store.synchronize(&domain);
+        let streaming = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+        let row_before = streaming
+            .rows
+            .iter()
+            .position(|row| row.plain_text().contains("three"))
+            .expect("streaming row");
+
+        let TranscriptItem::Assistant(message) = &mut domain.transcript[0] else {
+            unreachable!()
+        };
+        message.complete = true;
+        store.synchronize(&domain);
+        let projection = store.state().transcript.project_primary(
+            size.width,
+            usize::from(streaming.main_layout.history_window.height),
+            store.state().revision,
+            100,
+            usize::MAX,
+            store.state().animation_frame,
+        );
+        let completed = SceneBuilder.build_with_projection(
+            &domain,
+            store.state(),
+            SurfaceKind::Primary,
+            &projection,
+        );
+        let row_after = completed
+            .rows
+            .iter()
+            .position(|row| row.plain_text().contains("three"))
+            .expect("completed row remains resident");
+
+        assert_eq!(row_after, row_before);
+    }
+
+    #[test]
+    fn completed_assistant_does_not_leave_screen_height_gap() {
+        let mut domain = state();
+        domain.transcript = vec![
+            TranscriptItem::Assistant(AssistantMessage {
+                id: 7,
+                text: "```text\none\ntwo\nthree\nfour\nfive".to_owned(),
+                complete: true,
+                ..AssistantMessage::default()
+            }),
+            TranscriptItem::TurnSeparator(crate::state::TurnSeparator {
+                turn_id: "turn-gap".to_owned(),
+                started_at: "start".to_owned(),
+                ended_at: "end".to_owned(),
+                duration_ms: 1_000,
+                estimated: false,
+            }),
+        ];
+        let size = super::super::types::TerminalSize::new(48, 14);
+        let mut store = UiStore::new(size);
+        store.synchronize(&domain);
+        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+        let last_history_row = frame.rows[..usize::from(frame.main_layout.composer.y)]
+            .iter()
+            .rposition(|row| !row.plain_text().is_empty())
+            .expect("completed transcript remains visible");
+        assert_eq!(
+            last_history_row.saturating_add(2),
+            usize::from(frame.main_layout.composer.y)
+        );
+    }
+
+    #[test]
+    fn turn_separator_remains_adjacent_to_visible_history() {
+        let mut domain = state();
+        domain.transcript = vec![
+            TranscriptItem::Assistant(AssistantMessage {
+                id: 1,
+                text: "```text\nvisible tail".to_owned(),
+                complete: true,
+                ..AssistantMessage::default()
+            }),
+            TranscriptItem::TurnSeparator(crate::state::TurnSeparator {
+                turn_id: "turn-adjacent".to_owned(),
+                started_at: "start".to_owned(),
+                ended_at: "end".to_owned(),
+                duration_ms: 1_000,
+                estimated: false,
+            }),
+        ];
+        let size = super::super::types::TerminalSize::new(48, 14);
+        let mut store = UiStore::new(size);
+        store.synchronize(&domain);
+        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+        let visible = frame
+            .rows
+            .iter()
+            .map(VisualRow::plain_text)
+            .collect::<Vec<_>>();
+        let tail = visible
+            .iter()
+            .position(|row| row.contains("visible tail"))
+            .expect("visible assistant tail");
+        let separator = visible
+            .iter()
+            .position(|row| row.contains("Worked for"))
+            .expect("visible turn separator");
+        assert!(separator > tail && separator.saturating_sub(tail) <= 2);
+    }
+
+    #[test]
+    fn opening_and_closing_panel_restores_owned_primary_rows() {
+        let mut domain = state();
+        domain
+            .transcript
+            .push(TranscriptItem::Assistant(AssistantMessage {
+                text: "owned transcript row".to_owned(),
+                complete: false,
+                ..AssistantMessage::default()
+            }));
+        let size = super::super::types::TerminalSize::new(48, 14);
+        let mut store = UiStore::new(size);
+        store.synchronize(&domain);
+        let baseline = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+
+        domain.editor.insert_text("/");
+        store.synchronize(&domain);
+        let opened = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+        assert!(opened.panel.is_some());
+        domain.editor.clear();
+        store.synchronize(&domain);
+        let restored = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+
+        assert_eq!(baseline.viewport, Rect::new(0, 0, size.width, size.height));
+        assert_eq!(restored.viewport, baseline.viewport);
+        assert_eq!(
+            restored
+                .rows
+                .iter()
+                .map(VisualRow::plain_text)
+                .collect::<Vec<_>>(),
+            baseline
+                .rows
+                .iter()
+                .map(VisualRow::plain_text)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -2054,7 +2329,7 @@ mod tests {
         let mut store = UiStore::new(size);
         store.synchronize(&domain);
 
-        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
         let transcript = frame
             .component_bounds
             .get("transcript:0")
@@ -2065,7 +2340,8 @@ mod tests {
             usize::from(frame.main_layout.composer.y)
         );
         assert!(frame.rows[transcript.end].plain_text().is_empty());
-        assert_eq!(frame.viewport.y, transcript.start as u16);
+        assert_eq!(frame.viewport.y, 0);
+        assert_eq!(frame.main_layout.history_window.y, 0);
         assert!(
             frame.rows[transcript.start..transcript.end]
                 .iter()
@@ -2082,7 +2358,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_turn_separator_keeps_an_owned_blank_row_above_the_composer() {
+    fn resident_turn_separator_keeps_an_owned_blank_row_above_the_composer() {
         let mut domain = state();
         domain
             .transcript
@@ -2097,12 +2373,16 @@ mod tests {
         let mut store = UiStore::new(size);
         store.synchronize(&domain);
 
-        // The separator is being committed to native history in this frame,
-        // so it is intentionally absent from the live transcript projection.
-        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 1);
+        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
         let gap = frame.main_layout.composer.y.saturating_sub(1);
-        assert_eq!(frame.viewport.y, gap);
+        assert_eq!(frame.viewport.y, 0);
+        assert_eq!(frame.main_layout.history_window.y, 0);
         assert!(frame.rows[usize::from(gap)].plain_text().is_empty());
+        assert!(
+            frame.rows[..usize::from(gap)]
+                .iter()
+                .any(|row| row.plain_text().contains("Worked for"))
+        );
         assert!(
             frame.rows[usize::from(frame.main_layout.composer.y)]
                 .plain_text()
@@ -2127,9 +2407,9 @@ mod tests {
         store.synchronize(&domain);
 
         assert!(animation_active(&domain));
-        let first = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+        let first = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
         store.state_mut().animation_frame = 1;
-        let second = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+        let second = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
         let first_text = first
             .rows
             .iter()
@@ -2150,7 +2430,8 @@ mod tests {
             store
                 .state()
                 .transcript
-                .pending_history(size.width, 1, 100)
+                .project_primary(size.width, 100, 1, 100, usize::MAX, 0)
+                .overflow_blocks
                 .is_empty()
         );
     }
@@ -2167,11 +2448,11 @@ mod tests {
             }));
         let mut store = UiStore::new(super::super::types::TerminalSize::new(80, 24));
         store.synchronize(&domain);
-        let baseline = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+        let baseline = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
 
         domain.editor.insert_text("/");
         store.reduce(super::super::store::UiEvent::DomainChanged);
-        let opened = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+        let opened = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
         assert!(opened.main_layout.panel.is_some());
         assert_eq!(
             opened.main_layout.transcript,
@@ -2197,7 +2478,7 @@ mod tests {
 
         domain.editor.clear();
         store.reduce(super::super::store::UiEvent::DomainChanged);
-        let restored = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+        let restored = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
         assert!(restored.main_layout.panel.is_none());
         assert!(restored.panel.is_none());
         assert_eq!(
@@ -2228,14 +2509,52 @@ mod tests {
             goal_id: None,
             reason: Some("run tests".to_owned()),
             risk: Some("normal".to_owned()),
+            summary: "run tests".to_owned(),
             selected: 0,
             replying: false,
+            available_decisions: vec![
+                ApprovalDecision::AllowOnce,
+                ApprovalDecision::AllowSession,
+                ApprovalDecision::AllowWorkspace,
+                ApprovalDecision::Deny,
+            ],
+            session_grant: Some(GrantProposal {
+                scope: "session".to_owned(),
+                workspace_id: "workspace-1".to_owned(),
+                session_id: Some("session-1".to_owned()),
+                matchers: vec![json!({
+                    "kind": "exec",
+                    "executable": "cargo",
+                    "argv": ["test"],
+                    "cwd": "/workspace",
+                    "environment": {}
+                })],
+                invalidation_keys: Vec::new(),
+            }),
+            workspace_grant: Some(GrantProposal {
+                scope: "workspace".to_owned(),
+                workspace_id: "workspace-1".to_owned(),
+                session_id: None,
+                matchers: vec![json!({
+                    "kind": "exec",
+                    "executable": "cargo",
+                    "argv": ["test"],
+                    "cwd": "/workspace",
+                    "environment": {}
+                })],
+                invalidation_keys: vec![json!({
+                    "kind": "file_digest",
+                    "path": "/workspace/Cargo.toml",
+                    "value": "manifest-digest"
+                })],
+            }),
+            ..ApprovalState::default()
         });
-        let size = super::super::types::TerminalSize::new(50, 16);
+        let size = super::super::types::TerminalSize::new(120, 16);
         let mut store = UiStore::new(size);
         store.synchronize(&domain);
 
-        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
         let panel = frame.panel.expect("approval panel");
         let text = panel
             .rows
@@ -2265,6 +2584,9 @@ mod tests {
         assert!(text.contains("Allow once"));
         assert!(text.contains("Allow for Session"));
         assert!(text.contains("Allow for Workspace"));
+        assert!(text.contains("Session saves: exec cargo test @ /workspace"));
+        assert!(text.contains("Workspace saves: exec cargo test @ /workspace"));
+        assert!(text.contains("file_digest /workspace/Cargo.toml=manifest-digest"));
         assert!(text.contains("Deny"));
         assert!(!text.contains("Allow for Goal"));
         assert!(
@@ -2308,13 +2630,15 @@ mod tests {
             risk: Some("credential".to_owned()),
             selected: 1,
             replying: false,
+            available_decisions: vec![ApprovalDecision::AllowOnce, ApprovalDecision::Deny],
+            ..ApprovalState::default()
         });
         let size = super::super::types::TerminalSize::new(72, 16);
         let mut store = UiStore::new(size);
         store.synchronize(&domain);
 
         assert_eq!(SurfaceManager.route(&domain), SurfaceKind::Primary);
-        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
         let panel = frame.panel.expect("high-risk approval panel");
         let text = panel
             .rows
@@ -2373,6 +2697,8 @@ mod tests {
             risk: Some("outside_workspace".to_owned()),
             selected: 2,
             replying: false,
+            available_decisions: vec![ApprovalDecision::AllowOnce, ApprovalDecision::Deny],
+            ..ApprovalState::default()
         });
 
         let request = primary_panel_request(&domain, 36).expect("approval panel request");
@@ -2438,7 +2764,7 @@ mod tests {
         let mut store = UiStore::new(size);
         store.synchronize(&domain);
 
-        let normal = SceneBuilder.build(&domain, store.state(), SurfaceKind::Alternate, 0);
+        let normal = SceneBuilder.build(&domain, store.state(), SurfaceKind::Alternate);
         let normal_text = normal
             .rows
             .iter()
@@ -2459,7 +2785,7 @@ mod tests {
         );
 
         domain.transcript_viewer.as_mut().unwrap().mode = TranscriptViewMode::Verbose;
-        let verbose = SceneBuilder.build(&domain, store.state(), SurfaceKind::Alternate, 0);
+        let verbose = SceneBuilder.build(&domain, store.state(), SurfaceKind::Alternate);
         let verbose_text = verbose
             .rows
             .iter()
@@ -2478,7 +2804,7 @@ mod tests {
         );
 
         domain.transcript_viewer.as_mut().unwrap().mode = TranscriptViewMode::Summary;
-        let summary = SceneBuilder.build(&domain, store.state(), SurfaceKind::Alternate, 0);
+        let summary = SceneBuilder.build(&domain, store.state(), SurfaceKind::Alternate);
         let summary_text = summary
             .rows
             .iter()
@@ -2532,7 +2858,7 @@ mod tests {
         let mut store = UiStore::new(size);
         store.synchronize(&domain);
 
-        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Alternate, 0);
+        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Alternate);
         let composer = frame.main_layout.composer;
         let text = frame.rows[usize::from(composer.y)..usize::from(composer.bottom())]
             .iter()
@@ -2705,7 +3031,7 @@ mod tests {
             super::super::types::TerminalSize::new(200, 60),
         ] {
             store.reduce(super::super::store::UiEvent::Resize(size));
-            let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+            let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
             assert_eq!(frame.terminal_size, size);
             assert_eq!(frame.rows.len(), usize::from(size.height));
             assert_eq!(frame.viewport.bottom(), size.height);
@@ -2726,11 +3052,11 @@ mod tests {
         store.synchronize(&domain);
         domain.run_state = RunState::Running;
         store.reduce(super::super::store::UiEvent::DomainChanged);
-        let busy = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+        let busy = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
 
         domain.run_state = RunState::Idle;
         store.reduce(super::super::store::UiEvent::DomainChanged);
-        let idle = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+        let idle = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
         assert_eq!(busy.main_layout, idle.main_layout);
         assert_eq!(busy.rows.len(), idle.rows.len());
         let busy_status = busy.rows.last().unwrap().plain_text();
@@ -2753,7 +3079,7 @@ mod tests {
         let mut store = UiStore::new(size);
         store.synchronize(&domain);
 
-        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
         let composer = frame.main_layout.composer;
         let top = &frame.rows[usize::from(composer.y)];
         let content = &frame.rows[usize::from(composer.y.saturating_add(1))];
@@ -2791,7 +3117,7 @@ mod tests {
         let mut store = UiStore::new(size);
         store.synchronize(&domain);
 
-        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary, 0);
+        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
         let status = frame.rows.last().expect("status row");
         assert_eq!(status.display_width(), size.width);
         assert!(

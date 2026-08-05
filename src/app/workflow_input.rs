@@ -269,37 +269,48 @@ impl App {
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
         let direct_decision = match key.code {
-            KeyCode::Char('y' | 'Y') if plain_character => Some(ApprovalDecision::AllowOnce),
+            KeyCode::Char('y' | 'Y')
+                if plain_character
+                    && approval
+                        .available_decisions
+                        .contains(&ApprovalDecision::AllowOnce) =>
+            {
+                Some(ApprovalDecision::AllowOnce)
+            }
             KeyCode::Char('s' | 'S')
-                if plain_character && persistent_approval_available(approval.risk.as_deref()) =>
+                if plain_character
+                    && approval
+                        .available_decisions
+                        .contains(&ApprovalDecision::AllowSession) =>
             {
                 Some(ApprovalDecision::AllowSession)
             }
             KeyCode::Char('a' | 'A')
-                if plain_character && persistent_approval_available(approval.risk.as_deref()) =>
+                if plain_character
+                    && approval
+                        .available_decisions
+                        .contains(&ApprovalDecision::AllowWorkspace) =>
             {
                 Some(ApprovalDecision::AllowWorkspace)
             }
-            KeyCode::Char('n' | 'N') if plain_character => Some(ApprovalDecision::Deny),
+            KeyCode::Char('n' | 'N')
+                if plain_character
+                    && approval
+                        .available_decisions
+                        .contains(&ApprovalDecision::Deny) =>
+            {
+                Some(ApprovalDecision::Deny)
+            }
             _ => None,
         };
-        let allow_workspace = persistent_approval_available(approval.risk.as_deref());
-        let enabled = vec![true; 2 + usize::from(allow_workspace) * 2];
+        let enabled = vec![true; approval.available_decisions.len()];
         let decision = if let Some(decision) = direct_decision {
             Some(decision)
         } else {
             match update_choice_navigation(key, &mut approval.selected, &enabled) {
                 ChoiceNavAction::Handled => return Vec::new(),
                 ChoiceNavAction::Confirm(selected) => {
-                    let mut choices = vec![ApprovalDecision::AllowOnce];
-                    if allow_workspace {
-                        choices.push(ApprovalDecision::AllowSession);
-                    }
-                    if allow_workspace {
-                        choices.push(ApprovalDecision::AllowWorkspace);
-                    }
-                    choices.push(ApprovalDecision::Deny);
-                    choices.get(selected).copied()
+                    approval.available_decisions.get(selected).copied()
                 }
                 ChoiceNavAction::Cancel => {
                     approval.replying = true;
@@ -512,8 +523,4 @@ impl App {
         }
         Vec::new()
     }
-}
-
-fn persistent_approval_available(risk: Option<&str>) -> bool {
-    risk.unwrap_or("normal") == "normal"
 }

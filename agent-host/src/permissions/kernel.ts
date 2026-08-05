@@ -8,7 +8,11 @@ import {
   type PermissionEvaluation,
 } from "./evaluator.ts";
 import { proposeGrantBundles } from "./grant-proposal.ts";
-import type { ApprovalDecision, PermissionIntent } from "./model.ts";
+import type {
+  ApprovalDecision,
+  ExecutionProfile,
+  PermissionIntent,
+} from "./model.ts";
 import type { PermissionRule } from "./model.ts";
 import { PolicyStore } from "./policy-store.ts";
 import type { WorkspaceIdentity } from "./workspace-identity.ts";
@@ -21,6 +25,7 @@ export interface Authorization {
   intent: PermissionIntent;
   evaluation: PermissionEvaluation;
   decision?: ApprovalDecision;
+  risk: "normal" | "elevated" | "high" | "credential" | "outside_workspace";
 }
 
 export class PermissionKernel {
@@ -46,6 +51,7 @@ export class PermissionKernel {
     signal?: AbortSignal,
     additionalRules: readonly PermissionRule[] = [],
     allowWorkspaceGrant = true,
+    risk: Authorization["risk"] = "normal",
   ): Promise<Authorization> {
     let evaluation = evaluatePermission(
       intent,
@@ -53,8 +59,8 @@ export class PermissionKernel {
       this.approvals.grants(intent, identity),
     );
     if (evaluation.effect === "deny" || evaluation.effect === "allow") {
-      this.audit.record(auditEntry(intent, evaluation));
-      return { requestId, intent, evaluation };
+      this.audit.record(auditEntry(requestId, intent, evaluation, { risk }));
+      return { requestId, intent, evaluation, risk };
     }
     const proposals = proposeGrantBundles(intent, identity).filter(
       (bundle) => allowWorkspaceGrant || bundle.scope !== "workspace",
@@ -62,13 +68,18 @@ export class PermissionKernel {
     const decision = await this.approvals.request(
       requestId,
       intent,
+      identity,
       proposals,
       requester,
       signal,
     );
     if (decision === "deny") {
-      this.audit.record(auditEntry(intent, evaluation, decision));
-      return { requestId, intent, evaluation, decision };
+      this.audit.record(auditEntry(requestId, intent, evaluation, {
+        decision,
+        risk,
+        outcome: "denied",
+      }));
+      return { requestId, intent, evaluation, decision, risk };
     }
     const once = this.approvals.once.peek(intent, requestId);
     evaluation = evaluatePermission(
@@ -79,13 +90,18 @@ export class PermissionKernel {
         ...(once ? [once] : []),
       ],
     );
-    this.audit.record(auditEntry(intent, evaluation, decision));
-    return { requestId, intent, evaluation, decision };
+    this.audit.record(auditEntry(requestId, intent, evaluation, {
+      decision,
+      risk,
+      outcome: "authorized",
+    }));
+    return { requestId, intent, evaluation, decision, risk };
   }
 
   consumeForExecution(
     authorization: Authorization,
     recomputedIntent: PermissionIntent,
+    executionProfile?: ExecutionProfile,
   ): boolean {
     if (
       authorization.intent.digest !== recomputedIntent.digest ||
@@ -94,25 +110,68 @@ export class PermissionKernel {
       authorization.intent.workspaceId !== recomputedIntent.workspaceId
     ) {
       if (authorization.decision === "allow_once") {
-        this.approvals.once.consume(
-          recomputedIntent,
-          authorization.requestId,
-        );
+        this.approvals.once.invalidate(authorization.requestId);
       }
+      this.audit.record(auditEntry(
+        authorization.requestId,
+        recomputedIntent,
+        authorization.evaluation,
+        {
+          decision: authorization.decision,
+          risk: authorization.risk,
+          executionProfile,
+          onceConsumed: false,
+          outcome: "preflight_rejected",
+        },
+      ));
       return false;
     }
+    let authorized: boolean;
+    let onceConsumed: boolean | undefined;
     if (authorization.decision === "allow_once") {
-      return this.approvals.once.consume(
+      authorized = this.approvals.once.consume(
         recomputedIntent,
         authorization.requestId,
       ) !== undefined;
-    }
-    if (
+      onceConsumed = authorized;
+    } else if (
       authorization.decision === "allow_session" ||
       authorization.decision === "allow_workspace"
     ) {
-      return true;
+      authorized = true;
+    } else {
+      authorized = authorization.evaluation.effect === "allow";
     }
-    return authorization.evaluation.effect === "allow";
+    this.audit.record(auditEntry(
+      authorization.requestId,
+      recomputedIntent,
+      authorization.evaluation,
+      {
+        decision: authorization.decision,
+        risk: authorization.risk,
+        executionProfile,
+        onceConsumed,
+        outcome: authorized ? "execution_started" : "preflight_rejected",
+      },
+    ));
+    return authorized;
+  }
+
+  recordExecutionResult(
+    authorization: Authorization,
+    executionProfile: ExecutionProfile,
+    succeeded: boolean,
+  ): void {
+    this.audit.record(auditEntry(
+      authorization.requestId,
+      authorization.intent,
+      authorization.evaluation,
+      {
+        decision: authorization.decision,
+        risk: authorization.risk,
+        executionProfile,
+        outcome: succeeded ? "executed" : "execution_failed",
+      },
+    ));
   }
 }

@@ -14,67 +14,149 @@ import {
   workspaceInvalidationKeys,
   type WorkspaceIdentity,
 } from "../workspace-identity.ts";
+import { digestValue } from "../shell/digest.ts";
 
 interface WorkspaceGrantDocument {
-  schemaVersion: 2;
+  schemaVersion: 3;
+  identity: {
+    canonicalRoot: string;
+    generationId: string;
+    gitCommonDirectory?: string;
+    gitCommonDirectoryIdentity?: string;
+  };
   grants: GrantBundle[];
 }
 
+export interface WorkspaceGrantRecord extends GrantBundle {
+  id: string;
+}
+
+export interface WorkspaceGrantSnapshot {
+  workspace: string;
+  grants: WorkspaceGrantRecord[];
+}
+
 export class WorkspaceGrantStore {
-  private readonly path: string;
+  private readonly root: string;
+  private readonly legacyV2Path: string;
   private readonly legacyPath: string;
 
   constructor(homeDir = homedir()) {
-    this.path = join(homeDir, ".nabla", "permissions.json");
+    this.root = join(homeDir, ".nabla", "workspaces");
+    this.legacyV2Path = join(homeDir, ".nabla", "permissions.json");
     this.legacyPath = join(homeDir, ".nabla", "approvals.json");
   }
 
-  add(bundle: GrantBundle): void {
+  add(bundle: GrantBundle, identity: WorkspaceIdentity): void {
     if (bundle.scope !== "workspace") {
       throw new Error("Workspace store only accepts workspace grants");
     }
-    const document = this.read();
+    if (bundle.workspaceId !== identity.id) {
+      throw new Error("Workspace grant identity does not match its store");
+    }
+    const document = this.read(identity);
     if (!document.grants.some((grant) => sameGrant(grant, bundle))) {
       document.grants.push(bundle);
-      writeAtomicJsonSync(this.path, document);
+      writeAtomicJsonSync(this.path(identity.id), document);
     }
   }
 
   get(identity: WorkspaceIdentity): GrantBundle[] {
-    return this.read().grants.filter(
+    return this.read(identity).grants.filter(
       (grant) =>
         grant.workspaceId === identity.id &&
         invalidationKeysValid(grant.invalidationKeys, identity),
     );
   }
 
-  private read(): WorkspaceGrantDocument {
-    if (!existsSync(this.path)) {
-      const migrated = this.migrateLegacy();
-      if (migrated.grants.length > 0) writeAtomicJsonSync(this.path, migrated);
+  snapshot(identity: WorkspaceIdentity): WorkspaceGrantSnapshot {
+    return {
+      workspace: identity.canonicalPath,
+      grants: this.get(identity).map((grant) => ({
+        id: digestValue(grant),
+        ...grant,
+      })),
+    };
+  }
+
+  revoke(
+    identity: WorkspaceIdentity,
+    grantId: string,
+  ): WorkspaceGrantSnapshot {
+    const document = this.read(identity);
+    document.grants = document.grants.filter(
+      (grant) => digestValue(grant) !== grantId,
+    );
+    writeAtomicJsonSync(this.path(identity.id), document);
+    return this.snapshot(identity);
+  }
+
+  clear(identity: WorkspaceIdentity): WorkspaceGrantSnapshot {
+    writeAtomicJsonSync(this.path(identity.id), emptyDocument(identity));
+    return this.snapshot(identity);
+  }
+
+  path(workspaceId: string): string {
+    return join(this.root, workspaceId, "permissions.json");
+  }
+
+  private read(identity: WorkspaceIdentity): WorkspaceGrantDocument {
+    const path = this.path(identity.id);
+    if (!existsSync(path)) {
+      const migrated = this.migrateLegacy(identity);
+      if (migrated.grants.length > 0) writeAtomicJsonSync(path, migrated);
       return migrated;
     }
     try {
-      const value: unknown = JSON.parse(readFileSync(this.path, "utf8"));
-      if (!isJsonObject(value) || value.schemaVersion !== 2 ||
-          !Array.isArray(value.grants)) {
-        return { schemaVersion: 2, grants: [] };
+      const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+      if (
+        !isJsonObject(value) ||
+        value.schemaVersion !== 3 ||
+        !isJsonObject(value.identity) ||
+        !Array.isArray(value.grants)
+      ) {
+        return emptyDocument(identity);
+      }
+      const storedIdentity = value.identity;
+      if (
+        storedIdentity.canonicalRoot !== identity.canonicalPath ||
+        storedIdentity.generationId !== identity.generationId ||
+        storedIdentity.gitCommonDirectory !== identity.gitCommonDirectory ||
+        storedIdentity.gitCommonDirectoryIdentity !==
+          identity.gitCommonDirectoryIdentity
+      ) {
+        return emptyDocument(identity);
       }
       return {
-        schemaVersion: 2,
+        schemaVersion: 3,
+        identity: {
+          canonicalRoot: identity.canonicalPath,
+          generationId: identity.generationId,
+          ...(identity.gitCommonDirectory
+            ? { gitCommonDirectory: identity.gitCommonDirectory }
+            : {}),
+          ...(identity.gitCommonDirectoryIdentity
+            ? {
+                gitCommonDirectoryIdentity:
+                  identity.gitCommonDirectoryIdentity,
+              }
+            : {}),
+        },
         grants: value.grants.filter(isGrantBundle),
       };
     } catch {
-      return { schemaVersion: 2, grants: [] };
+      return emptyDocument(identity);
     }
   }
 
-  private migrateLegacy(): WorkspaceGrantDocument {
-    if (!existsSync(this.legacyPath)) return { schemaVersion: 2, grants: [] };
+  private migrateLegacy(identity: WorkspaceIdentity): WorkspaceGrantDocument {
+    const document = emptyDocument(identity);
+    document.grants.push(...this.migrateV2(identity));
+    if (!existsSync(this.legacyPath)) return document;
     try {
       const value: unknown = JSON.parse(readFileSync(this.legacyPath, "utf8"));
       if (!isJsonObject(value) || !Array.isArray(value.rules)) {
-        return { schemaVersion: 2, grants: [] };
+        return document;
       }
       const grants = value.rules.flatMap((rule): GrantBundle[] => {
         if (
@@ -92,6 +174,7 @@ export class WorkspaceGrantStore {
         } catch {
           return [];
         }
+        if (identity.id !== documentIdentityId(document)) return [];
         const matcher = legacyMatcher(rule, identity.canonicalPath);
         return matcher
           ? [{
@@ -105,11 +188,62 @@ export class WorkspaceGrantStore {
             }]
           : [];
       });
-      return { schemaVersion: 2, grants };
+      document.grants.push(...grants);
+      return document;
     } catch {
-      return { schemaVersion: 2, grants: [] };
+      return document;
     }
   }
+
+  private migrateV2(identity: WorkspaceIdentity): GrantBundle[] {
+    if (!existsSync(this.legacyV2Path)) return [];
+    try {
+      const value: unknown = JSON.parse(readFileSync(this.legacyV2Path, "utf8"));
+      if (
+        !isJsonObject(value) ||
+        value.schemaVersion !== 2 ||
+        !Array.isArray(value.grants)
+      ) {
+        return [];
+      }
+      return value.grants.filter(isGrantBundle).filter(
+        (grant) =>
+          grant.workspaceId === identity.id &&
+          invalidationKeysValid(grant.invalidationKeys, identity),
+      );
+    } catch {
+      return [];
+    }
+  }
+}
+
+function emptyDocument(identity: WorkspaceIdentity): WorkspaceGrantDocument {
+  return {
+    schemaVersion: 3,
+    identity: {
+      canonicalRoot: identity.canonicalPath,
+      generationId: identity.generationId,
+      ...(identity.gitCommonDirectory
+        ? { gitCommonDirectory: identity.gitCommonDirectory }
+        : {}),
+      ...(identity.gitCommonDirectoryIdentity
+        ? {
+            gitCommonDirectoryIdentity: identity.gitCommonDirectoryIdentity,
+          }
+        : {}),
+    },
+    grants: [],
+  };
+}
+
+function documentIdentityId(document: WorkspaceGrantDocument): string {
+  return createHash("sha256").update(JSON.stringify({
+    canonicalPath: document.identity.canonicalRoot,
+    generationId: document.identity.generationId,
+    gitCommonDirectory: document.identity.gitCommonDirectory,
+    gitCommonDirectoryIdentity:
+      document.identity.gitCommonDirectoryIdentity,
+  })).digest("hex");
 }
 
 function legacyCommandInvalidationKeys(
@@ -140,7 +274,7 @@ function legacyMatcher(
   const value = String(rule.value);
   if (kind === "command_prefix") return undefined;
   if (kind === "command") {
-    return { kind: "opaque_shell_exact", command: value };
+    return { kind: "shell_digest", digest: digestValue({ command: value }) };
   }
   if (kind === "input") {
     return {
@@ -182,11 +316,8 @@ function isGrantBundle(value: unknown): value is GrantBundle {
 
 function isCapabilityMatcher(value: unknown): value is CapabilityMatcher {
   if (!isJsonObject(value) || typeof value.kind !== "string") return false;
-  if (
-    value.kind === "shell_intent" ||
-    value.kind === "opaque_shell_exact"
-  ) {
-    return typeof value.command === "string";
+  if (value.kind === "shell_digest") {
+    return typeof value.digest === "string";
   }
   if (value.kind === "tool") {
     return typeof value.tool === "string" &&
@@ -204,7 +335,16 @@ function isCapabilityMatcher(value: unknown): value is CapabilityMatcher {
   }
   if (value.kind === "file") {
     return (
-      ["read", "list", "create", "write", "append", "rename", "delete"]
+      [
+        "read",
+        "list",
+        "create",
+        "write",
+        "truncate",
+        "append",
+        "rename",
+        "delete",
+      ]
         .includes(String(value.operation)) &&
       typeof value.path === "string" &&
       (value.recursive === undefined || typeof value.recursive === "boolean") &&
@@ -227,13 +367,21 @@ function isCapabilityMatcher(value: unknown): value is CapabilityMatcher {
 }
 
 function isInvalidationKey(value: unknown): value is InvalidationKey {
-  return (
-    isJsonObject(value) &&
-    ["file_digest", "workspace_generation", "git_common_directory"]
-      .includes(String(value.kind)) &&
-    typeof value.value === "string" &&
-    (value.path === undefined || typeof value.path === "string")
-  );
+  if (
+    !isJsonObject(value) ||
+    ![
+      "file_digest",
+      "npm_script_digest",
+      "workspace_generation",
+      "git_common_directory",
+    ].includes(String(value.kind)) ||
+    typeof value.value !== "string" ||
+    (value.path !== undefined && typeof value.path !== "string")
+  ) {
+    return false;
+  }
+  return value.kind !== "npm_script_digest" ||
+    typeof value.path === "string" && typeof value.selector === "string";
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {

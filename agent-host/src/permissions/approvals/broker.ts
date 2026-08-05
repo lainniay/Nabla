@@ -44,6 +44,7 @@ export class ApprovalBroker {
   async request(
     requestId: string,
     intent: PermissionIntent,
+    identity: WorkspaceIdentity,
     proposals: GrantBundle[],
     requester: ApprovalRequester,
     signal?: AbortSignal,
@@ -71,7 +72,7 @@ export class ApprovalBroker {
     } else if (selected.scope === "session") {
       this.session.add(selected);
     } else {
-      this.workspace.add(selected);
+      this.workspace.add(selected, identity);
     }
     return decision;
   }

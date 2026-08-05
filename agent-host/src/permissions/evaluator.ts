@@ -14,7 +14,12 @@ export interface AtomEvaluation {
   atom: CapabilityAtom;
   effect: PolicyEffect;
   rules: PermissionRule[];
-  grants: CapabilityMatcher[];
+  grants: Array<{
+    scope: GrantBundle["scope"];
+    workspaceId: string;
+    sessionId?: string;
+    matcher: CapabilityMatcher;
+  }>;
 }
 
 export interface PermissionEvaluation {
@@ -43,8 +48,15 @@ export function evaluatePermission(
           grant.workspaceId === intent.workspaceId &&
           (grant.scope !== "session" || grant.sessionId === intent.sessionId),
       )
-      .flatMap((grant) => grant.matchers)
-      .filter((matcher) => matcherMatches(matcher, atom, intent));
+      .flatMap((grant) =>
+        grant.matchers
+          .filter((matcher) => matcherMatches(matcher, atom, intent))
+          .map((matcher) => ({
+            scope: grant.scope,
+            workspaceId: grant.workspaceId,
+            ...(grant.sessionId ? { sessionId: grant.sessionId } : {}),
+            matcher,
+          })));
     let effect: PolicyEffect =
       matchingRules.length === 0 && matchingGrants.length === 0 ? "ask" : "allow";
     for (const rule of matchingRules) {
@@ -73,10 +85,7 @@ export function matcherMatches(
         matcher.inputDigest === digestValue(intent.normalizedInput))
     );
   }
-  if (
-    matcher.kind === "shell_intent" ||
-    matcher.kind === "opaque_shell_exact"
-  ) {
+  if (matcher.kind === "shell_digest") {
     if (
       !intent ||
       intent.tool !== "bash" ||
@@ -86,10 +95,8 @@ export function matcherMatches(
       return false;
     }
     const command = (intent.normalizedInput as { command?: unknown }).command;
-    return (
-      typeof command === "string" &&
-      normalizeCommand(command) === normalizeCommand(matcher.command)
-    );
+    return typeof command === "string" &&
+      digestValue({ command }) === matcher.digest;
   }
   if (matcher.kind !== atom.kind) return false;
   switch (matcher.kind) {
@@ -126,10 +133,6 @@ export function matcherMatches(
         matcher.digest === atom.digest
       );
   }
-}
-
-function normalizeCommand(command: string): string {
-  return command.trim().replace(/\s+/gu, " ");
 }
 
 function pathMatches(base: string, candidate: string, recursive: boolean): boolean {

@@ -344,19 +344,24 @@ fn render(
         });
         coordinator.invalidate();
     }
-    let size = ui.state().terminal.size;
-    let history = if surface == SurfaceKind::Primary {
-        ui.state().transcript.pending_history_budget(
-            size.width,
+    let provisional = SceneBuilder.build(app.state(), ui.state(), surface);
+    let (frame, projection) = if surface == SurfaceKind::Primary {
+        let history_window = provisional.main_layout.history_window;
+        let projection = ui.state().transcript.project_primary(
+            history_window.width,
+            usize::from(history_window.height),
             ui.state().revision,
             CANONICAL_REPLAY_BATCH_ROWS,
             CANONICAL_REPLAY_BATCH_BYTES,
-        )
+            ui.state().animation_frame,
+        );
+        let frame =
+            SceneBuilder.build_with_projection(app.state(), ui.state(), surface, &projection);
+        (frame, Some(projection))
     } else {
-        Vec::new()
+        (provisional, None)
     };
-    let frame = SceneBuilder.build_with_history(app.state(), ui.state(), surface, &history);
-    let plan = coordinator.plan(frame, surface, history);
+    let plan = coordinator.plan(frame, surface, projection);
     let result = coordinator.commit(terminal, &mut ui.state_mut().transcript, plan);
     if result.is_err() {
         ui.reduce(if surface == SurfaceKind::Primary {
@@ -377,16 +382,22 @@ fn drive_canonical_recovery(
     replay: &mut Option<CanonicalReplayState>,
 ) -> io::Result<RecoveryProgress> {
     if replay.is_none() {
-        let size = ui.state().terminal.size;
         ui.state().transcript.invalidate_render_caches();
+        let provisional = SceneBuilder.build(app.state(), ui.state(), SurfaceKind::Primary);
+        let history_window = provisional.main_layout.history_window;
         let projection = ui.state().transcript.canonical_reflow_projection(
-            size.width,
+            history_window.width,
+            usize::from(history_window.height),
             ui.state().revision,
             maximum_rows,
         );
         let batches = TranscriptStore::canonical_reflow_batches(
             &projection,
-            CANONICAL_REPLAY_BATCH_ROWS,
+            if maximum_rows == 0 {
+                CANONICAL_REPLAY_BATCH_ROWS
+            } else {
+                maximum_rows.min(CANONICAL_REPLAY_BATCH_ROWS)
+            },
             CANONICAL_REPLAY_BATCH_BYTES,
         );
         terminal.begin_canonical_reflow()?;
@@ -422,8 +433,22 @@ fn drive_canonical_recovery(
             "canonical history changed incompatibly during replay",
         ));
     }
-    let frame = SceneBuilder.build(app.state(), &preview, SurfaceKind::Primary, 0);
-    let plan = coordinator.plan_canonical_reflow_frame(frame);
+    let resident_projection = nabla::ui::PrimaryTranscriptProjection {
+        overflow_blocks: Vec::new(),
+        resident_rows: projection.resident_rows.clone(),
+        bootstrap_padding_rows: projection.bootstrap_padding_rows,
+        resident_capacity: projection.resident_capacity,
+        scrollback_cursor: projection.scrollback_cursor,
+        scrollback_row_offset: projection.scrollback_row_offset,
+        canonical_revision: projection.canonical_revision,
+    };
+    let frame = SceneBuilder.build_with_projection(
+        app.state(),
+        &preview,
+        SurfaceKind::Primary,
+        &resident_projection,
+    );
+    let plan = coordinator.plan_canonical_reflow_frame(frame, &resident_projection);
     coordinator.finish_canonical_reflow(
         terminal,
         &mut ui.state_mut().transcript,

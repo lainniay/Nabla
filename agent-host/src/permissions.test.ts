@@ -1,10 +1,24 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
 import { intersectGrantSets } from "./permissions/adapters/agent.ts";
+import {
+  CreateAdapter,
+  DeleteAdapter,
+  RenameAdapter,
+  WriteAdapter,
+} from "./permissions/adapters/filesystem.ts";
 import { ShellAdapter } from "./permissions/adapters/shell.ts";
 import { createIntent } from "./permissions/adapters/tool-adapter.ts";
 import { MemoryPermissionAuditLog } from "./permissions/audit-log.ts";
@@ -13,20 +27,28 @@ import { OnceGrantStore } from "./permissions/approvals/once-store.ts";
 import { SessionGrantStore } from "./permissions/approvals/session-store.ts";
 import { WorkspaceGrantStore } from "./permissions/approvals/workspace-store.ts";
 import { evaluatePermission } from "./permissions/evaluator.ts";
+import { ExecutionBroker } from "./permissions/execution/broker.ts";
+import type {
+  ExecutionResult,
+  SandboxBackend,
+} from "./permissions/execution/sandbox-backend.ts";
 import { proposeGrantBundles } from "./permissions/grant-proposal.ts";
 import { PermissionKernel } from "./permissions/kernel.ts";
 import type {
   CapabilityMatcher,
+  ExecutionProfile,
   PermissionIntent,
   PermissionRule,
   ToolContext,
 } from "./permissions/model.ts";
 import { PolicyStore } from "./permissions/policy-store.ts";
 import { planShell } from "./permissions/shell/planner.ts";
+import { digestValue } from "./permissions/shell/digest.ts";
 import {
   fileDigest,
   resolveWorkspaceIdentity,
 } from "./permissions/workspace-identity.ts";
+import { mutatesManagedWorktree } from "./permissions/managed-worktree.ts";
 
 function context(workspace: string, sessionId = "session-1"): ToolContext {
   const identity = resolveWorkspaceIdentity(workspace);
@@ -116,12 +138,60 @@ test("workspace grants are identity scoped and invalidated by manifest changes",
     const intent = adapter.normalize(ctx, { command: "npm test" });
     const bundle = proposeGrantBundles(intent, identity)
       .find((item) => item.scope === "workspace")!;
+    assert.equal(
+      bundle.invalidationKeys?.some((key) =>
+        key.kind === "npm_script_digest" &&
+        key.selector === "test" &&
+        key.path === packagePath),
+      true,
+    );
     const store = new WorkspaceGrantStore(value.home);
-    store.add(bundle);
+    store.add(bundle, identity);
+    assert.equal(
+      store.path(identity.id),
+      join(
+        value.home,
+        ".nabla",
+        "workspaces",
+        identity.id,
+        "permissions.json",
+      ),
+    );
+    assert.equal(existsSync(store.path(identity.id)), true);
     assert.equal(store.get(identity).length, 1);
     assert.equal(store.get(resolveWorkspaceIdentity(value.other)).length, 0);
     writeFileSync(packagePath, "{\"scripts\":{\"test\":\"node changed.js\"}}\n");
     assert.equal(store.get(identity).length, 0);
+  } finally {
+    value.cleanup();
+  }
+});
+
+test("cargo grants bind workspace manifests, build scripts, and config", () => {
+  const value = fixture();
+  try {
+    writeFileSync(join(value.workspace, "Cargo.toml"), "[workspace]\n");
+    writeFileSync(join(value.workspace, "Cargo.lock"), "");
+    writeFileSync(join(value.workspace, "build.rs"), "fn main() {}\n");
+    mkdirSync(join(value.workspace, ".cargo"));
+    writeFileSync(join(value.workspace, ".cargo", "config.toml"), "[build]\n");
+    const identity = resolveWorkspaceIdentity(value.workspace);
+    const intent = new ShellAdapter().normalize(
+      { ...context(value.workspace), workspaceId: identity.id },
+      { command: "cargo test" },
+    );
+    const grant = proposeGrantBundles(intent, identity)
+      .find((proposal) => proposal.scope === "workspace")!;
+    const paths = new Set(
+      grant.invalidationKeys?.flatMap((key) => key.path ? [key.path] : []),
+    );
+    assert.equal(paths.has(join(value.workspace, "Cargo.toml")), true);
+    assert.equal(paths.has(join(value.workspace, "Cargo.lock")), true);
+    assert.equal(paths.has(join(value.workspace, "build.rs")), true);
+    assert.equal(
+      paths.has(join(value.workspace, ".cargo", "config.toml")),
+      true,
+    );
   } finally {
     value.cleanup();
   }
@@ -165,14 +235,15 @@ test("legacy exact path and command approvals migrate while prefixes do not", ()
     assert.equal(grants.length, 2);
     assert.equal(
       grants.some((grant) =>
-        grant.matchers.some((matcher) => matcher.kind === "opaque_shell_exact")),
+        grant.matchers.some((matcher) => matcher.kind === "shell_digest")),
       true,
     );
     assert.equal(
       grants.some((grant) =>
         grant.matchers.some(
           (matcher) =>
-            matcher.kind === "opaque_shell_exact" && matcher.command === "npm test",
+            matcher.kind === "shell_digest" &&
+            matcher.digest === digestValue({ command: "npm test" }),
         )),
       false,
     );
@@ -227,6 +298,62 @@ test("file operation matchers cannot authorize a different operation", () => {
     };
     assert.equal(evaluatePermission(read, [rule]).effect, "allow");
     assert.equal(evaluatePermission(write, [rule]).effect, "ask");
+  } finally {
+    value.cleanup();
+  }
+});
+
+test("file adapters canonicalize paths and distinguish mutating operations", () => {
+  const value = fixture();
+  try {
+    const real = join(value.workspace, "real");
+    const link = join(value.workspace, "link");
+    mkdirSync(real);
+    symlinkSync(real, link, "dir");
+    const existing = join(real, "existing.txt");
+    writeFileSync(existing, "old");
+    const canonicalExisting = realpathSync(existing);
+    const ctx = context(value.workspace);
+
+    const overwrite = WriteAdapter.normalize(ctx, {
+      path: "link/existing.txt",
+      content: "new",
+    });
+    assert.deepEqual(
+      overwrite.atoms.map((atom) =>
+        atom.kind === "file" ? [atom.operation, atom.path] : []),
+      [
+        ["truncate", canonicalExisting],
+        ["write", canonicalExisting],
+      ],
+    );
+    const create = CreateAdapter.normalize(ctx, {
+      path: "link/new.txt",
+      content: "new",
+    });
+    assert.deepEqual(
+      create.atoms.map((atom) =>
+        atom.kind === "file" ? atom.operation : ""),
+      ["create", "write"],
+    );
+    const rename = RenameAdapter.normalize(ctx, {
+      path: "link/existing.txt",
+      destination: "link/renamed.txt",
+    });
+    assert.equal(rename.atoms[0]?.kind, "file");
+    assert.equal(
+      rename.atoms[0]?.kind === "file"
+        ? rename.atoms[0].destination
+        : undefined,
+      join(realpathSync(real), "renamed.txt"),
+    );
+    const deletion = DeleteAdapter.normalize(ctx, {
+      path: "link/existing.txt",
+    }).atoms[0];
+    assert.equal(
+      deletion?.kind === "file" ? deletion.operation : undefined,
+      "delete",
+    );
   } finally {
     value.cleanup();
   }
@@ -298,11 +425,78 @@ for (const [source, executables, fileOperations] of [
   });
 }
 
+test("compound fixture inspection is a precise read-only execution plan", () => {
+  const workspace = resolve(import.meta.dirname, "..", "..");
+  const source =
+    "cat SUBAGENTS.md 2>/dev/null | head -40; " +
+    "echo \"===FIXTURES===\"; " +
+    "head -c 600 protocol-fixtures/*.json";
+  const plan = planShell(source, workspace);
+
+  assert.equal(plan.opaque, false);
+  assert.equal(plan.requiresShell, true);
+  assert.equal(plan.readOnly, true);
+  assert.deepEqual(
+    plan.commands.map((command) => command.executable),
+    ["cat", "head", "echo", "head"],
+  );
+  assert.equal(
+    plan.atoms.some((atom) =>
+      atom.kind === "file" &&
+      atom.operation === "write" &&
+      atom.path === "/dev/null"),
+    true,
+  );
+  assert.equal(
+    plan.atoms.some((atom) =>
+      atom.kind === "file" &&
+      atom.operation === "read" &&
+      atom.path === join(workspace, "SUBAGENTS.md")),
+    true,
+  );
+  assert.equal(
+    plan.atoms.filter((atom) =>
+      atom.kind === "file" &&
+      atom.operation === "read" &&
+      atom.path.startsWith(join(workspace, "protocol-fixtures"))
+    ).length > 0,
+    true,
+  );
+  const intent = new ShellAdapter().normalize(
+    {
+      requestId: "request-fixtures",
+      toolCallId: "tool-fixtures",
+      sessionId: "session-fixtures",
+      workspaceId: "workspace-fixtures",
+      cwd: workspace,
+    },
+    { command: source },
+  );
+  assert.deepEqual(
+    proposeGrantBundles(intent).map((proposal) => proposal.scope),
+    ["once", "session", "workspace"],
+  );
+});
+
 test("unparsed and interpreter code become opaque and never implicit allow", () => {
+  const python = new ShellAdapter().normalize(
+    {
+      requestId: "request-opaque",
+      toolCallId: "tool-opaque",
+      sessionId: "session-opaque",
+      workspaceId: "workspace-opaque",
+      cwd: "/workspace",
+    },
+    { command: "python -c 'print(1)'" },
+  );
   assert.equal(planShell("python -c 'print(1)'", "/workspace").opaque, true);
   assert.equal(planShell("a `dynamic`", "/workspace").opaque, true);
   assert.equal(planShell("bash -c \"$SCRIPT\"", "/workspace").opaque, true);
-  assert.equal(planShell("cat src/*.ts", "/workspace").opaque, true);
+  assert.equal(planShell("cat \"$DYNAMIC_PATH\"", "/workspace").opaque, true);
+  assert.deepEqual(
+    proposeGrantBundles(python).map((proposal) => proposal.scope),
+    ["once"],
+  );
 });
 
 test("environment assignments are attached to the executable capability", () => {
@@ -350,7 +544,11 @@ test("kernel preflights every atom and denied compound commands never reach appr
     );
     assert.equal(result.evaluation.effect, "deny");
     assert.equal(prompted, false);
-    assert.equal(audit.entries[0]?.matchedRuleIds[0], "deny-second");
+    assert.deepEqual(audit.entries[0]?.matchedRules[0], {
+      id: "deny-second",
+      source: "managed",
+      effect: "deny",
+    });
   } finally {
     value.cleanup();
   }
@@ -448,6 +646,78 @@ test("execution rejects post-approval cwd, argv, and environment changes", async
   }
 });
 
+test("execution broker starts only an unchanged fully authorized plan", async () => {
+  const value = fixture();
+  try {
+    const identity = resolveWorkspaceIdentity(value.workspace);
+    const adapter = new ShellAdapter();
+    const ctx = { ...context(value.workspace), workspaceId: identity.id };
+    const input = { command: "tool argument" };
+    const intent = adapter.normalize(ctx, input);
+    const audit = new MemoryPermissionAuditLog();
+    const kernel = new PermissionKernel(
+      new PolicyStore(),
+      new ApprovalBroker(
+        new OnceGrantStore(),
+        new SessionGrantStore(),
+        new WorkspaceGrantStore(value.home),
+      ),
+      audit,
+    );
+    const authorization = await kernel.authorize(
+      ctx.requestId,
+      intent,
+      identity,
+      async () => "allow_once",
+    );
+    const calls: string[] = [];
+    const backend: SandboxBackend = {
+      kind: "none",
+      async run(command): Promise<ExecutionResult> {
+        calls.push([command.executable, ...command.argv].join(" "));
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+    const profile: ExecutionProfile = {
+      backend: "none",
+      filesystem: { read: [], write: [] },
+      network: { allow: [] },
+      environment: { inherit: [], set: {} },
+    };
+    const broker = new ExecutionBroker(kernel, backend);
+    await broker.executeShell(
+      authorization,
+      adapter,
+      ctx,
+      input,
+      profile,
+    );
+    assert.deepEqual(calls, ["tool argument"]);
+    assert.equal(
+      audit.entries.some((entry) =>
+        entry.outcome === "execution_started" && entry.onceConsumed === true),
+      true,
+    );
+    assert.equal(
+      audit.entries.some((entry) => entry.outcome === "executed"),
+      true,
+    );
+    await assert.rejects(
+      broker.executeShell(
+        authorization,
+        adapter,
+        ctx,
+        input,
+        profile,
+      ),
+      /was not granted/u,
+    );
+    assert.deepEqual(calls, ["tool argument"]);
+  } finally {
+    value.cleanup();
+  }
+});
+
 test("workspace recreation changes identity and invalidates old grants", () => {
   const value = fixture();
   try {
@@ -466,6 +736,7 @@ test("workspace recreation changes identity and invalidates old grants", () => {
     store.add(
       proposeGrantBundles(intent, before)
         .find((bundle) => bundle.scope === "workspace")!,
+      before,
     );
     rmSync(value.workspace, { recursive: true });
     mkdirSync(value.workspace);
@@ -506,7 +777,48 @@ test("automatic allows are audited to a concrete policy rule", async () => {
       async () => "deny",
     );
     assert.equal(result.evaluation.effect, "allow");
-    assert.deepEqual(audit.entries[0]?.matchedRuleIds, ["builtin-exec-a"]);
+    assert.deepEqual(
+      audit.entries[0]?.matchedRules.map((rule) => rule.id),
+      ["builtin-exec-a"],
+    );
+    assert.equal(audit.entries[0]?.matchedRules[0]?.source, "builtin");
+  } finally {
+    value.cleanup();
+  }
+});
+
+test("automatic grant allows are audited with their persisted scope", async () => {
+  const value = fixture();
+  try {
+    const identity = resolveWorkspaceIdentity(value.workspace);
+    const intent = execIntent(value.workspace);
+    const sessions = new SessionGrantStore();
+    sessions.add(
+      proposeGrantBundles(intent, identity)
+        .find((bundle) => bundle.scope === "session")!,
+    );
+    const audit = new MemoryPermissionAuditLog();
+    const kernel = new PermissionKernel(
+      new PolicyStore(),
+      new ApprovalBroker(
+        new OnceGrantStore(),
+        sessions,
+        new WorkspaceGrantStore(value.home),
+      ),
+      audit,
+    );
+    const result = await kernel.authorize(
+      "request-1",
+      intent,
+      identity,
+      async () => {
+        throw new Error("persisted grant should not prompt");
+      },
+    );
+    assert.equal(result.evaluation.effect, "allow");
+    assert.equal(audit.entries[0]?.matchedGrants[0]?.scope, "session");
+    assert.equal(audit.entries[0]?.matchedGrants[0]?.workspaceId, identity.id);
+    assert.equal(audit.entries[0]?.matchedGrants[0]?.sessionId, "session-1");
   } finally {
     value.cleanup();
   }
@@ -598,6 +910,33 @@ test("file digest helper observes manifest changes", () => {
     const before = fileDigest(path);
     writeFileSync(path, "two");
     assert.notEqual(fileDigest(path), before);
+  } finally {
+    value.cleanup();
+  }
+});
+
+test("managed worktree denies are derived from structured exec atoms", () => {
+  const value = fixture();
+  try {
+    const adapter = new ShellAdapter();
+    const normalize = (command: string) =>
+      adapter.normalize(context(value.workspace), { command });
+    assert.equal(
+      mutatesManagedWorktree(normalize("git worktree add ../branch")),
+      true,
+    );
+    assert.equal(
+      mutatesManagedWorktree(normalize("env git -C . worktree remove ../branch")),
+      true,
+    );
+    assert.equal(
+      mutatesManagedWorktree(normalize("git worktree list")),
+      false,
+    );
+    assert.equal(
+      mutatesManagedWorktree(normalize("echo 'git worktree remove ../branch'")),
+      false,
+    );
   } finally {
     value.cleanup();
   }

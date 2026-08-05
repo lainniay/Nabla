@@ -145,7 +145,7 @@ impl App {
                         .permission_manager
                         .as_ref()
                         .map_or(0, |manager| manager.selected)
-                        .min(snapshot.rules.len().saturating_sub(1));
+                        .min(snapshot.grants.len().saturating_sub(1));
                     self.state.permission_manager = Some(PermissionManagerState {
                         snapshot: *snapshot,
                         selected,

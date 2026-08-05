@@ -7,6 +7,11 @@ import type {
 } from "../model.ts";
 import type { SandboxBackend, ExecutionResult } from "./sandbox-backend.ts";
 import { ShellFallback } from "./shell-fallback.ts";
+import type { ExecutionPlan } from "../shell/planner.ts";
+
+export interface AuthorizedExecutionPlan extends ExecutionPlan {
+  executionProfile: ExecutionProfile;
+}
 
 export class ExecutionBroker {
   private readonly kernel: PermissionKernel;
@@ -23,6 +28,29 @@ export class ExecutionBroker {
     this.shellFallback = shellFallback;
   }
 
+  beginExternalTool(
+    authorization: Authorization,
+    recomputedIntent: PermissionIntent,
+    profile: ExecutionProfile,
+  ): boolean {
+    if (profile.backend !== this.backend.kind) {
+      return false;
+    }
+    return this.kernel.consumeForExecution(
+      authorization,
+      recomputedIntent,
+      profile,
+    );
+  }
+
+  finishExternalTool(
+    authorization: Authorization,
+    profile: ExecutionProfile,
+    succeeded: boolean,
+  ): void {
+    this.kernel.recordExecutionResult(authorization, profile, succeeded);
+  }
+
   async executeShell(
     authorization: Authorization,
     adapter: ShellAdapter,
@@ -33,28 +61,56 @@ export class ExecutionBroker {
   ): Promise<ExecutionResult[]> {
     const recomputed = adapter.normalize(context, input);
     this.assertUnchanged(authorization.intent, recomputed);
-    if (!this.kernel.consumeForExecution(authorization, recomputed)) {
+    const shellPlan = adapter.plan(recomputed);
+    const plan: AuthorizedExecutionPlan = {
+      ...shellPlan,
+      executionProfile: profile,
+    };
+    if (plan.executionProfile.backend !== this.backend.kind) {
+      throw new Error(
+        `Execution profile ${plan.executionProfile.backend} does not match ` +
+          `backend ${this.backend.kind}`,
+      );
+    }
+    if (
+      !this.kernel.consumeForExecution(
+        authorization,
+        recomputed,
+        plan.executionProfile,
+      )
+    ) {
       throw new Error("Permission changed or was not granted before execution");
     }
-    const plan = adapter.plan(recomputed);
-    if (plan.opaque || plan.requiresShell) {
-      const normalized = recomputed.normalizedInput as {
-        cwd: string;
-        command: string;
-      };
-      return [await this.shellFallback.run(
-        "/bin/sh",
-        normalized.command,
-        normalized.cwd,
-        profile,
-        signal,
-      )];
+    try {
+      if (plan.opaque || plan.requiresShell) {
+        const result = await this.shellFallback.run(plan, signal);
+        this.kernel.recordExecutionResult(
+          authorization,
+          plan.executionProfile,
+          result.exitCode === 0,
+        );
+        return [result];
+      }
+      const results: ExecutionResult[] = [];
+      for (const command of plan.commands) {
+        results.push(
+          await this.backend.run(command, plan.executionProfile, signal),
+        );
+      }
+      this.kernel.recordExecutionResult(
+        authorization,
+        plan.executionProfile,
+        results.every((result) => result.exitCode === 0),
+      );
+      return results;
+    } catch (error) {
+      this.kernel.recordExecutionResult(
+        authorization,
+        plan.executionProfile,
+        false,
+      );
+      throw error;
     }
-    const results: ExecutionResult[] = [];
-    for (const command of plan.commands) {
-      results.push(await this.backend.run(command, profile, signal));
-    }
-    return results;
   }
 
   private assertUnchanged(

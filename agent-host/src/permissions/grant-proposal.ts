@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 import type {
   CapabilityMatcher,
@@ -7,6 +7,7 @@ import type {
   InvalidationKey,
   PermissionIntent,
 } from "./model.ts";
+import { digestValue } from "./shell/digest.ts";
 import { fileDigest, workspaceInvalidationKeys, type WorkspaceIdentity } from "./workspace-identity.ts";
 
 const MANIFESTS_BY_EXECUTABLE: Record<string, string[]> = {
@@ -56,30 +57,117 @@ export function proposeGrantBundles(
     workspaceId: intent.workspaceId,
     matchers,
   };
+  const once: GrantBundle = { ...base, scope: "once" };
+  if (intent.atoms.some((atom) => atom.kind === "opaque_code")) {
+    return [once];
+  }
   return [
-    { ...base, scope: "once" },
+    once,
     { ...base, scope: "session", sessionId: intent.sessionId },
     {
       ...base,
       scope: "workspace",
       invalidationKeys: identity
-        ? [...workspaceInvalidationKeys(identity), ...manifestKeys(intent)]
+        ? [
+            ...workspaceInvalidationKeys(identity),
+            ...manifestKeys(intent, identity),
+          ]
         : manifestKeys(intent),
     },
   ];
 }
 
-function manifestKeys(intent: PermissionIntent): InvalidationKey[] {
+function manifestKeys(
+  intent: PermissionIntent,
+  identity?: WorkspaceIdentity,
+): InvalidationKey[] {
   const keys = new Map<string, InvalidationKey>();
   for (const atom of intent.atoms) {
     if (atom.kind !== "exec") continue;
     const executable = atom.executable.split("/").at(-1) ?? atom.executable;
-    for (const name of MANIFESTS_BY_EXECUTABLE[executable] ?? []) {
-      const path = join(atom.cwd, name);
-      if (!existsSync(path)) continue;
-      const value = fileDigest(path);
-      if (value) keys.set(path, { kind: "file_digest", path, value });
+    const paths = (MANIFESTS_BY_EXECUTABLE[executable] ?? [])
+      .map((name) => join(atom.cwd, name));
+    if (executable === "cargo") {
+      paths.push(...cargoInvalidationPaths(atom.cwd, identity?.canonicalPath));
+    }
+    for (const path of paths) {
+      addFileDigest(keys, path);
+    }
+    if (executable === "npm") {
+      const script = npmScriptName(atom.argv);
+      const path = join(atom.cwd, "package.json");
+      const value = script ? npmScriptDigest(path, script) : undefined;
+      if (script && value) {
+        keys.set(`npm:${path}:${script}`, {
+          kind: "npm_script_digest",
+          path,
+          selector: script,
+          value,
+        });
+      }
     }
   }
   return [...keys.values()];
+}
+
+function addFileDigest(
+  keys: Map<string, InvalidationKey>,
+  path: string,
+): void {
+  if (!existsSync(path)) return;
+  const value = fileDigest(path);
+  if (value) keys.set(`file:${path}`, { kind: "file_digest", path, value });
+}
+
+function npmScriptName(argv: readonly string[]): string | undefined {
+  if (argv[0] === "run" || argv[0] === "run-script") return argv[1];
+  if (
+    argv.length === 1 &&
+    !["install", "ci", "publish", "pack", "exec"].includes(argv[0] ?? "")
+  ) {
+    return argv[0];
+  }
+  return undefined;
+}
+
+function npmScriptDigest(path: string, script: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      !("scripts" in parsed) ||
+      typeof parsed.scripts !== "object" ||
+      parsed.scripts === null
+    ) {
+      return undefined;
+    }
+    const value = (parsed.scripts as Record<string, unknown>)[script];
+    return typeof value === "string" ? digestValue(value) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function cargoInvalidationPaths(
+  cwd: string,
+  workspaceRoot?: string,
+): string[] {
+  const result: string[] = [];
+  const boundary = workspaceRoot ? resolve(workspaceRoot) : undefined;
+  let current = resolve(cwd);
+  while (true) {
+    result.push(
+      join(current, "Cargo.toml"),
+      join(current, "Cargo.lock"),
+      join(current, "build.rs"),
+      join(current, ".cargo", "config"),
+      join(current, ".cargo", "config.toml"),
+    );
+    if (current === boundary) break;
+    const parent = dirname(current);
+    if (parent === current || (boundary && !current.startsWith(boundary))) break;
+    current = parent;
+  }
+  return result;
 }

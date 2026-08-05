@@ -1,4 +1,4 @@
-import type { ExecutionProfile } from "../model.ts";
+import type { AuthorizedExecutionPlan } from "./broker.ts";
 import type {
   ExecutionResult,
   SandboxBackend,
@@ -13,21 +13,18 @@ export class ShellFallback {
   }
 
   run(
-    shell: string,
-    source: string,
-    cwd: string,
-    profile: ExecutionProfile,
+    plan: AuthorizedExecutionPlan,
     signal?: AbortSignal,
   ): Promise<ExecutionResult> {
     return this.runner.run(
       {
         kind: "exec",
-        executable: shell,
-        argv: ["-c", source],
-        cwd,
+        executable: "/bin/sh",
+        argv: ["-c", plan.source],
+        cwd: plan.cwd,
         environment: {},
       },
-      profile,
+      plan.executionProfile,
       signal,
     );
   }

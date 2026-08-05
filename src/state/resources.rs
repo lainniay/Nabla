@@ -1,9 +1,11 @@
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ApprovalState {
     pub approval_id: String,
     pub tool_call_id: String,
+    pub session_id: String,
+    pub workspace_id: String,
     pub tool_name: String,
     pub input: Value,
     pub agent_id: Option<String>,
@@ -12,8 +14,25 @@ pub struct ApprovalState {
     pub goal_id: Option<String>,
     pub reason: Option<String>,
     pub risk: Option<String>,
+    pub summary: String,
+    pub intent_digest: String,
+    pub available_decisions: Vec<ApprovalDecision>,
+    pub session_grant: Option<GrantProposal>,
+    pub workspace_grant: Option<GrantProposal>,
     pub selected: usize,
     pub replying: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantProposal {
+    pub scope: String,
+    pub workspace_id: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    pub matchers: Vec<Value>,
+    #[serde(default)]
+    pub invalidation_keys: Vec<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,23 +70,17 @@ pub struct ResourceSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PersistentApprovalRule {
+pub struct WorkspaceGrantRecord {
     pub id: String,
-    pub workspace: String,
-    pub tool_name: String,
-    pub kind: String,
-    pub value: String,
-    pub recursive: bool,
-    pub summary: String,
-    pub created_at: String,
+    #[serde(flatten)]
+    pub proposal: GrantProposal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalRulesSnapshot {
     pub workspace: String,
-    pub rules: Vec<PersistentApprovalRule>,
+    pub grants: Vec<WorkspaceGrantRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

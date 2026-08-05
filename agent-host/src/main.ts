@@ -28,7 +28,6 @@ import { Type } from "typebox";
 
 import { newFileDisplayDiff } from "./tool-diff.ts";
 import { ApprovalQueue, type ApprovalDecision } from "./approval.ts";
-import { ApprovalStore } from "./approval-store.ts";
 import { AuthPromptQueue } from "./auth-prompts.ts";
 import {
   ContextBudgetManager,
@@ -56,8 +55,6 @@ import {
   type TaskResult,
 } from "./harness.ts";
 import {
-  isManagedWorktreeCommand,
-  stripRedundantWorkspaceCd,
   MUTATING_TOOL_NAMES,
   READ_ONLY_TOOL_NAMES,
   THINKING_LEVELS,
@@ -90,10 +87,13 @@ import {
 } from "./session-navigation.ts";
 import { workspacePathError } from "./workspace.ts";
 import {
+  AppendAdapter,
   CreateAdapter,
+  DeleteAdapter,
   EditAdapter,
   ListAdapter,
   ReadAdapter,
+  RenameAdapter,
   WriteAdapter,
   type FileToolInput,
 } from "./permissions/adapters/filesystem.ts";
@@ -107,14 +107,19 @@ import { McpAdapter } from "./permissions/adapters/mcp.ts";
 import { JsonlPermissionAuditLog } from "./permissions/audit-log.ts";
 import { ApprovalBroker as PermissionApprovalBroker } from "./permissions/approvals/broker.ts";
 import { PermissionKernel } from "./permissions/kernel.ts";
+import type { Authorization } from "./permissions/kernel.ts";
+import { ExecutionBroker } from "./permissions/execution/broker.ts";
+import { DirectRunner } from "./permissions/execution/direct-runner.ts";
 import type {
   CapabilityGrantSet,
   CapabilityMatcher,
+  ExecutionProfile,
   PermissionIntent,
   PermissionRule,
   ToolContext,
 } from "./permissions/model.ts";
 import { matcherMatches } from "./permissions/evaluator.ts";
+import { mutatesManagedWorktree } from "./permissions/managed-worktree.ts";
 import { PolicyStore } from "./permissions/policy-store.ts";
 import { digestValue } from "./permissions/shell/digest.ts";
 import { resolveWorkspaceIdentity } from "./permissions/workspace-identity.ts";
@@ -161,6 +166,13 @@ const STANDARD_TOOLS = [
   "bash",
   "delegate_task",
 ] as const;
+
+const EXTERNAL_TOOL_EXECUTION_PROFILE: ExecutionProfile = {
+  backend: "none",
+  filesystem: { read: ["*"], write: ["*"] },
+  network: { allow: [{ host: "*" }] },
+  environment: { inherit: [], set: {} },
+};
 const STANDARD_INSTRUCTIONS = [
   "Follow Pi's normal interactive agent behavior and the user's direct request.",
   "Do not create or advance a structured Goal unless the user explicitly invokes /goal.",
@@ -290,13 +302,18 @@ class HostBridge {
   private socket?: Socket;
   private activeFlow?: ActiveFlow;
   private readonly approvals = new ApprovalQueue();
-  private readonly persistentApprovals = new ApprovalStore();
   private readonly permissionPolicies = new PolicyStore();
+  private readonly permissionApprovals = new PermissionApprovalBroker();
   private readonly permissionKernel = new PermissionKernel(
     this.permissionPolicies,
-    new PermissionApprovalBroker(),
+    this.permissionApprovals,
     new JsonlPermissionAuditLog(),
   );
+  private readonly externalExecutionBroker = new ExecutionBroker(
+    this.permissionKernel,
+    new DirectRunner(),
+  );
+  private readonly pendingToolAuthorizations = new Map<string, Authorization>();
   private readonly shellPermissionAdapter = new ShellAdapter();
   private readonly questions = new QuestionQueue();
   private readonly plans: PlanStore;
@@ -597,12 +614,10 @@ class HostBridge {
             const target = resolve(context.cwd, expandHomePath(input.path));
             if (!existsSync(target)) newWriteCalls.add(event.toolCallId);
           }
-          if (event.toolName === "bash" && typeof input.command === "string") {
-            input.command = stripRedundantWorkspaceCd(input.command, context.cwd);
-          }
           return this.authorizeTool(event, context.cwd, context.signal);
         });
         pi.on("tool_result", (event) => {
+          this.finishToolAuthorization(event.toolCallId, !event.isError);
           if (event.toolName !== "write") return;
           const wasNew = newWriteCalls.delete(event.toolCallId);
           if (!wasNew || event.isError) return;
@@ -823,35 +838,46 @@ class HostBridge {
           await this.setWorkspaceTrust(id, request);
           break;
         case "approval_rules":
-          this.response(
-            id,
-            command,
-            true,
-            this.persistentApprovals.snapshot(
+          {
+            const identity = resolveWorkspaceIdentity(
               this.planMode.runtimeHandle().session.sessionManager.getCwd(),
-            ),
-          );
+            );
+            this.response(
+              id,
+              command,
+              true,
+              this.permissionApprovals.workspace.snapshot(identity),
+            );
+          }
           break;
         case "approval_rule_revoke":
-          this.response(
-            id,
-            command,
-            true,
-            this.persistentApprovals.revoke(
+          {
+            const identity = resolveWorkspaceIdentity(
               this.planMode.runtimeHandle().session.sessionManager.getCwd(),
-              stringField(request, "ruleId"),
-            ),
-          );
+            );
+            this.response(
+              id,
+              command,
+              true,
+              this.permissionApprovals.workspace.revoke(
+                identity,
+                stringField(request, "ruleId"),
+              ),
+            );
+          }
           break;
         case "approval_rules_clear":
-          this.response(
-            id,
-            command,
-            true,
-            this.persistentApprovals.clear(
+          {
+            const identity = resolveWorkspaceIdentity(
               this.planMode.runtimeHandle().session.sessionManager.getCwd(),
-            ),
-          );
+            );
+            this.response(
+              id,
+              command,
+              true,
+              this.permissionApprovals.workspace.clear(identity),
+            );
+          }
           break;
         case "goal_state":
           this.response(id, command, true, this.goalSnapshot());
@@ -2590,6 +2616,9 @@ class HostBridge {
               ?.grants,
           }),
         );
+        pi.on("tool_result", (event) => {
+          this.finishToolAuthorization(event.toolCallId, !event.isError);
+        });
       },
     };
   }
@@ -3069,7 +3098,7 @@ class HostBridge {
   }
 
   private replyApproval(id: string | undefined, request: JsonObject): void {
-    const approvalId = stringField(request, "approvalId");
+    const requestId = stringField(request, "requestId");
     const decision = stringField(request, "decision");
     if (
       decision !== "allow_once" &&
@@ -3079,7 +3108,7 @@ class HostBridge {
     ) {
       throw new Error(`Unsupported approval decision: ${decision}`);
     }
-    if (!this.approvals.reply(approvalId, decision)) {
+    if (!this.approvals.reply(requestId, decision)) {
       throw new Error("Approval request is no longer active");
     }
     this.response(id, "approval_reply", true);
@@ -3527,7 +3556,7 @@ class HostBridge {
     ) {
       addToolRule("plan-read-only", "deny", "managed");
     }
-    if (agent.agentId && command && isManagedWorktreeCommand(command)) {
+    if (agent.agentId && mutatesManagedWorktree(intent)) {
       addToolRule("managed-worktree-boundary", "deny", "managed");
     }
     if (
@@ -3556,17 +3585,6 @@ class HostBridge {
       } else if (pathError) {
         reason = pathError;
         risk = "outside_workspace";
-      } else if (
-        READ_ONLY_TOOL_NAMES.includes(
-          toolName as (typeof READ_ONLY_TOOL_NAMES)[number],
-        )
-      ) {
-        additionalRules.push({
-          id: "builtin-workspace-read",
-          effect: "allow",
-          source: "builtin",
-          matcher: { kind: "tool", tool: toolName },
-        });
       }
     }
 
@@ -3596,9 +3614,28 @@ class HostBridge {
       identity,
       async ({ intent: requestedIntent, proposals }, approvalSignal) => {
         if (!this.socket || this.socket.destroyed) return "deny";
+        const sessionGrant = proposals.find(
+          (proposal) => proposal.scope === "session",
+        );
+        const workspaceGrant = proposals.find(
+          (proposal) => proposal.scope === "workspace",
+        );
+        const availableDecisions: ApprovalDecision[] = ["allow_once"];
+        if (sessionGrant) availableDecisions.push("allow_session");
+        if (workspaceGrant) availableDecisions.push("allow_workspace");
+        availableDecisions.push("deny");
         return this.approvals.request(
           {
+            requestId: permissionContext.requestId,
             toolCallId: event.toolCallId,
+            sessionId: permissionContext.sessionId,
+            workspaceId: permissionContext.workspaceId,
+            summary: reason,
+            risk,
+            intentDigest: requestedIntent.digest,
+            availableDecisions,
+            ...(sessionGrant ? { sessionGrant } : {}),
+            ...(workspaceGrant ? { workspaceGrant } : {}),
             toolName,
             input: event.input,
             agentId: agent.agentId,
@@ -3606,9 +3643,6 @@ class HostBridge {
             model: agent.model,
             goalId: activeGoal?.id,
             reason,
-            risk,
-            permissionIntent: requestedIntent,
-            grantProposals: proposals,
           },
           approvalSignal,
           (approvalEvent) => this.send(approvalEvent),
@@ -3617,6 +3651,7 @@ class HostBridge {
       signal,
       additionalRules,
       !agent.agentId,
+      risk,
     );
     if (
       authorization.evaluation.effect === "deny" ||
@@ -3630,9 +3665,28 @@ class HostBridge {
             : "Denied by user",
       };
     }
-    return this.permissionKernel.consumeForExecution(authorization, normalize())
-      ? undefined
-      : { block: true, reason: "Tool input changed after approval" };
+    if (
+      !this.externalExecutionBroker.beginExternalTool(
+        authorization,
+        normalize(),
+        EXTERNAL_TOOL_EXECUTION_PROFILE,
+      )
+    ) {
+      return { block: true, reason: "Tool input changed after approval" };
+    }
+    this.pendingToolAuthorizations.set(event.toolCallId, authorization);
+    return undefined;
+  }
+
+  private finishToolAuthorization(toolCallId: string, succeeded: boolean): void {
+    const authorization = this.pendingToolAuthorizations.get(toolCallId);
+    if (!authorization) return;
+    this.pendingToolAuthorizations.delete(toolCallId);
+    this.externalExecutionBroker.finishExternalTool(
+      authorization,
+      EXTERNAL_TOOL_EXECUTION_PROFILE,
+      succeeded,
+    );
   }
 
   private cancelActiveFlow(reason: string): void {
@@ -3683,16 +3737,33 @@ function permissionIntentForTool(
     } satisfies ShellInput);
   }
   if (typeof value.path === "string") {
-    const adapter =
-      toolName === "edit"
-        ? EditAdapter
-        : toolName === "write"
-          ? existsSync(resolve(context.cwd, value.path))
+    const adapter = (() => {
+      switch (toolName) {
+        case "edit":
+        case "edit_file":
+          return EditAdapter;
+        case "write":
+        case "write_file":
+          return existsSync(resolve(context.cwd, value.path))
             ? WriteAdapter
-            : CreateAdapter
-          : toolName === "ls"
-            ? ListAdapter
-            : ReadAdapter;
+            : CreateAdapter;
+        case "append":
+        case "append_file":
+          return AppendAdapter;
+        case "rename":
+        case "move":
+        case "move_file":
+          return RenameAdapter;
+        case "delete":
+        case "remove":
+        case "delete_file":
+          return DeleteAdapter;
+        case "ls":
+          return ListAdapter;
+        default:
+          return ReadAdapter;
+      }
+    })();
     return adapter.normalize(context, value as FileToolInput);
   }
   const normalizedInput = isJsonObject(input) ? input : { value: input };

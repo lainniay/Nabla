@@ -97,7 +97,7 @@
           "matchers": [
             {"kind": "file", "operation": "read", "path": "src", "recursive": true},
             {"kind": "file", "operation": "write", "path": "src", "recursive": true},
-            {"kind": "shell_intent", "command": "cargo test"}
+            {"kind": "shell_digest", "digest": "46b54e632fb509e603362a785238ddd4c8cecbc6f4c9dfab3715c46f37d34d24"}
           ]
         },
         "sourcePlan": {
@@ -152,7 +152,7 @@
           "matchers": [
             {"kind": "file", "operation": "read", "path": "src", "recursive": true},
             {"kind": "file", "operation": "write", "path": "src", "recursive": true},
-            {"kind": "shell_intent", "command": "cargo test"}
+            {"kind": "shell_digest", "digest": "46b54e632fb509e603362a785238ddd4c8cecbc6f4c9dfab3715c46f37d34d24"}
           ]
         }
       },

@@ -47,16 +47,17 @@ impl App {
                 Vec::new()
             }
             KeyCode::Up | KeyCode::BackTab => {
-                manager.selected = previous_wrapped(manager.selected, manager.snapshot.rules.len());
+                manager.selected =
+                    previous_wrapped(manager.selected, manager.snapshot.grants.len());
                 Vec::new()
             }
             KeyCode::Down | KeyCode::Tab => {
-                manager.selected = next_wrapped(manager.selected, manager.snapshot.rules.len());
+                manager.selected = next_wrapped(manager.selected, manager.snapshot.grants.len());
                 Vec::new()
             }
             KeyCode::Delete | KeyCode::Char('d' | 'D') => manager
                 .snapshot
-                .rules
+                .grants
                 .get(manager.selected)
                 .map(|rule| vec![AppEffect::RevokeApprovalRule(rule.id.clone())])
                 .unwrap_or_default(),

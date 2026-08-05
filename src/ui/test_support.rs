@@ -359,6 +359,78 @@ mod tests {
         }
     }
 
+    fn fixed_primary_frame(
+        revision: u64,
+        size: TerminalSize,
+        history: &[&str],
+        footer: &str,
+    ) -> VisualFrame {
+        let history_height = size.height.saturating_sub(2);
+        let history_window = Rect::new(0, 0, size.width, history_height);
+        let mut rows = (0..size.height)
+            .map(|_| VisualRow::blank("surface"))
+            .collect::<Vec<_>>();
+        let history_len = history.len().min(usize::from(history_height));
+        let start = usize::from(history_height).saturating_sub(history_len);
+        for (offset, text) in history[history.len().saturating_sub(history_len)..]
+            .iter()
+            .enumerate()
+        {
+            rows[start + offset] = row("history", text);
+        }
+        if let Some(composer) = rows.get_mut(usize::from(history_height)) {
+            *composer = row("composer", footer);
+        }
+        VisualFrame {
+            revision,
+            terminal_size: size,
+            rows,
+            viewport: Rect::new(0, 0, size.width, size.height),
+            panel: None,
+            component_bounds: Default::default(),
+            hit_regions: Vec::new(),
+            cursor: None,
+            main_layout: MainLayout {
+                transcript: history_window,
+                history_window,
+                owned_surface: Rect::new(0, 0, size.width, size.height),
+                panel: None,
+                composer: Rect::new(0, history_height, size.width, 1),
+                status: Rect::new(0, history_height.saturating_add(1), size.width, 1),
+            },
+        }
+    }
+
+    fn plan(
+        frame: VisualFrame,
+        bootstrap_scroll_rows: usize,
+        bootstrap_padding_rows: usize,
+        overflow_blocks: Vec<CommittedHistoryBlock>,
+    ) -> TerminalCommitPlan {
+        TerminalCommitPlan {
+            revision: frame.revision,
+            surface: SurfaceKind::Primary,
+            history_window: frame.main_layout.history_window,
+            bootstrap_scroll_rows,
+            bootstrap_padding_rows,
+            overflow_blocks,
+            panel: frame.panel.clone(),
+            cursor: frame.cursor,
+            frame_update: FrameUpdate::Full(frame),
+            full_redraw: true,
+        }
+    }
+
+    fn overflow(id: &str, revision: u64, offset: usize, text: &str) -> CommittedHistoryBlock {
+        CommittedHistoryBlock {
+            component_id: id.to_owned(),
+            source_revision: revision,
+            row_offset: offset,
+            total_rows: offset.saturating_add(1),
+            rows: vec![row(id, text)],
+        }
+    }
+
     fn capabilities() -> TerminalCapabilities {
         TerminalCapabilities {
             synchronized_output: true,
@@ -388,274 +460,124 @@ mod tests {
     }
 
     #[test]
-    fn history_commit_remains_visible_above_the_inline_viewport() {
-        let size = TerminalSize::new(20, 4);
-        let mut driver = TerminalDriver::new(Vec::<u8>::new(), capabilities(), size);
-        let viewport = Rect::new(0, 2, 20, 2);
-        let plan = TerminalCommitPlan {
-            revision: 2,
-            surface: SurfaceKind::Primary,
-            history_scroll_rows: 1,
-            history_blocks: vec![CommittedHistoryBlock {
-                component_id: "sealed".to_owned(),
-                source_revision: 2,
-                row_offset: 0,
-                total_rows: 1,
-                rows: vec![row("sealed", "sealed once")],
-            }],
-            frame_update: FrameUpdate::Full(frame_in_viewport(2, size, viewport, "live")),
-            panel: None,
-            cursor: None,
-            full_redraw: true,
-        };
-        driver.commit(&plan).unwrap();
-        let mut vt = VirtualTerminal::new(size);
-        vt.feed(driver.output_ref());
-        assert_eq!(vt.visible_lines()[1], "sealed once");
-        assert_eq!(vt.visible_lines()[2], "live");
-        assert!(
-            !vt.scrollback()
-                .iter()
-                .any(|line| line.contains("sealed once"))
-        );
-        assert!(vt.visible_lines().iter().any(|line| line == "live"));
-    }
-
-    #[test]
-    fn repeated_history_naturally_pushes_the_oldest_line_into_scrollback() {
-        let size = TerminalSize::new(20, 5);
-        let viewport = Rect::new(0, 3, 20, 2);
-        let mut driver = TerminalDriver::new(Vec::<u8>::new(), capabilities(), size);
-        for (index, text) in ["one", "two", "three", "four"].into_iter().enumerate() {
-            driver
-                .commit(&TerminalCommitPlan {
-                    revision: index as u64 + 1,
-                    surface: SurfaceKind::Primary,
-                    history_scroll_rows: 1,
-                    history_blocks: vec![CommittedHistoryBlock {
-                        component_id: format!("sealed-{index}"),
-                        source_revision: index as u64 + 1,
-                        row_offset: 0,
-                        total_rows: 1,
-                        rows: vec![row("sealed", text)],
-                    }],
-                    frame_update: FrameUpdate::Full(frame_in_viewport(
-                        index as u64 + 1,
-                        size,
-                        viewport,
-                        "live",
-                    )),
-                    panel: None,
-                    cursor: None,
-                    full_redraw: true,
-                })
-                .unwrap();
-        }
-
-        let mut vt = VirtualTerminal::new(size);
-        vt.feed(driver.output_ref());
-        assert_eq!(
-            vt.scrollback()
-                .iter()
-                .filter(|line| line.as_str() == "one")
-                .count(),
-            1
-        );
-        assert_eq!(&vt.visible_lines()[0..3], ["two", "three", "four"]);
-        assert_eq!(vt.visible_lines()[3], "live");
-    }
-
-    #[test]
-    fn sealing_a_live_tail_reuses_its_rows_without_scrolling_history_twice() {
+    fn bootstrap_blank_rows_move_into_scrollback_as_resident_history_grows() {
         let size = TerminalSize::new(20, 5);
         let mut driver = TerminalDriver::new(Vec::<u8>::new(), capabilities(), size);
         driver
-            .commit(&TerminalCommitPlan {
-                revision: 1,
-                surface: SurfaceKind::Primary,
-                history_scroll_rows: 1,
-                history_blocks: vec![CommittedHistoryBlock {
-                    component_id: "older".to_owned(),
-                    source_revision: 1,
-                    row_offset: 0,
-                    total_rows: 1,
-                    rows: vec![row("older", "older")],
-                }],
-                frame_update: FrameUpdate::Full(frame_in_viewport(
-                    1,
-                    size,
-                    Rect::new(0, 4, 20, 1),
-                    "footer",
-                )),
-                panel: None,
-                cursor: None,
-                full_redraw: true,
-            })
+            .commit(&plan(
+                fixed_primary_frame(1, size, &["one"], "composer"),
+                0,
+                2,
+                Vec::new(),
+            ))
             .unwrap();
         driver
-            .commit(&TerminalCommitPlan {
-                revision: 2,
-                surface: SurfaceKind::Primary,
-                history_scroll_rows: 0,
-                history_blocks: Vec::new(),
-                frame_update: FrameUpdate::Full(frame_in_viewport(
-                    2,
-                    size,
-                    Rect::new(0, 2, 20, 3),
-                    "stream",
-                )),
-                panel: None,
-                cursor: None,
-                full_redraw: true,
-            })
+            .commit(&plan(
+                fixed_primary_frame(2, size, &["one", "two"], "composer"),
+                1,
+                1,
+                Vec::new(),
+            ))
             .unwrap();
-        driver
-            .commit(&TerminalCommitPlan {
-                revision: 3,
-                surface: SurfaceKind::Primary,
-                history_scroll_rows: 2,
-                history_blocks: vec![CommittedHistoryBlock {
-                    component_id: "final".to_owned(),
-                    source_revision: 3,
-                    row_offset: 0,
-                    total_rows: 2,
-                    rows: vec![row("final", "final-a"), row("final", "final-b")],
-                }],
-                frame_update: FrameUpdate::Full(frame_in_viewport(
-                    3,
-                    size,
-                    Rect::new(0, 4, 20, 1),
-                    "footer",
-                )),
-                panel: None,
-                cursor: None,
-                full_redraw: true,
-            })
-            .unwrap();
-
         let mut vt = VirtualTerminal::new(size);
         vt.feed(driver.output_ref());
-        assert_eq!(
-            vt.visible_lines(),
-            ["", "older", "final-a", "final-b", "footer"]
-        );
-        assert!(
-            !vt.scrollback()
-                .iter()
-                .any(|line| matches!(line.as_str(), "older" | "final-a" | "final-b"))
-        );
+        assert_eq!(vt.scrollback(), &[""]);
+        assert_eq!(&vt.visible_lines()[0..3], ["", "one", "two"]);
+        assert_eq!(vt.visible_lines()[3], "composer");
     }
 
     #[test]
-    fn a_temporary_viewport_expansion_returns_visible_history_to_the_bottom() {
+    fn monotonic_overflow_commits_rows_once_and_never_scrolls_the_footer() {
         let size = TerminalSize::new(20, 5);
         let mut driver = TerminalDriver::new(Vec::<u8>::new(), capabilities(), size);
         driver
-            .commit(&TerminalCommitPlan {
-                revision: 1,
-                surface: SurfaceKind::Primary,
-                history_scroll_rows: 1,
-                history_blocks: vec![CommittedHistoryBlock {
-                    component_id: "history".to_owned(),
-                    source_revision: 1,
-                    row_offset: 0,
-                    total_rows: 1,
-                    rows: vec![row("history", "history")],
-                }],
-                frame_update: FrameUpdate::Full(frame_in_viewport(
-                    1,
-                    size,
-                    Rect::new(0, 4, 20, 1),
-                    "footer",
-                )),
-                panel: None,
-                cursor: None,
-                full_redraw: true,
-            })
+            .commit(&plan(
+                fixed_primary_frame(1, size, &["one", "two", "three"], "composer"),
+                0,
+                0,
+                Vec::new(),
+            ))
             .unwrap();
-        for (revision, viewport) in [(2, Rect::new(0, 1, 20, 4)), (3, Rect::new(0, 4, 20, 1))] {
-            driver
-                .commit(&TerminalCommitPlan {
-                    revision,
-                    surface: SurfaceKind::Primary,
-                    history_scroll_rows: 0,
-                    history_blocks: Vec::new(),
-                    frame_update: FrameUpdate::Full(frame_in_viewport(
-                        revision, size, viewport, "footer",
-                    )),
-                    panel: None,
-                    cursor: None,
-                    full_redraw: true,
-                })
-                .unwrap();
-        }
+        driver
+            .commit(&plan(
+                fixed_primary_frame(2, size, &["two", "three", "four"], "composer"),
+                0,
+                0,
+                vec![overflow("component", 2, 0, "one")],
+            ))
+            .unwrap();
+        driver
+            .commit(&plan(
+                fixed_primary_frame(3, size, &["three", "four", "five"], "composer"),
+                0,
+                0,
+                vec![overflow("component", 3, 1, "two")],
+            ))
+            .unwrap();
 
         let mut vt = VirtualTerminal::new(size);
         vt.feed(driver.output_ref());
-        assert_eq!(vt.visible_lines()[3], "history");
-        assert_eq!(vt.visible_lines()[4], "footer");
+        assert_eq!(vt.scrollback(), &["one", "two"]);
+        assert_eq!(&vt.visible_lines()[0..3], ["three", "four", "five"]);
+        assert_eq!(vt.visible_lines()[3], "composer");
+        assert!(!vt.scrollback().iter().any(|line| line == "composer"));
+        assert!(!String::from_utf8_lossy(driver.output_ref()).contains("\u{1b}M"));
+    }
+
+    #[test]
+    fn stable_rows_do_not_overflow_until_they_leave_the_resident_window() {
+        let size = TerminalSize::new(20, 5);
+        let mut driver = TerminalDriver::new(Vec::<u8>::new(), capabilities(), size);
+        driver
+            .commit(&plan(
+                fixed_primary_frame(1, size, &["stable", "live"], "composer"),
+                0,
+                1,
+                Vec::new(),
+            ))
+            .unwrap();
+        driver
+            .commit(&plan(
+                fixed_primary_frame(2, size, &["stable", "live", "new"], "composer"),
+                1,
+                0,
+                Vec::new(),
+            ))
+            .unwrap();
+        let mut vt = VirtualTerminal::new(size);
+        vt.feed(driver.output_ref());
+        assert_eq!(vt.scrollback(), &[""]);
+        assert_eq!(&vt.visible_lines()[0..3], ["stable", "live", "new"]);
     }
 
     #[test]
     fn floating_panel_covers_and_restores_history_without_scrolling() {
         let size = TerminalSize::new(20, 5);
-        let viewport = Rect::new(0, 4, 20, 1);
         let mut driver = TerminalDriver::new(Vec::<u8>::new(), capabilities(), size);
+        let baseline = fixed_primary_frame(1, size, &["history"], "footer");
         driver
-            .commit(&TerminalCommitPlan {
-                revision: 1,
-                surface: SurfaceKind::Primary,
-                history_scroll_rows: 1,
-                history_blocks: vec![CommittedHistoryBlock {
-                    component_id: "history".to_owned(),
-                    source_revision: 1,
-                    row_offset: 0,
-                    total_rows: 1,
-                    rows: vec![row("history", "history")],
-                }],
-                frame_update: FrameUpdate::Full(frame_in_viewport(1, size, viewport, "footer")),
-                panel: None,
-                cursor: None,
-                full_redraw: true,
-            })
+            .commit(&plan(baseline.clone(), 0, 2, Vec::new()))
             .unwrap();
         let panel_only_output = driver.output_ref().len();
 
-        driver
-            .commit(&TerminalCommitPlan {
-                revision: 2,
-                surface: SurfaceKind::Primary,
-                history_scroll_rows: 0,
-                history_blocks: Vec::new(),
-                frame_update: FrameUpdate::Full(frame_in_viewport(2, size, viewport, "footer")),
-                panel: Some(panel(Rect::new(0, 2, 20, 2), &["first", "second"])),
-                cursor: None,
-                full_redraw: true,
-            })
-            .unwrap();
-        driver
-            .commit(&TerminalCommitPlan {
-                revision: 3,
-                surface: SurfaceKind::Primary,
-                history_scroll_rows: 0,
-                history_blocks: Vec::new(),
-                frame_update: FrameUpdate::Full(frame_in_viewport(3, size, viewport, "footer")),
-                panel: None,
-                cursor: None,
-                full_redraw: true,
-            })
-            .unwrap();
+        let mut opened = baseline.clone();
+        opened.revision = 2;
+        opened.panel = Some(panel(Rect::new(0, 1, 20, 2), &["first", "second"]));
+        driver.commit(&plan(opened, 0, 2, Vec::new())).unwrap();
+        let mut restored = baseline;
+        restored.revision = 3;
+        driver.commit(&plan(restored, 0, 2, Vec::new())).unwrap();
 
         let emitted = &driver.output_ref()[panel_only_output..];
         let emitted = String::from_utf8_lossy(emitted);
         assert!(!emitted.contains("\r\n"));
         assert!(!emitted.contains("\u{1b}M"));
-        assert!(!emitted.contains("\u{1b}[1;"));
+        assert!(!emitted.contains("\u{1b}[1;3r"));
 
         let mut vt = VirtualTerminal::new(size);
         vt.feed(driver.output_ref());
-        assert_eq!(vt.visible_lines()[3], "history");
-        assert_eq!(vt.visible_lines()[4], "footer");
+        assert_eq!(vt.visible_lines()[2], "history");
+        assert_eq!(vt.visible_lines()[3], "footer");
         assert!(!vt.visible_lines().iter().any(|line| line == "first"));
         assert!(!vt.visible_lines().iter().any(|line| line == "second"));
     }
@@ -671,8 +593,10 @@ mod tests {
             .commit(&TerminalCommitPlan {
                 revision: 1,
                 surface: SurfaceKind::Primary,
-                history_scroll_rows: 0,
-                history_blocks: Vec::new(),
+                history_window: Rect::new(0, 0, 20, 2),
+                bootstrap_scroll_rows: 0,
+                bootstrap_padding_rows: 0,
+                overflow_blocks: Vec::new(),
                 frame_update: FrameUpdate::Full(opened.clone()),
                 panel: opened.panel.clone(),
                 cursor: None,
@@ -686,8 +610,10 @@ mod tests {
             .commit(&TerminalCommitPlan {
                 revision: 2,
                 surface: SurfaceKind::Primary,
-                history_scroll_rows: 0,
-                history_blocks: Vec::new(),
+                history_window: Rect::new(0, 0, 20, 2),
+                bootstrap_scroll_rows: 0,
+                bootstrap_padding_rows: 0,
+                overflow_blocks: Vec::new(),
                 frame_update: FrameUpdate::Full(updated),
                 panel: opened.panel.clone(),
                 cursor: None,
@@ -698,8 +624,10 @@ mod tests {
             .commit(&TerminalCommitPlan {
                 revision: 3,
                 surface: SurfaceKind::Primary,
-                history_scroll_rows: 0,
-                history_blocks: Vec::new(),
+                history_window: Rect::new(0, 0, 20, 2),
+                bootstrap_scroll_rows: 0,
+                bootstrap_padding_rows: 0,
+                overflow_blocks: Vec::new(),
                 frame_update: FrameUpdate::Full(frame_in_viewport(3, size, viewport, "new")),
                 panel: None,
                 cursor: None,
@@ -726,8 +654,10 @@ mod tests {
                 .commit(&TerminalCommitPlan {
                     revision,
                     surface,
-                    history_scroll_rows: 0,
-                    history_blocks: Vec::new(),
+                    history_window: Rect::new(0, 0, 20, 2),
+                    bootstrap_scroll_rows: 0,
+                    bootstrap_padding_rows: 0,
+                    overflow_blocks: Vec::new(),
                     frame_update: FrameUpdate::Full(frame(revision, size, text)),
                     panel: None,
                     cursor: None,
@@ -744,32 +674,18 @@ mod tests {
     #[test]
     fn alternate_round_trip_restores_a_primary_panel_underlay() {
         let size = TerminalSize::new(20, 4);
-        let viewport = Rect::new(0, 2, 20, 2);
         let mut driver = TerminalDriver::new(Vec::<u8>::new(), capabilities(), size);
-        driver
-            .commit(&TerminalCommitPlan {
-                revision: 1,
-                surface: SurfaceKind::Primary,
-                history_scroll_rows: 1,
-                history_blocks: vec![CommittedHistoryBlock {
-                    component_id: "history".to_owned(),
-                    source_revision: 1,
-                    row_offset: 0,
-                    total_rows: 1,
-                    rows: vec![row("history", "history")],
-                }],
-                frame_update: FrameUpdate::Full(frame_in_viewport(1, size, viewport, "main")),
-                panel: Some(panel(Rect::new(0, 1, 20, 1), &["panel"])),
-                cursor: None,
-                full_redraw: true,
-            })
-            .unwrap();
+        let mut primary = fixed_primary_frame(1, size, &["history"], "main");
+        primary.panel = Some(panel(Rect::new(0, 1, 20, 1), &["panel"]));
+        driver.commit(&plan(primary, 0, 1, Vec::new())).unwrap();
         driver
             .commit(&TerminalCommitPlan {
                 revision: 2,
                 surface: SurfaceKind::Alternate,
-                history_scroll_rows: 0,
-                history_blocks: Vec::new(),
+                history_window: Rect::new(0, 0, 20, 2),
+                bootstrap_scroll_rows: 0,
+                bootstrap_padding_rows: 0,
+                overflow_blocks: Vec::new(),
                 frame_update: FrameUpdate::Full(frame(2, size, "browser")),
                 panel: None,
                 cursor: None,
@@ -777,21 +693,12 @@ mod tests {
             })
             .unwrap();
         driver
-            .commit(&TerminalCommitPlan {
-                revision: 3,
-                surface: SurfaceKind::Primary,
-                history_scroll_rows: 0,
-                history_blocks: Vec::new(),
-                frame_update: FrameUpdate::Full(frame_in_viewport(
-                    3,
-                    size,
-                    viewport,
-                    "main restored",
-                )),
-                panel: None,
-                cursor: None,
-                full_redraw: true,
-            })
+            .commit(&plan(
+                fixed_primary_frame(3, size, &["history"], "main restored"),
+                0,
+                1,
+                Vec::new(),
+            ))
             .unwrap();
 
         let mut vt = VirtualTerminal::new(size);

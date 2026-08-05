@@ -27,6 +27,10 @@ export class OnceGrantStore {
     this.grants.delete(requestId);
     return matches(grant, intent) ? grant.bundle : undefined;
   }
+
+  invalidate(requestId: string): void {
+    this.grants.delete(requestId);
+  }
 }
 
 function matches(grant: OnceGrant, intent: PermissionIntent): boolean {

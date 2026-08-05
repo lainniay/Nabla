@@ -1675,8 +1675,14 @@ fn mutation_tool_waits_for_approval_and_resumes_after_allow() {
         kind: "approval_request".to_owned(),
         payload: json!({
             "type": "approval_request",
-            "approvalId": "approval-1",
+            "requestId": "request-1",
             "toolCallId": "call-1",
+            "sessionId": "session-1",
+            "workspaceId": "workspace-1",
+            "summary": "Run the test suite",
+            "risk": "normal",
+            "intentDigest": "digest-1",
+            "availableDecisions": ["allow_once", "deny"],
             "toolName": "bash",
             "input": {"command": "cargo test"}
         }),
@@ -1693,13 +1699,13 @@ fn mutation_tool_waits_for_approval_and_resumes_after_allow() {
     assert_eq!(
         effects,
         vec![AppEffect::ReplyApproval {
-            approval_id: "approval-1".to_owned(),
+            approval_id: "request-1".to_owned(),
             decision: ApprovalDecision::AllowOnce,
         }]
     );
 
     app.update(AppEvent::Command(CommandEvent::ApprovalReplyFinished {
-        approval_id: "approval-1".to_owned(),
+        approval_id: "request-1".to_owned(),
         decision: ApprovalDecision::AllowOnce,
         result: Ok(()),
     }));
@@ -1730,6 +1736,7 @@ fn approval_interrupt_denies_and_aborts_the_agent() {
         risk: None,
         selected: 0,
         replying: false,
+        ..ApprovalState::default()
     });
 
     assert_eq!(
@@ -1756,6 +1763,13 @@ fn approval_and_goal_approval_use_shared_navigation_before_confirming() {
         risk: None,
         selected: 0,
         replying: false,
+        available_decisions: vec![
+            ApprovalDecision::AllowOnce,
+            ApprovalDecision::AllowSession,
+            ApprovalDecision::AllowWorkspace,
+            ApprovalDecision::Deny,
+        ],
+        ..ApprovalState::default()
     });
 
     assert!(
@@ -1803,7 +1817,7 @@ fn approval_and_goal_approval_use_shared_navigation_before_confirming() {
 }
 
 #[test]
-fn persistent_approval_is_available_only_for_normal_risk_requests() {
+fn approval_scope_follows_available_decisions_instead_of_risk() {
     let mut app = App::new(state());
     app.state.run_state = RunState::Running;
     app.state.approval = Some(ApprovalState {
@@ -1819,6 +1833,13 @@ fn persistent_approval_is_available_only_for_normal_risk_requests() {
         risk: Some("normal".to_owned()),
         selected: 0,
         replying: false,
+        available_decisions: vec![
+            ApprovalDecision::AllowOnce,
+            ApprovalDecision::AllowSession,
+            ApprovalDecision::AllowWorkspace,
+            ApprovalDecision::Deny,
+        ],
+        ..ApprovalState::default()
     });
     assert_eq!(
         app.update(press(KeyCode::Char('a'))),
@@ -1849,8 +1870,20 @@ fn persistent_approval_is_available_only_for_normal_risk_requests() {
         risk: Some("high".to_owned()),
         selected: 0,
         replying: false,
+        available_decisions: vec![
+            ApprovalDecision::AllowOnce,
+            ApprovalDecision::AllowWorkspace,
+            ApprovalDecision::Deny,
+        ],
+        ..ApprovalState::default()
     });
-    assert!(app.update(press(KeyCode::Char('a'))).is_empty());
+    assert_eq!(
+        app.update(press(KeyCode::Char('a'))),
+        vec![AppEffect::ReplyApproval {
+            approval_id: "approval-high".to_owned(),
+            decision: ApprovalDecision::AllowWorkspace,
+        }]
+    );
 }
 
 #[test]
@@ -1865,15 +1898,21 @@ fn permissions_command_opens_and_manages_project_rules() {
     app.update(AppEvent::Command(CommandEvent::ApprovalRulesFinished(Ok(
         Box::new(ApprovalRulesSnapshot {
             workspace: "/workspace".to_owned(),
-            rules: vec![crate::state::PersistentApprovalRule {
+            grants: vec![crate::state::WorkspaceGrantRecord {
                 id: "rule-1".to_owned(),
-                workspace: "/workspace".to_owned(),
-                tool_name: "bash".to_owned(),
-                kind: "command".to_owned(),
-                value: "cargo test".to_owned(),
-                recursive: false,
-                summary: "cargo test".to_owned(),
-                created_at: "2026-08-04T00:00:00.000Z".to_owned(),
+                proposal: crate::state::GrantProposal {
+                    scope: "workspace".to_owned(),
+                    workspace_id: "workspace-1".to_owned(),
+                    session_id: None,
+                    matchers: vec![json!({
+                        "kind": "exec",
+                        "executable": "cargo",
+                        "argv": ["test"],
+                        "cwd": "/workspace",
+                        "environment": {}
+                    })],
+                    invalidation_keys: Vec::new(),
+                },
             }],
         }),
     ))));
@@ -2386,6 +2425,7 @@ fn context_budget_events_update_status_without_querying_or_disturbing_active_ui_
         risk: None,
         selected: 0,
         replying: false,
+        ..ApprovalState::default()
     });
     let snapshot = ContextSnapshot {
         usage_state: ContextUsageState::Actual,
@@ -3041,6 +3081,13 @@ fn approval_can_open_full_tool_details_and_escape_back_to_the_inline_panel() {
         risk: Some("normal".to_owned()),
         selected: 0,
         replying: false,
+        available_decisions: vec![
+            ApprovalDecision::AllowOnce,
+            ApprovalDecision::AllowSession,
+            ApprovalDecision::AllowWorkspace,
+            ApprovalDecision::Deny,
+        ],
+        ..ApprovalState::default()
     });
 
     app.update(press_with(KeyCode::Char('o'), KeyModifiers::CONTROL));

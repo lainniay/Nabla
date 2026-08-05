@@ -67,6 +67,7 @@ mod tests {
             risk: Some("credential".to_owned()),
             selected: 0,
             replying: false,
+            ..ApprovalState::default()
         });
         assert_eq!(SurfaceManager.route(&state), SurfaceKind::Primary);
     }

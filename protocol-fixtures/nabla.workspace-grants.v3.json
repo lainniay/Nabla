@@ -1,0 +1,28 @@
+{
+  "workspace": "/workspace",
+  "grants": [
+    {
+      "id": "grant-contract",
+      "scope": "workspace",
+      "workspaceId": "workspace-contract",
+      "matchers": [
+        {
+          "kind": "exec",
+          "executable": "cargo",
+          "argv": [
+            "test"
+          ],
+          "cwd": "/workspace",
+          "environment": {}
+        }
+      ],
+      "invalidationKeys": [
+        {
+          "kind": "file_digest",
+          "path": "/workspace/Cargo.toml",
+          "value": "manifest-contract"
+        }
+      ]
+    }
+  ]
+}

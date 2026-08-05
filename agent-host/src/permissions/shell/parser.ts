@@ -238,7 +238,7 @@ function lexWords(source: string): {
       index = target.end;
       continue;
     }
-    if (!quote && ["{", "}", "*", "?", "~"].includes(character)) {
+    if (!quote && ["{", "}", "~"].includes(character)) {
       opaqueReason = "shell expansion is not statically understood";
     }
     current += character;

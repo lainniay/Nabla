@@ -1,6 +1,7 @@
 use crate::{
     command::{CommandCatalog, CommandSpec, DiscoveredCommand},
     file_references::FileCompletionState,
+    host::ApprovalDecision,
     rpc::PiState,
     selection::{next_wrapped, previous_wrapped},
 };

@@ -91,6 +91,8 @@ impl Rect {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MainLayout {
     pub transcript: Rect,
+    pub history_window: Rect,
+    pub owned_surface: Rect,
     pub panel: Option<Rect>,
     pub composer: Rect,
     pub status: Rect,
@@ -262,7 +264,8 @@ pub struct VisualFrame {
     /// participates in viewport ownership or native-history geometry.
     pub panel: Option<PanelFrame>,
     /// Absolute terminal rows owned by the current live surface. Primary
-    /// frames leave rows above this rectangle to native terminal scrollback.
+    /// frames own the full visible screen; only `main_layout.history_window`
+    /// participates in native scrollback.
     pub viewport: Rect,
     pub component_bounds: HashMap<ComponentId, RowRange>,
     pub hit_regions: Vec<HitRegion>,
@@ -308,25 +311,45 @@ pub struct CommittedHistoryBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrimaryTranscriptProjection {
+    pub overflow_blocks: Vec<CommittedHistoryBlock>,
+    pub resident_rows: Vec<VisualRow>,
+    pub bootstrap_padding_rows: usize,
+    pub resident_capacity: usize,
+    pub scrollback_cursor: usize,
+    pub scrollback_row_offset: usize,
+    pub canonical_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalReflowProjection {
     pub canonical_revision: u64,
     pub session_epoch: u64,
     pub source_revision: u64,
     pub width: u16,
-    /// Canonical prefix omitted by the configured physical replay window.
-    pub omitted_components: usize,
-    /// Cursor after all replayed history components and before the active tail.
-    pub history_end_cursor: usize,
+    /// Physical cursor after every row selected for native scrollback.
+    pub scrollback_cursor: usize,
+    pub scrollback_row_offset: usize,
     pub history_blocks: Vec<CommittedHistoryBlock>,
-    pub active_rows: Vec<VisualRow>,
+    pub resident_rows: Vec<VisualRow>,
+    pub bootstrap_padding_rows: usize,
+    pub resident_capacity: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalCommitPlan {
     pub revision: u64,
     pub surface: SurfaceKind,
-    pub history_scroll_rows: usize,
-    pub history_blocks: Vec<CommittedHistoryBlock>,
+    /// Fixed primary transcript window. Composer, status, and overlays are
+    /// always outside this physical native-scrollback region.
+    pub history_window: Rect,
+    /// Physical bootstrap rows released from the top of the owned history
+    /// window in this commit. These rows are never canonical transcript data.
+    pub bootstrap_scroll_rows: usize,
+    /// Remaining physical bootstrap padding after this commit.
+    pub bootstrap_padding_rows: usize,
+    /// Stable/sealed rows that have just left the resident window.
+    pub overflow_blocks: Vec<CommittedHistoryBlock>,
     pub frame_update: FrameUpdate,
     pub panel: Option<PanelFrame>,
     pub cursor: Option<CursorPosition>,

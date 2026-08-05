@@ -18,6 +18,7 @@ import type {
   CapabilityMatcher,
   FileOperation,
 } from "./permissions/model.ts";
+import { digestValue } from "./permissions/shell/digest.ts";
 import {
   READ_ONLY_TOOL_NAMES,
   THINKING_LEVELS,
@@ -1691,6 +1692,7 @@ const ALL_FILE_OPERATIONS: FileOperation[] = [
   "list",
   "create",
   "write",
+  "truncate",
   "append",
   "rename",
   "delete",
@@ -1710,6 +1712,7 @@ function legacyGrantSet(
   if (tools.includes("write")) {
     operations.add("create");
     operations.add("write");
+    operations.add("truncate");
   }
   const matchers: CapabilityMatcher[] = [];
   for (const path of normalizeStrings(paths.length > 0 ? paths : ["."])) {
@@ -1724,7 +1727,7 @@ function legacyGrantSet(
     matchers.push({ kind: "tool", tool });
   }
   for (const command of normalizeStrings(commands)) {
-    matchers.push({ kind: "shell_intent", command });
+    matchers.push({ kind: "shell_digest", digest: digestValue({ command }) });
   }
   return { matchers };
 }
@@ -1749,7 +1752,7 @@ function capabilityGrantSet(value: unknown): CapabilityGrantSet | undefined {
 function isCapabilityMatcher(value: unknown): value is CapabilityMatcher {
   if (!isRecord(value) || typeof value.kind !== "string") return false;
   if (value.kind === "tool") return typeof value.tool === "string";
-  if (value.kind === "shell_intent") return typeof value.command === "string";
+  if (value.kind === "shell_digest") return typeof value.digest === "string";
   if (value.kind === "file") {
     return (
       ALL_FILE_OPERATIONS.includes(value.operation as FileOperation) &&

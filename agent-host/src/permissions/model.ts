@@ -11,6 +11,7 @@ export type FileOperation =
   | "list"
   | "create"
   | "write"
+  | "truncate"
   | "append"
   | "rename"
   | "delete";
@@ -99,14 +100,9 @@ export interface ToolCapabilityMatcher {
   inputDigest?: string;
 }
 
-export interface ShellIntentMatcher {
-  kind: "shell_intent";
-  command: string;
-}
-
-export interface OpaqueShellExactMatcher {
-  kind: "opaque_shell_exact";
-  command: string;
+export interface ShellDigestMatcher {
+  kind: "shell_digest";
+  digest: string;
 }
 
 export type CapabilityMatcher =
@@ -115,8 +111,7 @@ export type CapabilityMatcher =
   | NetworkCapabilityMatcher
   | OpaqueCodeCapabilityMatcher
   | ToolCapabilityMatcher
-  | ShellIntentMatcher
-  | OpaqueShellExactMatcher;
+  | ShellDigestMatcher;
 
 export interface PermissionRule {
   id: string;
@@ -126,8 +121,13 @@ export interface PermissionRule {
 }
 
 export interface InvalidationKey {
-  kind: "file_digest" | "workspace_generation" | "git_common_directory";
+  kind:
+    | "file_digest"
+    | "npm_script_digest"
+    | "workspace_generation"
+    | "git_common_directory";
   path?: string;
+  selector?: string;
   value: string;
 }
 
@@ -138,6 +138,8 @@ export interface GrantBundle {
   matchers: CapabilityMatcher[];
   invalidationKeys?: InvalidationKey[];
 }
+
+export type GrantProposal = GrantBundle;
 
 export interface PermissionExplanation {
   summary: string;

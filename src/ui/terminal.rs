@@ -56,7 +56,7 @@ pub struct TerminalDriver<W: Write> {
     capabilities: TerminalCapabilities,
     surface: SurfaceKind,
     size: TerminalSize,
-    primary_viewport: Option<Rect>,
+    primary_history_window: Option<Rect>,
     primary_screen: Vec<VisualRow>,
     active_panel: Option<Rect>,
     owned_footer_height: u16,
@@ -93,7 +93,7 @@ impl<W: Write> TerminalDriver<W> {
             capabilities,
             surface: SurfaceKind::Primary,
             size,
-            primary_viewport: None,
+            primary_history_window: None,
             primary_screen,
             active_panel: None,
             owned_footer_height: 2,
@@ -198,7 +198,7 @@ impl<W: Write> TerminalDriver<W> {
     pub fn begin_canonical_reflow(&mut self) -> io::Result<()> {
         self.clear_scrollback_and_visible_screen()?;
         // The screen is intentionally incomplete until every canonical batch
-        // and the active frame have been committed.
+        // and the resident frame have been committed.
         self.physical_valid = false;
         Ok(())
     }
@@ -238,7 +238,7 @@ impl<W: Write> TerminalDriver<W> {
     }
 
     pub fn commit_canonical_reflow_frame(&mut self, plan: &TerminalCommitPlan) -> io::Result<()> {
-        if plan.surface != SurfaceKind::Primary || !plan.history_blocks.is_empty() {
+        if plan.surface != SurfaceKind::Primary || !plan.overflow_blocks.is_empty() {
             return Err(io::Error::other(
                 "canonical reflow finalization requires a history-free primary frame",
             ));
@@ -255,7 +255,7 @@ impl<W: Write> TerminalDriver<W> {
         let previous_screen = self.primary_screen.clone();
         let previous_panel = self.active_panel;
         let previous_size = self.size;
-        let previous_viewport = self.primary_viewport;
+        let previous_history_window = self.primary_history_window;
         let previous_footer_height = self.owned_footer_height;
         let previous_pending_wrap = self.pending_wrap;
         let previous_physical_cursor = self.physical_cursor;
@@ -278,7 +278,6 @@ impl<W: Write> TerminalDriver<W> {
         };
 
         let result: io::Result<()> = begin_result.and_then(|()| {
-            let mut released_viewport_rows = None;
             if plan.surface == SurfaceKind::Primary {
                 if destructive_reflow {
                     self.stage_destructive_reset()?;
@@ -292,23 +291,19 @@ impl<W: Write> TerminalDriver<W> {
                             .min(self.size.height);
                     }
                     let rows = plan
-                        .history_blocks
+                        .overflow_blocks
                         .iter()
                         .flat_map(|block| block.rows.iter())
                         .collect::<Vec<_>>();
                     self.append_history_fullscreen(&rows)?;
-                    if let FrameUpdate::Full(frame) = &plan.frame_update {
-                        self.primary_viewport = Some(normalize_viewport(frame.viewport, self.size));
-                    }
+                    self.primary_history_window =
+                        Some(normalize_history_window(plan.history_window, self.size));
                 } else {
                     self.restore_active_panel()?;
-                    if let FrameUpdate::Full(frame) = &plan.frame_update {
-                        released_viewport_rows = self.prepare_primary_viewport(frame.viewport)?;
-                    }
-                    if plan.history_scroll_rows > 0 {
-                        self.append_history(plan, released_viewport_rows)?;
-                    } else if let Some(released) = released_viewport_rows {
-                        self.shift_history_region_down(released.bottom(), released.height)?;
+                    self.primary_history_window =
+                        Some(normalize_history_window(plan.history_window, self.size));
+                    if plan.bootstrap_scroll_rows > 0 || !plan.overflow_blocks.is_empty() {
+                        self.overflow_primary_history(plan)?;
                     }
                 }
             }
@@ -316,13 +311,6 @@ impl<W: Write> TerminalDriver<W> {
                 FrameUpdate::Full(frame) => self.draw_full(frame)?,
                 FrameUpdate::Rows { rows, .. } => {
                     for (terminal_row, row) in rows {
-                        if self.surface == SurfaceKind::Primary
-                            && self.primary_viewport.is_some_and(|viewport| {
-                                *terminal_row < viewport.y || *terminal_row >= viewport.bottom()
-                            })
-                        {
-                            continue;
-                        }
                         if self.surface == SurfaceKind::Primary {
                             self.draw_base_row(*terminal_row, row)?;
                         } else {
@@ -369,7 +357,7 @@ impl<W: Write> TerminalDriver<W> {
                 self.primary_screen = previous_screen;
                 self.active_panel = previous_panel;
                 self.size = previous_size;
-                self.primary_viewport = previous_viewport;
+                self.primary_history_window = previous_history_window;
                 self.owned_footer_height = previous_footer_height;
                 self.pending_wrap = previous_pending_wrap;
                 self.physical_cursor = previous_physical_cursor;
@@ -395,86 +383,44 @@ impl<W: Write> TerminalDriver<W> {
 
     fn reset_physical_projection_state(&mut self) {
         self.primary_screen = blank_screen(self.size);
-        self.primary_viewport = None;
+        self.primary_history_window = None;
         self.active_panel = None;
         self.owned_footer_height = 0;
         self.pending_wrap = false;
         self.physical_cursor = None;
     }
 
-    fn append_history(
-        &mut self,
-        plan: &TerminalCommitPlan,
-        released_viewport_rows: Option<Rect>,
-    ) -> io::Result<()> {
-        let rows = plan
-            .history_blocks
-            .iter()
-            .flat_map(|block| block.rows.iter())
-            .take(plan.history_scroll_rows)
-            .collect::<Vec<_>>();
-        let replacement_rows = released_viewport_rows
-            .map_or(0, |released| usize::from(released.height))
-            .min(rows.len());
-        let overflow_rows = rows.len().saturating_sub(replacement_rows);
-        if overflow_rows > 0 {
-            let history_bottom = released_viewport_rows.map_or_else(
-                || {
-                    self.primary_viewport
-                        .map_or(self.size.height, |viewport| viewport.y)
-                },
-                |released| released.y,
-            );
-            if history_bottom > 0 {
-                self.append_history_above_viewport(&rows[..overflow_rows], history_bottom)?;
-            } else {
-                self.append_history_fullscreen(&rows[..overflow_rows])?;
-            }
+    fn overflow_primary_history(&mut self, plan: &TerminalCommitPlan) -> io::Result<()> {
+        let history_window = normalize_history_window(plan.history_window, self.size);
+        if history_window.height == 0 {
+            return Ok(());
         }
-        if replacement_rows > 0
-            && let Some(released) = released_viewport_rows
-        {
-            let replacement_start = released
-                .bottom()
-                .saturating_sub(u16::try_from(replacement_rows).unwrap_or(released.height));
-            let unused_rows = released
-                .height
-                .saturating_sub(u16::try_from(replacement_rows).unwrap_or(released.height));
-            if unused_rows > 0 {
-                self.shift_history_region_down(replacement_start, unused_rows)?;
-            }
-            for (offset, row) in rows[overflow_rows..].iter().enumerate() {
-                self.draw_base_row(
-                    replacement_start.saturating_add(u16::try_from(offset).unwrap_or(u16::MAX)),
-                    row,
-                )?;
-            }
-        }
-        if replacement_rows == 0
-            && let Some(released) = released_viewport_rows
-        {
-            self.shift_history_region_down(released.bottom(), released.height)?;
-        }
-        Ok(())
-    }
-
-    fn append_history_above_viewport(
-        &mut self,
-        rows: &[&VisualRow],
-        viewport_top: u16,
-    ) -> io::Result<()> {
-        self.set_scroll_region(viewport_top)?;
+        self.set_scroll_region(history_window)?;
         let result = (|| {
-            queue!(
-                self.output,
-                MoveTo(0, viewport_top.saturating_sub(1)),
-                ResetColor,
-                SetAttribute(Attribute::Reset)
-            )?;
-            for row in rows {
+            for _ in 0..plan.bootstrap_scroll_rows {
+                queue!(
+                    self.output,
+                    MoveTo(0, history_window.bottom().saturating_sub(1)),
+                    ResetColor,
+                    SetAttribute(Attribute::Reset)
+                )?;
                 self.output.write_all(b"\r\n")?;
-                self.scroll_primary_screen_up(viewport_top, 1);
-                self.draw_base_row(viewport_top.saturating_sub(1), row)?;
+                self.scroll_primary_screen_up(history_window, 1);
+            }
+            for row in plan
+                .overflow_blocks
+                .iter()
+                .flat_map(|block| block.rows.iter())
+            {
+                self.draw_base_row(history_window.y, row)?;
+                queue!(
+                    self.output,
+                    MoveTo(0, history_window.bottom().saturating_sub(1)),
+                    ResetColor,
+                    SetAttribute(Attribute::Reset)
+                )?;
+                self.output.write_all(b"\r\n")?;
+                self.scroll_primary_screen_up(history_window, 1);
             }
             Ok(())
         })();
@@ -495,96 +441,22 @@ impl<W: Write> TerminalDriver<W> {
             queue!(self.output, MoveTo(0, self.size.height.saturating_sub(1)))?;
             for _ in 0..chunk.len() {
                 self.output.write_all(b"\r\n")?;
-                self.scroll_primary_screen_up(self.size.height, 1);
+                self.scroll_primary_screen_up(
+                    Rect::new(0, 0, self.size.width, self.size.height),
+                    1,
+                );
             }
         }
         Ok(())
     }
 
-    fn prepare_primary_viewport(&mut self, requested: Rect) -> io::Result<Option<Rect>> {
-        let requested_height = requested.height.min(self.size.height);
-        let next = Rect::new(
-            0,
-            self.size.height.saturating_sub(requested_height),
-            self.size.width,
-            requested_height,
-        );
-        let previous_height = self
-            .primary_viewport
-            .map_or(0, |viewport| viewport.height.min(self.size.height));
-        let previous = Rect::new(
-            0,
-            self.size.height.saturating_sub(previous_height),
-            self.size.width,
-            previous_height,
-        );
-
-        let released = if next.y < previous.y {
-            self.scroll_history_region(previous.y, previous.y.saturating_sub(next.y))?;
-            None
-        } else if next.y > previous.y {
-            for terminal_row in previous.y..next.y {
-                self.clear_base_row(terminal_row)?;
-            }
-            Some(Rect::new(
-                0,
-                previous.y,
-                self.size.width,
-                next.y.saturating_sub(previous.y),
-            ))
-        } else {
-            None
-        };
-        self.primary_viewport = Some(next);
-        Ok(released)
-    }
-
-    fn scroll_history_region(&mut self, bottom: u16, rows: u16) -> io::Result<()> {
-        if bottom == 0 || rows == 0 {
-            return Ok(());
-        }
-        self.set_scroll_region(bottom)?;
-        let result = (|| {
-            queue!(
-                self.output,
-                MoveTo(0, bottom.saturating_sub(1)),
-                ResetColor,
-                SetAttribute(Attribute::Reset)
-            )?;
-            for _ in 0..rows {
-                self.output.write_all(b"\r\n")?;
-                self.scroll_primary_screen_up(bottom, 1);
-            }
-            Ok(())
-        })();
-        let reset = self.reset_scroll_region();
-        result.and(reset)
-    }
-
-    fn shift_history_region_down(&mut self, bottom: u16, rows: u16) -> io::Result<()> {
-        if bottom == 0 || rows == 0 {
-            return Ok(());
-        }
-        self.set_scroll_region(bottom)?;
-        let result = (|| {
-            queue!(
-                self.output,
-                MoveTo(0, 0),
-                ResetColor,
-                SetAttribute(Attribute::Reset)
-            )?;
-            for _ in 0..rows {
-                self.output.write_all(b"\x1bM")?;
-                self.scroll_primary_screen_down(bottom, 1);
-            }
-            Ok(())
-        })();
-        let reset = self.reset_scroll_region();
-        result.and(reset)
-    }
-
-    fn set_scroll_region(&mut self, bottom: u16) -> io::Result<()> {
-        write!(self.output, "\u{1b}[1;{}r", bottom.max(1))
+    fn set_scroll_region(&mut self, area: Rect) -> io::Result<()> {
+        write!(
+            self.output,
+            "\u{1b}[{};{}r",
+            area.y.saturating_add(1),
+            area.bottom().max(area.y.saturating_add(1))
+        )
     }
 
     fn reset_scroll_region(&mut self) -> io::Result<()> {
@@ -675,26 +547,17 @@ impl<W: Write> TerminalDriver<W> {
         self.draw_base_row(terminal_row, &row)
     }
 
-    fn scroll_primary_screen_up(&mut self, bottom: u16, rows: u16) {
-        let bottom = usize::from(bottom.min(self.size.height));
+    fn scroll_primary_screen_up(&mut self, area: Rect, rows: u16) {
+        let top = usize::from(area.y.min(self.size.height));
+        let bottom = usize::from(area.bottom().min(self.size.height));
         for _ in 0..rows {
-            if bottom == 0 || self.primary_screen.len() < bottom {
+            if top >= bottom || self.primary_screen.len() < bottom {
                 return;
             }
-            self.primary_screen.remove(0);
-            self.primary_screen
-                .insert(bottom.saturating_sub(1), VisualRow::blank("surface"));
-        }
-    }
-
-    fn scroll_primary_screen_down(&mut self, bottom: u16, rows: u16) {
-        let bottom = usize::from(bottom.min(self.size.height));
-        for _ in 0..rows {
-            if bottom == 0 || self.primary_screen.len() < bottom {
-                return;
+            for index in top..bottom.saturating_sub(1) {
+                self.primary_screen[index] = self.primary_screen[index + 1].clone();
             }
-            self.primary_screen.insert(0, VisualRow::blank("surface"));
-            self.primary_screen.remove(bottom);
+            self.primary_screen[bottom.saturating_sub(1)] = VisualRow::blank("surface");
         }
     }
 
@@ -825,9 +688,14 @@ fn blank_screen(size: TerminalSize) -> Vec<VisualRow> {
         .collect()
 }
 
-fn normalize_viewport(viewport: Rect, size: TerminalSize) -> Rect {
-    let height = viewport.height.min(size.height);
-    Rect::new(0, size.height.saturating_sub(height), size.width, height)
+fn normalize_history_window(window: Rect, size: TerminalSize) -> Rect {
+    let y = window.y.min(size.height);
+    Rect::new(
+        0,
+        y,
+        size.width,
+        window.height.min(size.height.saturating_sub(y)),
+    )
 }
 
 fn translate_bottom_aligned(
@@ -900,6 +768,7 @@ pub struct FrameCoordinator {
     pub previous_frame: Option<VisualFrame>,
     pub terminal_invalid: bool,
     previous_surface: SurfaceKind,
+    previous_bootstrap_padding_rows: Option<usize>,
 }
 
 impl FrameCoordinator {
@@ -907,15 +776,24 @@ impl FrameCoordinator {
         &self,
         frame: VisualFrame,
         surface: SurfaceKind,
-        history_blocks: Vec<CommittedHistoryBlock>,
+        projection: Option<super::types::PrimaryTranscriptProjection>,
     ) -> TerminalCommitPlan {
-        let history_scroll_rows = history_blocks
+        let (overflow_blocks, bootstrap_padding_rows) = projection.map_or_else(
+            || (Vec::new(), 0),
+            |projection| {
+                (
+                    projection.overflow_blocks,
+                    projection.bootstrap_padding_rows,
+                )
+            },
+        );
+        let overflow_rows = overflow_blocks
             .iter()
-            .flat_map(|block| block.rows.iter())
-            .count();
+            .map(|block| block.rows.len())
+            .sum::<usize>();
         let full_redraw = self.terminal_invalid
             || self.previous_surface != surface
-            || history_scroll_rows > 0
+            || overflow_rows > 0
             || self.previous_frame.as_ref().is_none_or(|previous| {
                 previous.terminal_size != frame.terminal_size
                     || previous.viewport != frame.viewport
@@ -925,6 +803,19 @@ impl FrameCoordinator {
             });
         let cursor = frame.cursor;
         let panel = frame.panel.clone();
+        let history_window = frame.main_layout.history_window;
+        let geometry_unchanged = self.previous_surface == surface
+            && self.previous_frame.as_ref().is_some_and(|previous| {
+                previous.terminal_size == frame.terminal_size
+                    && previous.main_layout.history_window == history_window
+            });
+        let bootstrap_scroll_rows = if surface == SurfaceKind::Primary && geometry_unchanged {
+            self.previous_bootstrap_padding_rows
+                .unwrap_or(bootstrap_padding_rows)
+                .saturating_sub(bootstrap_padding_rows)
+        } else {
+            0
+        };
         let revision = frame.revision;
         let frame_update = if full_redraw {
             FrameUpdate::Full(frame)
@@ -944,8 +835,10 @@ impl FrameCoordinator {
         TerminalCommitPlan {
             revision,
             surface,
-            history_scroll_rows,
-            history_blocks,
+            history_window,
+            bootstrap_scroll_rows,
+            bootstrap_padding_rows,
+            overflow_blocks,
             frame_update,
             panel,
             cursor,
@@ -978,10 +871,12 @@ impl FrameCoordinator {
         };
         match driver.commit(&plan) {
             Ok(()) => {
-                transcript.acknowledge_history(&plan.history_blocks);
+                transcript.acknowledge_overflow(&plan.overflow_blocks);
                 self.committed_revision = plan.revision;
                 self.previous_frame = Some(next_frame);
                 self.previous_surface = plan.surface;
+                self.previous_bootstrap_padding_rows =
+                    (plan.surface == SurfaceKind::Primary).then_some(plan.bootstrap_padding_rows);
                 self.terminal_invalid = false;
                 Ok(())
             }
@@ -999,15 +894,14 @@ impl FrameCoordinator {
     ) -> TerminalCommitPlan {
         let cursor = frame.cursor;
         let panel = frame.panel.clone();
+        let history_window = frame.main_layout.history_window;
         TerminalCommitPlan {
             revision: frame.revision,
             surface: SurfaceKind::Primary,
-            history_scroll_rows: projection
-                .history_blocks
-                .iter()
-                .map(|block| block.rows.len())
-                .sum(),
-            history_blocks: projection.history_blocks.clone(),
+            history_window,
+            bootstrap_scroll_rows: 0,
+            bootstrap_padding_rows: 0,
+            overflow_blocks: projection.history_blocks.clone(),
             frame_update: FrameUpdate::Full(frame),
             panel,
             cursor,
@@ -1015,14 +909,21 @@ impl FrameCoordinator {
         }
     }
 
-    pub fn plan_canonical_reflow_frame(&self, frame: VisualFrame) -> TerminalCommitPlan {
+    pub fn plan_canonical_reflow_frame(
+        &self,
+        frame: VisualFrame,
+        projection: &super::types::PrimaryTranscriptProjection,
+    ) -> TerminalCommitPlan {
         let cursor = frame.cursor;
         let panel = frame.panel.clone();
+        let history_window = frame.main_layout.history_window;
         TerminalCommitPlan {
             revision: frame.revision,
             surface: SurfaceKind::Primary,
-            history_scroll_rows: 0,
-            history_blocks: Vec::new(),
+            history_window,
+            bootstrap_scroll_rows: 0,
+            bootstrap_padding_rows: projection.bootstrap_padding_rows,
+            overflow_blocks: Vec::new(),
             frame_update: FrameUpdate::Full(frame),
             panel,
             cursor,
@@ -1047,6 +948,7 @@ impl FrameCoordinator {
                 self.committed_revision = plan.revision;
                 self.previous_frame = Some(next_frame.clone());
                 self.previous_surface = SurfaceKind::Primary;
+                self.previous_bootstrap_padding_rows = Some(plan.bootstrap_padding_rows);
                 self.terminal_invalid = false;
                 Ok(())
             }
@@ -1072,7 +974,7 @@ impl FrameCoordinator {
     ) -> io::Result<()> {
         let FrameUpdate::Full(next_frame) = &plan.frame_update else {
             return Err(io::Error::other(
-                "canonical reflow requires a complete active frame",
+                "canonical reflow requires a complete resident frame",
             ));
         };
         match driver.commit_canonical_reflow_frame(&plan) {
@@ -1080,6 +982,7 @@ impl FrameCoordinator {
                 self.committed_revision = plan.revision;
                 self.previous_frame = Some(next_frame.clone());
                 self.previous_surface = SurfaceKind::Primary;
+                self.previous_bootstrap_padding_rows = Some(plan.bootstrap_padding_rows);
                 self.terminal_invalid = false;
                 Ok(())
             }
@@ -1106,6 +1009,7 @@ mod tests {
     use std::io;
 
     use super::*;
+    use crate::ui::test_support::VirtualTerminal;
     use crate::ui::types::{MainLayout, TerminalSize};
     use crate::{
         rpc::PiState,
@@ -1113,6 +1017,7 @@ mod tests {
     };
 
     fn frame(revision: u64, text: &str) -> VisualFrame {
+        let history_window = Rect::new(0, 0, 20, 2);
         VisualFrame {
             revision,
             terminal_size: TerminalSize::new(20, 4),
@@ -1136,7 +1041,14 @@ mod tests {
             component_bounds: Default::default(),
             hit_regions: Vec::new(),
             cursor: None,
-            main_layout: MainLayout::default(),
+            main_layout: MainLayout {
+                transcript: history_window,
+                history_window,
+                owned_surface: Rect::new(0, 0, 20, 4),
+                panel: None,
+                composer: Rect::new(0, 2, 20, 1),
+                status: Rect::new(0, 3, 20, 1),
+            },
         }
     }
 
@@ -1232,7 +1144,7 @@ mod tests {
         }
 
         let mut coordinator = FrameCoordinator::default();
-        let plan = coordinator.plan(frame(1, "hello"), SurfaceKind::Primary, Vec::new());
+        let plan = coordinator.plan(frame(1, "hello"), SurfaceKind::Primary, None);
         let mut driver = TerminalDriver::new(
             FailingWriter { remaining: 2 },
             TerminalCapabilities {
@@ -1254,6 +1166,73 @@ mod tests {
     }
 
     #[test]
+    fn failed_overflow_write_does_not_advance_the_physical_scrollback_cursor() {
+        #[derive(Default)]
+        struct FailOnScroll {
+            output: Vec<u8>,
+        }
+
+        impl Write for FailOnScroll {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                if buffer.windows(2).any(|window| window == b"\r\n") {
+                    return Err(io::Error::other("injected overflow failure"));
+                }
+                self.output.extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut state = AppState::new(PiState {
+            model: None,
+            thinking_level: "off".to_owned(),
+            is_streaming: false,
+            is_compacting: false,
+            steering_mode: "one-at-a-time".to_owned(),
+            follow_up_mode: "one-at-a-time".to_owned(),
+            session_file: None,
+            session_id: "overflow-failure".to_owned(),
+            session_name: None,
+            auto_compaction_enabled: true,
+            message_count: 0,
+            pending_message_count: 0,
+        });
+        state.transcript = vec![
+            TranscriptItem::Notice("one".to_owned()),
+            TranscriptItem::Notice("two".to_owned()),
+            TranscriptItem::Notice("three".to_owned()),
+        ];
+        let mut transcript = TranscriptStore::default();
+        transcript.sync(&state);
+        let projection = transcript.project_primary(20, 2, 1, 100, usize::MAX, 0);
+        assert_eq!(projection.overflow_blocks.len(), 1);
+        let mut coordinator = FrameCoordinator::default();
+        let plan = coordinator.plan(frame(1, "resident"), SurfaceKind::Primary, Some(projection));
+        let mut driver = TerminalDriver::new(
+            FailOnScroll::default(),
+            TerminalCapabilities {
+                synchronized_output: false,
+                true_color: false,
+                mouse: false,
+            },
+            TerminalSize::new(20, 4),
+        );
+
+        assert!(
+            coordinator
+                .commit(&mut driver, &mut transcript, plan)
+                .is_err()
+        );
+        assert_eq!(transcript.scrollback_cursor(), 0);
+        assert_eq!(transcript.scrollback_row_offset(), 0);
+        assert!(coordinator.terminal_invalid);
+        assert!(!driver.physical_valid());
+    }
+
+    #[test]
     fn successful_commit_then_diff_preserves_revision_consistency() {
         let capabilities = TerminalCapabilities {
             synchronized_output: false,
@@ -1264,17 +1243,94 @@ mod tests {
             TerminalDriver::new(Vec::<u8>::new(), capabilities, TerminalSize::new(20, 4));
         let mut coordinator = FrameCoordinator::default();
         let mut transcript = TranscriptStore::default();
-        let first = coordinator.plan(frame(1, "one"), SurfaceKind::Primary, Vec::new());
+        let first = coordinator.plan(frame(1, "one"), SurfaceKind::Primary, None);
         coordinator
             .commit(&mut driver, &mut transcript, first)
             .unwrap();
-        let second = coordinator.plan(frame(2, "two"), SurfaceKind::Primary, Vec::new());
+        let second = coordinator.plan(frame(2, "two"), SurfaceKind::Primary, None);
         assert!(matches!(second.frame_update, FrameUpdate::Rows { .. }));
         coordinator
             .commit(&mut driver, &mut transcript, second)
             .unwrap();
         assert_eq!(coordinator.committed_revision, 2);
         assert_eq!(coordinator.previous_frame.as_ref().unwrap().revision, 2);
+    }
+
+    #[test]
+    fn overflow_redraw_keeps_the_primary_shadow_equal_to_the_visible_terminal() {
+        let capabilities = TerminalCapabilities {
+            synchronized_output: true,
+            true_color: false,
+            mouse: false,
+        };
+        let size = TerminalSize::new(20, 4);
+        let mut driver = TerminalDriver::new(Vec::<u8>::new(), capabilities, size);
+        let mut first = frame(1, "one");
+        first.rows[1] = VisualRow {
+            component_id: "two".to_owned(),
+            logical_line: 0,
+            wrap_index: 0,
+            cells: vec![StyledCell::new("two", 3, CellStyle::default())],
+        };
+        driver
+            .commit(&TerminalCommitPlan {
+                revision: 1,
+                surface: SurfaceKind::Primary,
+                history_window: Rect::new(0, 0, 20, 2),
+                bootstrap_scroll_rows: 0,
+                bootstrap_padding_rows: 0,
+                overflow_blocks: Vec::new(),
+                frame_update: FrameUpdate::Full(first),
+                panel: None,
+                cursor: None,
+                full_redraw: true,
+            })
+            .unwrap();
+
+        let mut second = frame(2, "two");
+        second.rows[1] = VisualRow {
+            component_id: "three".to_owned(),
+            logical_line: 0,
+            wrap_index: 0,
+            cells: vec![StyledCell::new("three", 5, CellStyle::default())],
+        };
+        driver
+            .commit(&TerminalCommitPlan {
+                revision: 2,
+                surface: SurfaceKind::Primary,
+                history_window: Rect::new(0, 0, 20, 2),
+                bootstrap_scroll_rows: 0,
+                bootstrap_padding_rows: 0,
+                overflow_blocks: vec![CommittedHistoryBlock {
+                    component_id: "one".to_owned(),
+                    source_revision: 2,
+                    row_offset: 0,
+                    total_rows: 1,
+                    rows: vec![VisualRow {
+                        component_id: "one".to_owned(),
+                        logical_line: 0,
+                        wrap_index: 0,
+                        cells: vec![StyledCell::new("one", 3, CellStyle::default())],
+                    }],
+                }],
+                frame_update: FrameUpdate::Full(second),
+                panel: None,
+                cursor: None,
+                full_redraw: true,
+            })
+            .unwrap();
+
+        let mut terminal = VirtualTerminal::new(size);
+        terminal.feed(driver.output_ref());
+        assert_eq!(terminal.scrollback(), &["one"]);
+        assert_eq!(
+            terminal.visible_lines(),
+            driver
+                .primary_screen
+                .iter()
+                .map(VisualRow::plain_text)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1289,8 +1345,10 @@ mod tests {
         let alternate = TerminalCommitPlan {
             revision: 1,
             surface: SurfaceKind::Alternate,
-            history_scroll_rows: 0,
-            history_blocks: Vec::new(),
+            history_window: Rect::new(0, 0, 20, 2),
+            bootstrap_scroll_rows: 0,
+            bootstrap_padding_rows: 0,
+            overflow_blocks: Vec::new(),
             frame_update: FrameUpdate::Full(frame(1, "alt")),
             panel: None,
             cursor: None,
@@ -1300,8 +1358,10 @@ mod tests {
         let primary = TerminalCommitPlan {
             revision: 2,
             surface: SurfaceKind::Primary,
-            history_scroll_rows: 0,
-            history_blocks: Vec::new(),
+            history_window: Rect::new(0, 0, 20, 2),
+            bootstrap_scroll_rows: 0,
+            bootstrap_padding_rows: 0,
+            overflow_blocks: Vec::new(),
             frame_update: FrameUpdate::Full(frame(2, "main")),
             panel: None,
             cursor: None,
@@ -1334,8 +1394,10 @@ mod tests {
         let plan = TerminalCommitPlan {
             revision: 2,
             surface: SurfaceKind::Primary,
-            history_scroll_rows: 1,
-            history_blocks: vec![CommittedHistoryBlock {
+            history_window: Rect::new(0, 0, 20, 2),
+            bootstrap_scroll_rows: 0,
+            bootstrap_padding_rows: 0,
+            overflow_blocks: vec![CommittedHistoryBlock {
                 component_id: "history".to_owned(),
                 source_revision: 2,
                 row_offset: 0,
@@ -1352,8 +1414,8 @@ mod tests {
 
         assert_eq!(driver.size, TerminalSize::new(20, 3));
         assert_eq!(
-            driver.primary_viewport,
-            Some(crate::ui::types::Rect::new(0, 0, 20, 3))
+            driver.primary_history_window,
+            Some(crate::ui::types::Rect::new(0, 0, 20, 2))
         );
         let output = String::from_utf8_lossy(driver.output_ref());
         assert!(
@@ -1379,7 +1441,7 @@ mod tests {
             wrap_index: 0,
             cells: vec![StyledCell::new("old", 3, CellStyle::default())],
         };
-        driver.primary_viewport = Some(Rect::new(0, 0, 20, 2));
+        driver.primary_history_window = Some(Rect::new(0, 0, 20, 2));
         driver.active_panel = Some(Rect::new(1, 1, 5, 2));
         driver.owned_footer_height = 3;
         driver.pending_wrap = true;
@@ -1401,7 +1463,7 @@ mod tests {
                 .iter()
                 .all(|row| row.plain_text().is_empty())
         );
-        assert_eq!(driver.primary_viewport, None);
+        assert_eq!(driver.primary_history_window, None);
         assert_eq!(driver.active_panel, None);
         assert_eq!(driver.owned_footer_height, 0);
         assert!(!driver.pending_wrap);
@@ -1477,8 +1539,10 @@ mod tests {
         let plan = TerminalCommitPlan {
             revision: 2,
             surface: SurfaceKind::Primary,
-            history_scroll_rows: 1,
-            history_blocks: vec![CommittedHistoryBlock {
+            history_window: Rect::new(0, 0, 20, 2),
+            bootstrap_scroll_rows: 0,
+            bootstrap_padding_rows: 0,
+            overflow_blocks: vec![CommittedHistoryBlock {
                 component_id: "canonical".to_owned(),
                 source_revision: 2,
                 row_offset: 0,
@@ -1543,7 +1607,7 @@ mod tests {
             .push(TranscriptItem::Notice("canonical".to_owned()));
         let mut transcript = TranscriptStore::default();
         transcript.sync(&state);
-        let projection = transcript.canonical_reflow_projection(40, 7, 0);
+        let projection = transcript.canonical_reflow_projection(40, 0, 7, 0);
         let mut resized = frame(7, "active");
         resized.terminal_size = TerminalSize::new(40, 4);
         resized.viewport = Rect::new(0, 0, 40, 4);
@@ -1569,7 +1633,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(transcript.committed_cursor(), 0);
+        assert_eq!(transcript.scrollback_cursor(), 0);
         assert!(coordinator.previous_frame.is_none());
         assert!(coordinator.terminal_invalid);
 
@@ -1586,7 +1650,7 @@ mod tests {
         coordinator
             .commit_resize_reflow(&mut retry_driver, &mut transcript, retry_plan, &projection)
             .unwrap();
-        assert_eq!(transcript.committed_cursor(), 1);
+        assert_eq!(transcript.scrollback_cursor(), 1);
         assert_eq!(coordinator.previous_frame.as_ref().unwrap().revision, 7);
         assert!(!coordinator.terminal_invalid);
     }

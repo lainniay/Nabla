@@ -166,7 +166,7 @@ pub struct ModelListData {
     pub models: Vec<ModelSummary>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
     AllowOnce,
@@ -501,11 +501,11 @@ impl HostClient {
 
     pub async fn reply_approval(
         &self,
-        approval_id: String,
+        request_id: String,
         decision: ApprovalDecision,
     ) -> Result<(), RpcError> {
         let mut parameters = Map::new();
-        parameters.insert("approvalId".to_owned(), Value::String(approval_id));
+        parameters.insert("requestId".to_owned(), Value::String(request_id));
         parameters.insert(
             "decision".to_owned(),
             serde_json::to_value(decision).map_err(|error| RpcError::Json(error.to_string()))?,
@@ -708,6 +708,13 @@ mod tests {
             serde_json::to_value(ApprovalDecision::AllowWorkspace).unwrap(),
             serde_json::json!("allow_workspace")
         );
+        assert_eq!(
+            serde_json::to_value(ApprovalDecision::Deny).unwrap(),
+            serde_json::json!("deny")
+        );
+        assert!(
+            serde_json::from_value::<ApprovalDecision>(serde_json::json!("allow_forever")).is_err()
+        );
     }
 
     #[test]
@@ -836,12 +843,12 @@ mod tests {
     #[test]
     fn shared_persistent_approval_fixture_matches_rust_contract() {
         let snapshot: ApprovalRulesSnapshot = serde_json::from_str(include_str!(
-            "../protocol-fixtures/nabla.approval-rules.v1.json"
+            "../protocol-fixtures/nabla.workspace-grants.v3.json"
         ))
         .unwrap();
         assert_eq!(snapshot.workspace, "/workspace");
-        assert_eq!(snapshot.rules[0].kind, "command_prefix");
-        assert_eq!(snapshot.rules[0].tool_name, "bash");
+        assert_eq!(snapshot.grants[0].proposal.scope, "workspace");
+        assert_eq!(snapshot.grants[0].proposal.matchers[0]["kind"], "exec");
     }
 
     #[test]

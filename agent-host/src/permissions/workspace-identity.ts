@@ -11,6 +11,7 @@ import {
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import type { InvalidationKey } from "./model.ts";
+import { digestValue } from "./shell/digest.ts";
 
 export interface WorkspaceIdentity {
   id: string;
@@ -81,8 +82,32 @@ export function invalidationKeysValid(
     if (key.kind === "git_common_directory") {
       return key.value === identity.gitCommonDirectoryIdentity;
     }
+    if (key.kind === "npm_script_digest") {
+      return key.path !== undefined &&
+        key.selector !== undefined &&
+        npmScriptDigest(key.path, key.selector) === key.value;
+    }
     return key.path !== undefined && fileDigest(key.path) === key.value;
   });
+}
+
+function npmScriptDigest(path: string, script: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      !("scripts" in parsed) ||
+      typeof parsed.scripts !== "object" ||
+      parsed.scripts === null
+    ) {
+      return undefined;
+    }
+    const value = (parsed.scripts as Record<string, unknown>)[script];
+    return typeof value === "string" ? digestValue(value) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function findGitCommonDirectory(workspace: string): string | undefined {
