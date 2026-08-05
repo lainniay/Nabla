@@ -21,8 +21,8 @@ test("approval queue waits for an explicit allow decision", async () => {
   await Promise.resolve();
   assert.equal(settled, false);
   assert.equal(event?.type, "approval_request");
-  assert.equal(queue.reply(String(event?.approvalId), "allow"), true);
-  assert.equal(await result, "allow");
+  assert.equal(queue.reply(String(event?.approvalId), "allow_once"), true);
+  assert.equal(await result, "allow_once");
 });
 
 test("approval queue fails closed on abort, disconnect, and stale replies", async () => {
@@ -43,7 +43,7 @@ test("approval queue fails closed on abort, disconnect, and stale replies", asyn
   );
   queue.denyAll();
   assert.equal(await disconnected, "deny");
-  assert.equal(queue.reply("approval-missing", "allow"), false);
+  assert.equal(queue.reply("approval-missing", "allow_once"), false);
 });
 
 test("approval queue preserves agent and Goal metadata for a scoped decision", async () => {
@@ -69,8 +69,8 @@ test("approval queue preserves agent and Goal metadata for a scoped decision", a
   await Promise.resolve();
   assert.equal(event?.agentProfile, "verifier");
   assert.equal(event?.goalId, "goal-1");
-  assert.equal(queue.reply(String(event?.approvalId), "allow_goal"), true);
-  assert.equal(await result, "allow_goal");
+  assert.equal(queue.reply(String(event?.approvalId), "allow_session"), true);
+  assert.equal(await result, "allow_session");
 });
 
 test("approval queue carries an explicit persistent decision", async () => {
@@ -88,8 +88,8 @@ test("approval queue carries an explicit persistent decision", async () => {
       event = value;
     },
   );
-  assert.equal(queue.reply(String(event?.approvalId), "allow_forever"), true);
-  assert.equal(await result, "allow_forever");
+  assert.equal(queue.reply(String(event?.approvalId), "allow_workspace"), true);
+  assert.equal(await result, "allow_workspace");
 });
 
 test("approval queue carries a session-scoped decision", async () => {

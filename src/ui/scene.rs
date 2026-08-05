@@ -1156,12 +1156,6 @@ fn approval_panel_request(
             "Reuse matching requests in this session",
         ));
     }
-    if approval.goal_id.is_some() {
-        actions.push((
-            "[G] Allow for Goal",
-            "Approve matching requests for this Goal",
-        ));
-    }
     if risk == "normal" {
         let (label, scope) = persistent_approval_action(approval);
         actions.push((label, scope));
@@ -1191,8 +1185,8 @@ fn persistent_approval_action(
 ) -> (&'static str, &'static str) {
     if approval.tool_name == "bash" {
         (
-            "[A] Always allow matching command",
-            "Across sessions in this project",
+            "[A] Allow for Workspace",
+            "Reuse this exact command in this workspace",
         )
     } else if approval
         .input
@@ -1201,13 +1195,13 @@ fn persistent_approval_action(
         .is_some()
     {
         (
-            "[A] Always allow this path",
-            "Across sessions in this project",
+            "[A] Allow for Workspace",
+            "Reuse this file operation in this workspace",
         )
     } else {
         (
-            "[A] Always allow matching request",
-            "Across sessions in this project",
+            "[A] Allow for Workspace",
+            "Reuse this request in this workspace",
         )
     }
 }
@@ -2270,7 +2264,7 @@ mod tests {
         );
         assert!(text.contains("Allow once"));
         assert!(text.contains("Allow for Session"));
-        assert!(text.contains("Always allow matching command"));
+        assert!(text.contains("Allow for Workspace"));
         assert!(text.contains("Deny"));
         assert!(!text.contains("Allow for Goal"));
         assert!(
@@ -2330,13 +2324,13 @@ mod tests {
             .join("\n");
 
         assert_eq!(panel.area.width, size.width);
-        assert_eq!(panel.rows.len(), 8);
+        assert_eq!(panel.rows.len(), 7);
         assert!(text.contains("Ask for Approval"));
         assert!(text.contains("May access sensitive credentials"));
         assert!(text.contains("printenv SECRET_TOKEN"));
         assert!(!text.contains("Credential risk"));
         assert!(!text.contains("inspect credentials"));
-        assert!(text.contains("Allow for Goal"));
+        assert!(!text.contains("Allow for Goal"));
         assert!(!text.contains("Allow for Session"));
         assert!(!text.contains("Always allow matching"));
         assert!(
@@ -2345,9 +2339,7 @@ mod tests {
                 .iter()
                 .filter(|row| {
                     let text = row.plain_text();
-                    text.contains("Allow once")
-                        || text.contains("Allow for Goal")
-                        || text.contains("Deny")
+                    text.contains("Allow once") || text.contains("Deny")
                 })
                 .all(|row| row.display_width() == size.width)
         );
@@ -2357,10 +2349,6 @@ mod tests {
                 .iter()
                 .any(|row| row.plain_text().contains("Approve only this request"))
         );
-        assert!(panel.rows.iter().any(|row| {
-            row.plain_text()
-                .contains("Approve matching requests for this Goal")
-        }));
     }
 
     #[test]

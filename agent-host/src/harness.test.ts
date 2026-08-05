@@ -7,10 +7,9 @@ import test from "node:test";
 import {
   GoalStore,
   agentPermissionEffect,
-  commandAllowedByLease,
   filterContextFilesByTrust,
   loadHarnessConfig,
-  pathAllowedByLease,
+  pathAllowedByGrant,
   saveWorkspaceTrust,
 } from "./harness.ts";
 import type { PlanArtifactV2 } from "./plan.ts";
@@ -57,6 +56,22 @@ const sourcePlan: PlanArtifactV2 = {
   createdAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-01-01T00:00:01Z",
 };
+
+test("legacy Goal fields migrate to CapabilityGrantSet and are not persisted", () => {
+  const setup = fixture();
+  const store = setup.create();
+  store.start("Migrate permissions");
+  const goal = store.acceptSpec(spec);
+  assert.ok(goal.spec?.grants.matchers.length);
+  assert.ok(goal.tasks[0]?.grants.matchers.length);
+  const persisted = JSON.parse(
+    readFileSync(store.snapshot().statePath, "utf8"),
+  ) as Record<string, unknown>;
+  const serialized = JSON.stringify(persisted);
+  assert.equal(serialized.includes("allowedTools"), false);
+  assert.equal(serialized.includes("allowedPaths"), false);
+  assert.equal(serialized.includes("allowedCommands"), false);
+});
 
 test("Goal keeps an immutable explicit Plan source without sharing Plan lifecycle", () => {
   const setup = fixture();
@@ -171,24 +186,6 @@ test("goal restart pauses an in-flight background preparation", () => {
   const restored = setup.create().current();
   assert.equal(restored?.stage, "paused");
   assert.equal(restored?.previousStage, "preparing");
-});
-
-test("allow-for-goal extends only the current persisted lease", () => {
-  const setup = fixture();
-  const store = setup.create();
-  store.start("Implement");
-  store.acceptSpec({
-    ...spec,
-    allowedTools: ["read"],
-    allowedPaths: ["src"],
-    allowedCommands: [],
-  });
-  store.approveSpec();
-  store.extendLease("bash", { command: "cargo test" });
-
-  const restored = setup.create().current();
-  assert.deepEqual(restored?.lease?.allowedTools.sort(), ["bash", "read"]);
-  assert.deepEqual(restored?.lease?.allowedCommands, ["cargo test"]);
 });
 
 test("workspace goal listing is read-only and sorted by most recent update", () => {
@@ -407,26 +404,19 @@ test("GoalStore rejects invalid task graphs before persisting a spec", () => {
   assert.equal(store.current()?.spec, undefined);
 });
 
-test("capability matching is workspace-relative and command-prefix based", () => {
+test("legacy path leases remain workspace-relative", () => {
   const setup = fixture();
   assert.equal(
-    pathAllowedByLease(setup.cwd, "src/app.ts", ["src"]),
+    pathAllowedByGrant(setup.cwd, "src/app.ts", ["src"]),
     true,
   );
   assert.equal(
-    pathAllowedByLease(setup.cwd, "../secret", ["."]),
-    false,
-  );
-  assert.equal(commandAllowedByLease("cargo test app", ["cargo test"]), true);
-  assert.equal(commandAllowedByLease("cargo publish", ["cargo test"]), false);
-  assert.equal(commandAllowedByLease("rm -rf target", ["rm"]), false);
-  assert.equal(
-    commandAllowedByLease("cargo test && touch changed.txt", ["cargo test"]),
+    pathAllowedByGrant(setup.cwd, "../secret", ["."]),
     false,
   );
 });
 
-test("built-in verifier denies shell composition outside its read-only allowlist", () => {
+test("built-in verifier does not auto-allow shell commands", () => {
   const setup = fixture();
   const config = loadHarnessConfig(setup.cwd, {
     homeDir: join(setup.root, "home"),
@@ -435,7 +425,7 @@ test("built-in verifier denies shell composition outside its read-only allowlist
   assert.ok(verifier);
   assert.equal(
     agentPermissionEffect(verifier, "bash", "cargo clippy --all-targets"),
-    "allow",
+    "deny",
   );
   assert.equal(
     agentPermissionEffect(
@@ -447,7 +437,7 @@ test("built-in verifier denies shell composition outside its read-only allowlist
   );
 });
 
-test("trusted project config fully overrides profile fields", () => {
+test("trusted project config cannot expand profile permissions", () => {
   const setup = fixture();
   const home = join(setup.root, "home");
   const projectDir = join(setup.cwd, ".nabla");
@@ -472,9 +462,9 @@ test("trusted project config fully overrides profile fields", () => {
   assert.equal(trusted.maxParallel, 99);
   assert.equal(
     agentPermissionEffect(trusted.profiles.reviewer!, "write", "src/app.rs"),
-    "ask",
+    "deny",
   );
-  assert.deepEqual(trusted.profiles.reviewer?.tools, ["read", "write"]);
+  assert.deepEqual(trusted.profiles.reviewer?.tools, ["read"]);
   assert.equal(trusted.profiles.reviewer?.maxParallel, 99);
   assert.match(
     readFileSync(join(home, ".nabla", "config.json"), "utf8"),
@@ -534,7 +524,7 @@ test("markdown subagents merge globally and from trusted projects", () => {
   ]);
   assert.equal(
     agentPermissionEffect(profile, "write", "docs/guide.md"),
-    "allow",
+    "deny",
   );
   assert.equal(
     agentPermissionEffect(profile, "write", "src/app.ts"),
@@ -574,7 +564,7 @@ test("custom profiles use a safe baseline and ordered permission rules", () => {
   });
   const profile = config.profiles.audit!;
   assert.equal(agentPermissionEffect(profile, "read", "src/lib.rs"), "allow");
-  assert.equal(agentPermissionEffect(profile, "bash", "cargo test app"), "allow");
+  assert.equal(agentPermissionEffect(profile, "bash", "cargo test app"), "deny");
   assert.equal(agentPermissionEffect(profile, "bash", "cargo publish"), "deny");
   assert.equal(profile.maxParallel, 1);
   assert.equal(profile.maxTurns, 24);

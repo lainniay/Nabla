@@ -93,9 +93,13 @@
         "revision": 2,
         "summary": "Contract goal specification",
         "acceptanceCriteria": ["All fields survive"],
-        "allowedTools": ["read", "edit"],
-        "allowedPaths": ["src/**"],
-        "allowedCommands": ["cargo test"],
+        "grants": {
+          "matchers": [
+            {"kind": "file", "operation": "read", "path": "src", "recursive": true},
+            {"kind": "file", "operation": "write", "path": "src", "recursive": true},
+            {"kind": "shell_intent", "command": "cargo test"}
+          ]
+        },
         "sourcePlan": {
           "id": "plan-contract",
           "revision": 3
@@ -107,7 +111,12 @@
             "description": "Verify the contract",
             "profile": "worker",
             "dependsOn": [],
-            "allowedPaths": ["src/**"],
+            "grants": {
+              "matchers": [
+                {"kind": "file", "operation": "read", "path": "src", "recursive": true},
+                {"kind": "file", "operation": "write", "path": "src", "recursive": true}
+              ]
+            },
             "acceptanceCriteria": ["Pass"]
           }
         ]
@@ -119,7 +128,12 @@
           "description": "Verify the contract",
           "profile": "worker",
           "dependsOn": [],
-          "allowedPaths": ["src/**"],
+          "grants": {
+            "matchers": [
+              {"kind": "file", "operation": "read", "path": "src", "recursive": true},
+              {"kind": "file", "operation": "write", "path": "src", "recursive": true}
+            ]
+          },
           "acceptanceCriteria": ["Pass"],
           "status": "completed",
           "result": {
@@ -134,7 +148,13 @@
       ],
       "lease": {
         "specRevision": 2,
-        "allowedTools": ["read", "edit"]
+        "grants": {
+          "matchers": [
+            {"kind": "file", "operation": "read", "path": "src", "recursive": true},
+            {"kind": "file", "operation": "write", "path": "src", "recursive": true},
+            {"kind": "shell_intent", "command": "cargo test"}
+          ]
+        }
       },
       "reviews": [
         {

@@ -608,10 +608,9 @@ impl App {
                             self.state.approval = None;
                             if let Some(tool) = self.find_tool_mut(Some(&tool_call_id)) {
                                 tool.status = match decision {
-                                    ApprovalDecision::Allow
+                                    ApprovalDecision::AllowOnce
                                     | ApprovalDecision::AllowSession
-                                    | ApprovalDecision::AllowGoal
-                                    | ApprovalDecision::AllowForever => ToolStatus::Running,
+                                    | ApprovalDecision::AllowWorkspace => ToolStatus::Running,
                                     ApprovalDecision::Deny => ToolStatus::Denied,
                                 };
                             }

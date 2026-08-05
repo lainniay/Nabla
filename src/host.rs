@@ -169,10 +169,9 @@ pub struct ModelListData {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
-    Allow,
+    AllowOnce,
     AllowSession,
-    AllowGoal,
-    AllowForever,
+    AllowWorkspace,
     Deny,
 }
 
@@ -698,20 +697,16 @@ mod tests {
         assert!(data.active);
         assert_eq!(data.active_tools, ["read", "edit", "bash"]);
         assert_eq!(
-            serde_json::to_value(ApprovalDecision::Allow).unwrap(),
-            serde_json::json!("allow")
+            serde_json::to_value(ApprovalDecision::AllowOnce).unwrap(),
+            serde_json::json!("allow_once")
         );
         assert_eq!(
             serde_json::to_value(ApprovalDecision::AllowSession).unwrap(),
             serde_json::json!("allow_session")
         );
         assert_eq!(
-            serde_json::to_value(ApprovalDecision::AllowGoal).unwrap(),
-            serde_json::json!("allow_goal")
-        );
-        assert_eq!(
-            serde_json::to_value(ApprovalDecision::AllowForever).unwrap(),
-            serde_json::json!("allow_forever")
+            serde_json::to_value(ApprovalDecision::AllowWorkspace).unwrap(),
+            serde_json::json!("allow_workspace")
         );
     }
 

@@ -1,5 +1,12 @@
 use super::*;
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityGrantSet {
+    #[serde(default)]
+    pub matchers: Vec<Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalTask {
@@ -11,7 +18,7 @@ pub struct GoalTask {
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default)]
-    pub allowed_paths: Vec<String>,
+    pub grants: CapabilityGrantSet,
     #[serde(default)]
     pub acceptance_criteria: Vec<String>,
     pub status: String,
@@ -27,11 +34,7 @@ pub struct GoalSpec {
     #[serde(default)]
     pub acceptance_criteria: Vec<String>,
     #[serde(default)]
-    pub allowed_tools: Vec<String>,
-    #[serde(default)]
-    pub allowed_paths: Vec<String>,
-    #[serde(default)]
-    pub allowed_commands: Vec<String>,
+    pub grants: CapabilityGrantSet,
     #[serde(default)]
     pub source_plan: Option<Value>,
     #[serde(default)]
@@ -49,7 +52,7 @@ pub struct GoalSpecTask {
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default)]
-    pub allowed_paths: Vec<String>,
+    pub grants: CapabilityGrantSet,
     #[serde(default)]
     pub acceptance_criteria: Vec<String>,
 }

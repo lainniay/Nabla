@@ -39,13 +39,12 @@ import {
   GoalStore,
   agentPermissionEffect,
   agentPermissionSummary,
-  commandAllowedByLease,
   filterContextFilesByTrust,
   goalSpecFromToolParams,
   isCredentialPath,
   loadHarnessConfig,
   modelReference,
-  pathAllowedByLease,
+  pathAllowedByGrant,
   saveWorkspaceTrust,
   workspaceIsTrusted,
   type AgentProfile,
@@ -57,13 +56,8 @@ import {
   type TaskResult,
 } from "./harness.ts";
 import {
-  isHighRiskCommand,
-  hasShellControlSyntax,
-  isSafeReadOnlyCommand,
-  isSafeReadOnlyWorkspaceCommand,
   isManagedWorktreeCommand,
   stripRedundantWorkspaceCd,
-  toolCallCanMutate,
   MUTATING_TOOL_NAMES,
   READ_ONLY_TOOL_NAMES,
   THINKING_LEVELS,
@@ -95,6 +89,35 @@ import {
   type TreeFilterMode,
 } from "./session-navigation.ts";
 import { workspacePathError } from "./workspace.ts";
+import {
+  CreateAdapter,
+  EditAdapter,
+  ListAdapter,
+  ReadAdapter,
+  WriteAdapter,
+  type FileToolInput,
+} from "./permissions/adapters/filesystem.ts";
+import {
+  ShellAdapter,
+  type ShellInput,
+} from "./permissions/adapters/shell.ts";
+import { createIntent } from "./permissions/adapters/tool-adapter.ts";
+import { AgentAdapter } from "./permissions/adapters/agent.ts";
+import { McpAdapter } from "./permissions/adapters/mcp.ts";
+import { JsonlPermissionAuditLog } from "./permissions/audit-log.ts";
+import { ApprovalBroker as PermissionApprovalBroker } from "./permissions/approvals/broker.ts";
+import { PermissionKernel } from "./permissions/kernel.ts";
+import type {
+  CapabilityGrantSet,
+  CapabilityMatcher,
+  PermissionIntent,
+  PermissionRule,
+  ToolContext,
+} from "./permissions/model.ts";
+import { matcherMatches } from "./permissions/evaluator.ts";
+import { PolicyStore } from "./permissions/policy-store.ts";
+import { digestValue } from "./permissions/shell/digest.ts";
+import { resolveWorkspaceIdentity } from "./permissions/workspace-identity.ts";
 import {
   parseSubagentOutput,
   type SubagentOutputKind,
@@ -268,6 +291,13 @@ class HostBridge {
   private activeFlow?: ActiveFlow;
   private readonly approvals = new ApprovalQueue();
   private readonly persistentApprovals = new ApprovalStore();
+  private readonly permissionPolicies = new PolicyStore();
+  private readonly permissionKernel = new PermissionKernel(
+    this.permissionPolicies,
+    new PermissionApprovalBroker(),
+    new JsonlPermissionAuditLog(),
+  );
+  private readonly shellPermissionAdapter = new ShellAdapter();
   private readonly questions = new QuestionQueue();
   private readonly plans: PlanStore;
   private readonly server;
@@ -323,6 +353,16 @@ class HostBridge {
     this.goals = goals;
     this.config = config;
     this.afterLogin = afterLogin;
+    this.permissionPolicies.setBuiltin(
+      ["ask_user", "submit_plan"].map(
+        (tool): PermissionRule => ({
+          id: `builtin-tool-${tool}`,
+          effect: "allow",
+          source: "builtin",
+          matcher: { kind: "tool", tool },
+        }),
+      ),
+    );
     this.server = createServer((socket) => this.accept(socket));
   }
 
@@ -560,7 +600,7 @@ class HostBridge {
           if (event.toolName === "bash" && typeof input.command === "string") {
             input.command = stripRedundantWorkspaceCd(input.command, context.cwd);
           }
-          return this.approveTool(event, context.cwd, context.signal);
+          return this.authorizeTool(event, context.cwd, context.signal);
         });
         pi.on("tool_result", (event) => {
           if (event.toolName !== "write") return;
@@ -1186,7 +1226,7 @@ class HostBridge {
             ? `Source Plan snapshot:\n${planExecutionPrompt(goal.sourcePlan.artifact)}`
             : "",
           "Inspect the workspace without modifying it.",
-          "Return summary, acceptanceCriteria, allowedTools, allowedPaths, allowedCommands, and dependency-aware tasks.",
+          "Return summary, acceptanceCriteria, grants.matchers, and dependency-aware tasks with optional grants.matchers.",
         ]
           .filter(Boolean)
           .join("\n\n"),
@@ -2119,7 +2159,7 @@ class HostBridge {
         candidateGoal?.id === options.goalId ? candidateGoal : undefined;
       const outputInstruction =
         options.outputKind === "goal_spec"
-          ? "Return one JSON object only: {summary, acceptanceCriteria, allowedTools, allowedPaths, allowedCommands, tasks:[{id,title,description,profile,dependsOn,allowedPaths,acceptanceCriteria}]}."
+          ? "Return one JSON object only: {summary, acceptanceCriteria, grants:{matchers:[...]}, tasks:[{id,title,description,profile,dependsOn,grants:{matchers:[...]},acceptanceCriteria}]}."
           : options.outputKind === "review" || options.profile === "reviewer"
             ? "Return one JSON object only: {verdict, summary, findings}. Each finding should identify affected taskIds and paths when known."
             : "Return one JSON object only: {status, summary, evidence, changedPaths, verification, blockers}.";
@@ -2536,17 +2576,18 @@ class HostBridge {
           ].join("\n\n"),
         }));
         pi.on("tool_call", (event, context) =>
-          this.approveTool(event, context.cwd, context.signal, {
+          this.authorizeTool(event, context.cwd, context.signal, {
             agentId,
             profile: profileName,
             model,
             profileConfig: profile,
             planReadOnly: this.subagents.get(agentId)?.planReadOnly === true,
             goalId: this.subagents.get(agentId)?.goalId,
-            allowedPaths: this.goals
+            sessionId: context.sessionManager.getSessionId(),
+            grants: this.goals
               .active()
               ?.tasks.find((task) => task.id === this.subagents.get(agentId)?.taskId)
-              ?.allowedPaths,
+              ?.grants,
           }),
         );
       },
@@ -2630,7 +2671,11 @@ class HostBridge {
       }
       if (
         task &&
-        !pathAllowedByLease(originCwd, workspaceRelative, task.allowedPaths)
+        !pathAllowedByGrant(
+          originCwd,
+          workspaceRelative,
+          filePathsFromGrantSet(task.grants),
+        )
       ) {
         throw new Error(
           `Worktree result changes a path outside the Goal task lease: ${workspaceRelative}`,
@@ -2702,7 +2747,7 @@ class HostBridge {
                         .join("\n")}`
                     : "",
                   `Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`,
-                  `Allowed paths:\n${task.allowedPaths.map((item) => `- ${item}`).join("\n")}`,
+                  `Allowed paths:\n${filePathsFromGrantSet(task.grants).map((item) => `- ${item}`).join("\n")}`,
                 ].join("\n\n"),
               }),
             );
@@ -3027,10 +3072,9 @@ class HostBridge {
     const approvalId = stringField(request, "approvalId");
     const decision = stringField(request, "decision");
     if (
-      decision !== "allow" &&
+      decision !== "allow_once" &&
       decision !== "allow_session" &&
-      decision !== "allow_goal" &&
-      decision !== "allow_forever" &&
+      decision !== "allow_workspace" &&
       decision !== "deny"
     ) {
       throw new Error(`Unsupported approval decision: ${decision}`);
@@ -3401,7 +3445,7 @@ class HostBridge {
     this.send({ type: "plan_completed", artifact: completed });
   }
 
-  private async approveTool(
+  private async authorizeTool(
     event: ToolCallEvent,
     cwd: string,
     signal: AbortSignal | undefined,
@@ -3412,16 +3456,14 @@ class HostBridge {
       profileConfig?: AgentProfile;
       planReadOnly?: boolean;
       goalId?: string;
-      allowedPaths?: string[];
+      sessionId?: string;
+      grants?: CapabilityGrantSet;
     } = {},
   ): Promise<ToolCallEventResult | undefined> {
     const toolName = event.toolName;
     const input = event.input as Record<string, unknown>;
-    const path =
-      typeof input.path === "string" ? input.path : undefined;
-    const command =
-      typeof input.command === "string" ? input.command : undefined;
-    const mutation = toolCallCanMutate(toolName, command, cwd);
+    const path = typeof input.path === "string" ? input.path : undefined;
+    const command = typeof input.command === "string" ? input.command : undefined;
     const profile = agent.profileConfig;
     if (profile && !profile.tools.includes(toolName)) {
       return {
@@ -3436,46 +3478,76 @@ class HostBridge {
           agentToolResource(cwd, path, command),
         )
       : undefined;
+    const sessionId = agent.sessionId ?? this.tryCurrentScopeId();
+    if (!sessionId) {
+      return { block: true, reason: "Permission scope is unavailable" };
+    }
+    const identity = resolveWorkspaceIdentity(cwd);
+    const permissionContext: ToolContext = {
+      requestId: `request-${event.toolCallId}`,
+      toolCallId: event.toolCallId,
+      sessionId,
+      workspaceId: identity.id,
+      cwd,
+    };
+    const normalize = () =>
+      permissionIntentForTool(
+        permissionContext,
+        toolName,
+        event.input,
+        this.shellPermissionAdapter,
+      );
+    const intent = normalize();
+    const additionalRules: PermissionRule[] = [];
+    const addToolRule = (
+      id: string,
+      effect: "ask" | "deny",
+      source: PermissionRule["source"],
+    ) => {
+      additionalRules.push({
+        id,
+        effect,
+        source,
+        matcher: { kind: "tool", tool: toolName },
+      });
+    };
+    if (profileEffect === "deny") {
+      addToolRule(`profile-${agent.profile}-deny`, "deny", "managed");
+    } else if (profileEffect === "ask") {
+      addToolRule(`profile-${agent.profile}-ask`, "ask", "managed");
+    }
     if (
       agent.planReadOnly &&
-      (toolName === "edit" ||
-        toolName === "write" ||
-        (toolName === "bash" &&
-          (!command || !isSafeReadOnlyWorkspaceCommand(command, cwd))))
+      intent.atoms.some(
+        (atom) =>
+          atom.kind === "exec" ||
+          (atom.kind === "file" && atom.operation !== "read" && atom.operation !== "list") ||
+          atom.kind === "opaque_code",
+      )
     ) {
-      return {
-        block: true,
-        reason: "Subagents started from PLAN mode are read-only",
-      };
+      addToolRule("plan-read-only", "deny", "managed");
+    }
+    if (agent.agentId && command && isManagedWorktreeCommand(command)) {
+      addToolRule("managed-worktree-boundary", "deny", "managed");
     }
     if (
-      agent.agentId &&
-      command &&
-      isManagedWorktreeCommand(command)
+      !agent.agentId &&
+      this.planMode.current() &&
+      intent.atoms.some(
+        (atom) =>
+          atom.kind === "exec" ||
+          (atom.kind === "file" && atom.operation !== "read" && atom.operation !== "list"),
+      )
     ) {
-      return {
-        block: true,
-        reason: "Nabla manages subagent worktrees at the host layer",
-      };
-    }
-    if (profileEffect === "deny") {
-      return {
-        block: true,
-        reason: `Profile ${agent.profile} denies ${toolName} for this resource`,
-      };
-    }
-    if (mutation && !agent.agentId && this.planMode.current()) {
-      return { block: true, reason: "Mutation tools are disabled in PLAN mode" };
+      addToolRule("plan-mode-mutation", "deny", "managed");
     }
 
-    let reason =
-      profileEffect === "ask"
-        ? `Profile ${agent.profile} requires approval`
-        : mutation
-          ? "Tool can change external state"
-          : "Sensitive read";
     let risk: "normal" | "high" | "credential" | "outside_workspace" =
-      "normal";
+      intent.atoms.some((atom) => atom.kind === "opaque_code") ? "high" : "normal";
+    let reason =
+      risk === "high"
+        ? "The request contains code that cannot be statically decomposed"
+        : "Permission is required for every capability in this request";
     if (path) {
       const pathError = await workspacePathError(cwd, path);
       if (isCredentialPath(resolve(cwd, path))) {
@@ -3484,16 +3556,18 @@ class HostBridge {
       } else if (pathError) {
         reason = pathError;
         risk = "outside_workspace";
+      } else if (
+        READ_ONLY_TOOL_NAMES.includes(
+          toolName as (typeof READ_ONLY_TOOL_NAMES)[number],
+        )
+      ) {
+        additionalRules.push({
+          id: "builtin-workspace-read",
+          effect: "allow",
+          source: "builtin",
+          matcher: { kind: "tool", tool: toolName },
+        });
       }
-    }
-    if (
-      command &&
-      (isHighRiskCommand(command) ||
-        (hasShellControlSyntax(command) &&
-          !isSafeReadOnlyWorkspaceCommand(command, cwd)))
-    ) {
-      reason = "Command is high-risk or can cross a trust boundary";
-      risk = "high";
     }
 
     const candidateGoal = this.goals.active();
@@ -3511,131 +3585,54 @@ class HostBridge {
       lease &&
       activeGoal.spec &&
       lease.specRevision === activeGoal.spec.revision &&
-      leaseAllowsTool(
-        toolName,
-        cwd,
-        path,
-        command,
-        lease.allowedTools,
-        lease.allowedPaths,
-        lease.allowedCommands,
-        agent.allowedPaths,
-      );
-    const sessionId = this.tryCurrentScopeId();
-    if (
-      risk === "normal" &&
-      sessionId &&
-      this.persistentApprovals.allowsSession(
-        sessionId,
-        cwd,
-        toolName,
-        event.input,
-      ) &&
-      (!activeGoal || leaseCovers)
-    ) {
-      return undefined;
-    }
-    if (
-      risk === "normal" &&
-      this.persistentApprovals.allows(cwd, toolName, event.input) &&
-      (!activeGoal || leaseCovers)
-    ) {
-      return undefined;
-    }
-    if (risk === "normal") {
-      if (activeGoal && leaseCovers) return undefined;
-      if (!activeGoal && profileEffect === "allow") return undefined;
-      if (!activeGoal && profileEffect === undefined && !mutation) {
-        return undefined;
-      }
+      grantSetCoversIntent(intent, lease.grants, agent.grants, cwd);
+    if (activeGoal && !leaseCovers) {
+      addToolRule(`goal-${activeGoal.id}-boundary`, "deny", "managed");
     }
 
-    if (!this.socket || this.socket.destroyed) {
-      return { block: true, reason: "Approval UI is not connected" };
-    }
-
-    const decision = await this.approvals.request(
-      {
-        toolCallId: event.toolCallId,
-        toolName,
-        input: event.input,
-        agentId: agent.agentId,
-        agentProfile: agent.profile,
-        model: agent.model,
-        goalId: activeGoal?.id,
-        reason,
-        risk,
+    const authorization = await this.permissionKernel.authorize(
+      permissionContext.requestId,
+      intent,
+      identity,
+      async ({ intent: requestedIntent, proposals }, approvalSignal) => {
+        if (!this.socket || this.socket.destroyed) return "deny";
+        return this.approvals.request(
+          {
+            toolCallId: event.toolCallId,
+            toolName,
+            input: event.input,
+            agentId: agent.agentId,
+            agentProfile: agent.profile,
+            model: agent.model,
+            goalId: activeGoal?.id,
+            reason,
+            risk,
+            permissionIntent: requestedIntent,
+            grantProposals: proposals,
+          },
+          approvalSignal,
+          (approvalEvent) => this.send(approvalEvent),
+        );
       },
       signal,
-      (approvalEvent) => this.send(approvalEvent),
+      additionalRules,
+      !agent.agentId,
     );
-
-    if (decision === "allow_goal") {
-      if (!activeGoal?.lease || !leaseActive) {
-        return {
-          block: true,
-          reason: "There is no active Goal capability lease to extend",
-        };
-      }
-      this.goals.extendLease(toolName, { path, command });
-      this.sendGoalState();
-      return undefined;
-    }
-    if (decision === "allow_session") {
-      if (risk !== "normal" || !sessionId) {
-        return {
-          block: true,
-          reason: "This request is not eligible for session approval",
-        };
-      }
-      this.persistentApprovals.allowSession(
-        sessionId,
-        cwd,
-        toolName,
-        event.input,
-      );
-      if (activeGoal && !leaseCovers) {
-        if (!activeGoal.lease || !leaseActive) {
-          return {
-            block: true,
-            reason: "There is no active Goal capability lease to extend",
-          };
-        }
-        this.goals.extendLease(toolName, { path, command });
-        this.sendGoalState();
-      }
-      return undefined;
-    }
-    if (decision === "allow_forever") {
-      if (risk !== "normal") {
-        return {
-          block: true,
-          reason: "This request is not eligible for persistent approval",
-        };
-      }
-      this.persistentApprovals.allow(cwd, toolName, event.input);
-      if (activeGoal && !leaseCovers) {
-        if (!activeGoal.lease || !leaseActive) {
-          return {
-            block: true,
-            reason: "There is no active Goal capability lease to extend",
-          };
-        }
-        this.goals.extendLease(toolName, { path, command });
-        this.sendGoalState();
-      }
-      return undefined;
-    }
-    if (decision !== "allow") {
-      return { block: true, reason: "Denied by user" };
-    }
-    if (activeGoal && !leaseCovers) {
+    if (
+      authorization.evaluation.effect === "deny" ||
+      authorization.decision === "deny"
+    ) {
       return {
         block: true,
-        reason: "Goal capability lease must be extended before this tool can run",
+        reason:
+          authorization.evaluation.effect === "deny"
+            ? "Denied by permission policy"
+            : "Denied by user",
       };
     }
-    return undefined;
+    return this.permissionKernel.consumeForExecution(authorization, normalize())
+      ? undefined
+      : { block: true, reason: "Tool input changed after approval" };
   }
 
   private cancelActiveFlow(reason: string): void {
@@ -3654,6 +3651,110 @@ function toolsForPlanMode(active: boolean): readonly string[] {
   return active ? PLAN_TOOLS : STANDARD_TOOLS;
 }
 
+function permissionIntentForTool(
+  context: ToolContext,
+  toolName: string,
+  input: unknown,
+  shellAdapter: ShellAdapter,
+): PermissionIntent {
+  const value = isJsonObject(input) ? input : {};
+  if (toolName === "delegate_task") {
+    return new AgentAdapter().normalize(context, {
+      action: "spawn",
+      ...(typeof value.profile === "string" ? { profile: value.profile } : {}),
+      payload: value,
+    });
+  }
+  if (toolName.startsWith("mcp__")) {
+    const [, server = "unknown", ...methodParts] = toolName.split("__");
+    return new McpAdapter().normalize(context, {
+      server,
+      method: methodParts.join("__") || toolName,
+      arguments: value,
+    });
+  }
+  if (toolName === "bash" && typeof value.command === "string") {
+    return shellAdapter.normalize(context, {
+      command: value.command,
+      ...(typeof value.cwd === "string" ? { cwd: value.cwd } : {}),
+      ...(isStringRecord(value.environment)
+        ? { environment: value.environment }
+        : {}),
+    } satisfies ShellInput);
+  }
+  if (typeof value.path === "string") {
+    const adapter =
+      toolName === "edit"
+        ? EditAdapter
+        : toolName === "write"
+          ? existsSync(resolve(context.cwd, value.path))
+            ? WriteAdapter
+            : CreateAdapter
+          : toolName === "ls"
+            ? ListAdapter
+            : ReadAdapter;
+    return adapter.normalize(context, value as FileToolInput);
+  }
+  const normalizedInput = isJsonObject(input) ? input : { value: input };
+  return createIntent(context, toolName, normalizedInput, [{
+    kind: "opaque_code",
+    runtime: `tool:${toolName}`,
+    digest: digestValue(normalizedInput),
+    reason: "tool input has no specialized capability adapter",
+  }]);
+}
+
+function grantSetCoversIntent(
+  intent: PermissionIntent,
+  goalGrants: CapabilityGrantSet,
+  taskGrants: CapabilityGrantSet | undefined,
+  cwd: string,
+): boolean {
+  return intent.atoms.every(
+    (atom) =>
+      goalGrants.matchers.some((matcher) =>
+        matcherMatches(resolveGrantMatcher(matcher, cwd), atom, intent)) &&
+      (!taskGrants ||
+        taskGrants.matchers.some((matcher) =>
+          matcherMatches(resolveGrantMatcher(matcher, cwd), atom, intent))),
+  );
+}
+
+function resolveGrantMatcher(
+  matcher: CapabilityMatcher,
+  cwd: string,
+): CapabilityMatcher {
+  if (matcher.kind === "file") {
+    return {
+      ...matcher,
+      path: resolve(cwd, matcher.path),
+      ...(matcher.destination
+        ? { destination: resolve(cwd, matcher.destination) }
+        : {}),
+    };
+  }
+  if (matcher.kind === "exec" && matcher.cwd) {
+    return { ...matcher, cwd: resolve(cwd, matcher.cwd) };
+  }
+  return matcher;
+}
+
+function filePathsFromGrantSet(grants: CapabilityGrantSet): string[] {
+  return [
+    ...new Set(
+      grants.matchers.flatMap((matcher) =>
+        matcher.kind === "file" ? [matcher.path] : []),
+    ),
+  ];
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    isJsonObject(value) &&
+    Object.values(value).every((item) => typeof item === "string")
+  );
+}
+
 function agentToolResource(
   cwd: string,
   path: string | undefined,
@@ -3662,30 +3763,6 @@ function agentToolResource(
   if (command) return command.trim().replace(/\s+/gu, " ");
   if (!path) return "*";
   return workspaceRelativePath(cwd, resolve(cwd, path));
-}
-
-function leaseAllowsTool(
-  toolName: string,
-  cwd: string,
-  path: string | undefined,
-  command: string | undefined,
-  allowedTools: readonly string[],
-  allowedPaths: readonly string[],
-  allowedCommands: readonly string[],
-  taskPaths: readonly string[] | undefined,
-): boolean {
-  if (!allowedTools.includes(toolName)) return false;
-  if (toolName === "bash") {
-    return command !== undefined &&
-      commandAllowedByLease(command, allowedCommands);
-  }
-  if (path) {
-    return (
-      pathAllowedByLease(cwd, path, allowedPaths) &&
-      (!taskPaths || pathAllowedByLease(cwd, path, taskPaths))
-    );
-  }
-  return true;
 }
 
 function stringField(value: JsonObject, name: string): string {

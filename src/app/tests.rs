@@ -1694,13 +1694,13 @@ fn mutation_tool_waits_for_approval_and_resumes_after_allow() {
         effects,
         vec![AppEffect::ReplyApproval {
             approval_id: "approval-1".to_owned(),
-            decision: ApprovalDecision::Allow,
+            decision: ApprovalDecision::AllowOnce,
         }]
     );
 
     app.update(AppEvent::Command(CommandEvent::ApprovalReplyFinished {
         approval_id: "approval-1".to_owned(),
-        decision: ApprovalDecision::Allow,
+        decision: ApprovalDecision::AllowOnce,
         result: Ok(()),
     }));
     assert!(app.state().approval.is_none());
@@ -1774,7 +1774,6 @@ fn approval_and_goal_approval_use_shared_navigation_before_confirming() {
     assert_eq!(app.state.approval.as_ref().unwrap().selected, 2);
     assert!(app.update(press(KeyCode::Tab)).is_empty());
     assert_eq!(app.state.approval.as_ref().unwrap().selected, 3);
-    assert!(app.update(press(KeyCode::Tab)).is_empty());
     assert_eq!(
         app.update(press(KeyCode::Enter)),
         vec![AppEffect::ReplyApproval {
@@ -1825,7 +1824,7 @@ fn persistent_approval_is_available_only_for_normal_risk_requests() {
         app.update(press(KeyCode::Char('a'))),
         vec![AppEffect::ReplyApproval {
             approval_id: "approval-forever".to_owned(),
-            decision: ApprovalDecision::AllowForever,
+            decision: ApprovalDecision::AllowWorkspace,
         }]
     );
     app.state.approval.as_mut().unwrap().replying = false;

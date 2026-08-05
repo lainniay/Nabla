@@ -87,9 +87,7 @@ function validateTaskResult(value: JsonObject): void {
 function validateGoalSpec(value: JsonObject): void {
   requireString(value, "summary", "goal_spec");
   requireStringArray(value, "acceptanceCriteria", "goal_spec");
-  requireStringArray(value, "allowedTools", "goal_spec");
-  requireStringArray(value, "allowedPaths", "goal_spec");
-  requireStringArray(value, "allowedCommands", "goal_spec");
+  validateGrantSet(value.grants, "goal_spec.grants");
   if (!Array.isArray(value.tasks) || value.tasks.length === 0) {
     throw new Error("goal_spec.tasks must be a non-empty array");
   }
@@ -102,8 +100,22 @@ function validateGoalSpec(value: JsonObject): void {
     requireString(task, "title", context);
     requireString(task, "description", context);
     if (task.profile !== undefined) requireString(task, "profile", context);
-    for (const field of ["dependsOn", "allowedPaths", "acceptanceCriteria"]) {
+    for (const field of ["dependsOn", "acceptanceCriteria"]) {
       if (task[field] !== undefined) requireStringArray(task, field, context);
+    }
+    if (task.grants !== undefined) {
+      validateGrantSet(task.grants, `${context}.grants`);
+    }
+  }
+}
+
+function validateGrantSet(value: unknown, context: string): void {
+  if (!isJsonObject(value) || !Array.isArray(value.matchers)) {
+    throw new Error(`${context} must contain a matchers array`);
+  }
+  for (const [index, matcher] of value.matchers.entries()) {
+    if (!isJsonObject(matcher) || typeof matcher.kind !== "string") {
+      throw new Error(`${context}.matchers[${index}] must be a capability matcher`);
     }
   }
 }

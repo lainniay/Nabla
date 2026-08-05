@@ -1,8 +1,7 @@
 export type ApprovalDecision =
-  | "allow"
+  | "allow_once"
   | "allow_session"
-  | "allow_goal"
-  | "allow_forever"
+  | "allow_workspace"
   | "deny";
 
 export interface ApprovalRequest {
@@ -15,6 +14,8 @@ export interface ApprovalRequest {
   goalId?: string;
   reason?: string;
   risk?: "normal" | "elevated" | "high" | "credential" | "outside_workspace";
+  permissionIntent?: unknown;
+  grantProposals?: unknown;
 }
 
 interface PendingApproval {

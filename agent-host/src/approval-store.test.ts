@@ -52,39 +52,6 @@ test("persistent approvals survive store recreation and remain project scoped", 
   }
 });
 
-test("session approvals are reused only by the same in-memory session", () => {
-  const value = fixture();
-  try {
-    const store = new ApprovalStore({ homeDir: value.home });
-    store.allowSession("session-1", value.workspace, "write", {
-      path: "src/main.ts",
-    });
-    assert.equal(
-      store.allowsSession("session-1", value.workspace, "write", {
-        path: "src/main.ts",
-      }),
-      true,
-    );
-    assert.equal(
-      store.allowsSession("session-2", value.workspace, "write", {
-        path: "src/main.ts",
-      }),
-      false,
-    );
-    assert.equal(
-      new ApprovalStore({ homeDir: value.home }).allowsSession(
-        "session-1",
-        value.workspace,
-        "write",
-        { path: "src/main.ts" },
-      ),
-      false,
-    );
-  } finally {
-    value.cleanup();
-  }
-});
-
 test("directory approvals cover descendants and can be revoked or cleared", () => {
   const value = fixture();
   try {
@@ -107,7 +74,7 @@ test("directory approvals cover descendants and can be revoked or cleared", () =
   }
 });
 
-test("bash approvals are exact and unsafe shell syntax cannot be persisted", () => {
+test("legacy bash approvals are exact opaque commands and never prefixes", () => {
   const value = fixture();
   try {
     const store = new ApprovalStore({ homeDir: value.home });
@@ -118,7 +85,7 @@ test("bash approvals are exact and unsafe shell syntax cannot be persisted", () 
     );
     assert.equal(
       store.allows(value.workspace, "bash", { command: "cargo test --all" }),
-      true,
+      false,
     );
     const readOnlyCompound =
       `cd ${value.workspace} && head -20 src/main.ts; echo "done"`;
@@ -127,12 +94,14 @@ test("bash approvals are exact and unsafe shell syntax cannot be persisted", () 
       store.allows(value.workspace, "bash", { command: readOnlyCompound }),
       true,
     );
-    assert.throws(
-      () =>
-        store.allow(value.workspace, "bash", {
-          command: "head src/main.ts; rm -rf target",
-        }),
-      /cannot be safely approved forever/u,
+    store.allow(value.workspace, "bash", {
+      command: "head src/main.ts; rm -rf target",
+    });
+    assert.equal(
+      store.allows(value.workspace, "bash", {
+        command: "head src/main.ts; rm -rf target --extra",
+      }),
+      false,
     );
   } finally {
     value.cleanup();
@@ -148,6 +117,37 @@ test("a malformed approvals document fails closed", () => {
     assert.equal(store.snapshot(value.workspace).rules.length, 0);
     assert.equal(
       store.allows(value.workspace, "write", { path: "src/main.ts" }),
+      false,
+    );
+  } finally {
+    value.cleanup();
+  }
+});
+
+test("legacy command_prefix approvals are ignored and require re-approval", () => {
+  const value = fixture();
+  try {
+    mkdirSync(join(value.home, ".nabla"));
+    writeFileSync(
+      join(value.home, ".nabla", "approvals.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        rules: [{
+          id: "legacy-prefix",
+          workspace: value.workspace,
+          toolName: "bash",
+          kind: "command_prefix",
+          value: "cargo test",
+          recursive: false,
+          summary: "cargo test …",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        }],
+      }),
+    );
+    const store = new ApprovalStore({ homeDir: value.home });
+    assert.equal(store.snapshot(value.workspace).rules.length, 0);
+    assert.equal(
+      store.allows(value.workspace, "bash", { command: "cargo test --all" }),
       false,
     );
   } finally {

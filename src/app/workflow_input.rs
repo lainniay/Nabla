@@ -269,44 +269,34 @@ impl App {
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
         let direct_decision = match key.code {
-            KeyCode::Char('y' | 'Y') if plain_character => Some(ApprovalDecision::Allow),
+            KeyCode::Char('y' | 'Y') if plain_character => Some(ApprovalDecision::AllowOnce),
             KeyCode::Char('s' | 'S')
                 if plain_character && persistent_approval_available(approval.risk.as_deref()) =>
             {
                 Some(ApprovalDecision::AllowSession)
             }
-            KeyCode::Char('g' | 'G') if plain_character && approval.goal_id.is_some() => {
-                Some(ApprovalDecision::AllowGoal)
-            }
             KeyCode::Char('a' | 'A')
                 if plain_character && persistent_approval_available(approval.risk.as_deref()) =>
             {
-                Some(ApprovalDecision::AllowForever)
+                Some(ApprovalDecision::AllowWorkspace)
             }
             KeyCode::Char('n' | 'N') if plain_character => Some(ApprovalDecision::Deny),
             _ => None,
         };
-        let allow_forever = persistent_approval_available(approval.risk.as_deref());
-        let enabled = vec![
-            true;
-            2 + usize::from(approval.goal_id.is_some())
-                + usize::from(allow_forever) * 2
-        ];
+        let allow_workspace = persistent_approval_available(approval.risk.as_deref());
+        let enabled = vec![true; 2 + usize::from(allow_workspace) * 2];
         let decision = if let Some(decision) = direct_decision {
             Some(decision)
         } else {
             match update_choice_navigation(key, &mut approval.selected, &enabled) {
                 ChoiceNavAction::Handled => return Vec::new(),
                 ChoiceNavAction::Confirm(selected) => {
-                    let mut choices = vec![ApprovalDecision::Allow];
-                    if allow_forever {
+                    let mut choices = vec![ApprovalDecision::AllowOnce];
+                    if allow_workspace {
                         choices.push(ApprovalDecision::AllowSession);
                     }
-                    if approval.goal_id.is_some() {
-                        choices.push(ApprovalDecision::AllowGoal);
-                    }
-                    if allow_forever {
-                        choices.push(ApprovalDecision::AllowForever);
+                    if allow_workspace {
+                        choices.push(ApprovalDecision::AllowWorkspace);
                     }
                     choices.push(ApprovalDecision::Deny);
                     choices.get(selected).copied()

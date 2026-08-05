@@ -5,15 +5,9 @@ import { join, resolve } from "node:path";
 
 import { writeAtomicJsonSync } from "./persistence/atomic-json.ts";
 import { workspaceRelativePath } from "./policy/path-boundary.ts";
-import {
-  hasShellControlSyntax,
-  isHighRiskCommand,
-  isSafeReadOnlyWorkspaceCommand,
-  SAFE_READ_ONLY_COMMAND_PREFIXES,
-} from "./policy/tool-policy.ts";
 import { isJsonObject } from "./protocol/validation.ts";
 
-export type ApprovalRuleKind = "path" | "command" | "command_prefix" | "input";
+export type ApprovalRuleKind = "path" | "command" | "input";
 
 export interface PersistentApprovalRule {
   id: string;
@@ -46,7 +40,6 @@ export class ApprovalStore {
   private readonly path: string;
   private readonly now: () => string;
   private readonly createId: () => string;
-  private readonly sessionRules = new Map<string, PersistentApprovalRule[]>();
 
   constructor(options: ApprovalStoreOptions = {}) {
     this.path = join(options.homeDir ?? homedir(), ".nabla", "approvals.json");
@@ -68,53 +61,6 @@ export class ApprovalStore {
         rule.kind === candidate.kind &&
         ruleMatches(rule, candidate),
     );
-  }
-
-  allowsSession(
-    sessionId: string,
-    cwd: string,
-    toolName: string,
-    input: unknown,
-  ): boolean {
-    const candidate = ruleCandidate(cwd, toolName, input);
-    if (!candidate) return false;
-    return (this.sessionRules.get(sessionId) ?? []).some(
-      (rule) =>
-        rule.workspace === candidate.workspace &&
-        rule.toolName === candidate.toolName &&
-        rule.kind === candidate.kind &&
-        ruleMatches(rule, candidate),
-    );
-  }
-
-  allowSession(
-    sessionId: string,
-    cwd: string,
-    toolName: string,
-    input: unknown,
-  ): void {
-    const candidate = ruleCandidate(cwd, toolName, input);
-    if (!candidate) {
-      throw new Error("This request cannot be safely approved for the session");
-    }
-    const rules = this.sessionRules.get(sessionId) ?? [];
-    if (
-      !rules.some(
-        (rule) =>
-          rule.workspace === candidate.workspace &&
-          rule.toolName === candidate.toolName &&
-          rule.kind === candidate.kind &&
-          rule.value === candidate.value &&
-          rule.recursive === candidate.recursive,
-      )
-    ) {
-      rules.push({
-        id: this.createId(),
-        ...candidate,
-        createdAt: this.now(),
-      });
-      this.sessionRules.set(sessionId, rules);
-    }
   }
 
   allow(cwd: string, toolName: string, input: unknown): PersistentApprovalRule {
@@ -232,24 +178,14 @@ function ruleCandidate(
   const command = typeof input.command === "string" ? input.command : undefined;
   if (command) {
     const normalized = normalizeCommand(command);
-    if (
-      !normalized ||
-      isHighRiskCommand(normalized) ||
-      (hasShellControlSyntax(command) &&
-        !isSafeReadOnlyWorkspaceCommand(command, workspace))
-    ) {
-      return undefined;
-    }
-    const safePrefix = SAFE_READ_ONLY_COMMAND_PREFIXES.find(
-      (prefix) => normalized === prefix || normalized.startsWith(`${prefix} `),
-    );
+    if (!normalized) return undefined;
     return {
       workspace,
       toolName,
-      kind: safePrefix ? "command_prefix" : "command",
-      value: safePrefix ?? normalized,
+      kind: "command",
+      value: normalized,
       recursive: false,
-      summary: safePrefix ? `${safePrefix} …` : normalized,
+      summary: normalized,
     };
   }
   const value = canonicalJson(input);
@@ -270,13 +206,6 @@ function ruleMatches(rule: PersistentApprovalRule, candidate: RuleCandidate): bo
       candidate.value.startsWith(`${rule.value}/`)
     );
   }
-  if (rule.kind === "command_prefix") {
-    return (
-      candidate.kind === "command_prefix" &&
-      (candidate.value === rule.value ||
-        candidate.value.startsWith(`${rule.value} `))
-    );
-  }
   return rule.value === candidate.value;
 }
 
@@ -286,10 +215,7 @@ function isPersistentApprovalRule(value: unknown): value is PersistentApprovalRu
     typeof value.id === "string" &&
     typeof value.workspace === "string" &&
     typeof value.toolName === "string" &&
-    (value.kind === "path" ||
-      value.kind === "command" ||
-      value.kind === "command_prefix" ||
-      value.kind === "input") &&
+    (value.kind === "path" || value.kind === "command" || value.kind === "input") &&
     typeof value.value === "string" &&
     typeof value.recursive === "boolean" &&
     typeof value.summary === "string" &&

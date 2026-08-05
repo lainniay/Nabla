@@ -13,12 +13,13 @@ import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
 import type { PlanArtifactV2 } from "./plan.ts";
 import type { AgentIsolationPolicy } from "./worktree.ts";
+import type {
+  CapabilityGrantSet,
+  CapabilityMatcher,
+  FileOperation,
+} from "./permissions/model.ts";
 import {
-  isHighRiskCommand,
-  hasShellControlSyntax,
-  isSafeReadOnlyCommand,
   READ_ONLY_TOOL_NAMES,
-  SAFE_READ_ONLY_COMMAND_PREFIXES,
   THINKING_LEVELS,
   type ThinkingLevel,
 } from "./policy/tool-policy.ts";
@@ -60,7 +61,7 @@ export interface GoalTask {
   description: string;
   profile: string;
   dependsOn: string[];
-  allowedPaths: string[];
+  grants: CapabilityGrantSet;
   acceptanceCriteria: string[];
   status: TaskStatus;
   result?: TaskResult;
@@ -116,9 +117,7 @@ export interface GoalVerification {
 
 export interface CapabilityLease {
   specRevision: number;
-  allowedTools: string[];
-  allowedPaths: string[];
-  allowedCommands: string[];
+  grants: CapabilityGrantSet;
   approvedAt: string;
 }
 
@@ -133,9 +132,7 @@ export interface GoalSpec {
   revision: number;
   summary: string;
   acceptanceCriteria: string[];
-  allowedTools: string[];
-  allowedPaths: string[];
-  allowedCommands: string[];
+  grants: CapabilityGrantSet;
   sourcePlan?: GoalSourcePlan;
   tasks: Array<{
     id: string;
@@ -143,9 +140,24 @@ export interface GoalSpec {
     description: string;
     profile?: string;
     dependsOn?: string[];
-    allowedPaths?: string[];
+    grants?: CapabilityGrantSet;
     acceptanceCriteria?: string[];
   }>;
+}
+
+export interface GoalSpecInput
+  extends Omit<GoalSpec, "revision" | "grants" | "tasks"> {
+  grants?: CapabilityGrantSet;
+  /** Legacy migration inputs. They are converted to structured matchers. */
+  allowedTools?: string[];
+  allowedPaths?: string[];
+  allowedCommands?: string[];
+  tasks: Array<
+    Omit<GoalSpec["tasks"][number], "grants"> & {
+      grants?: CapabilityGrantSet;
+      allowedPaths?: string[];
+    }
+  >;
 }
 
 export interface GoalRecord {
@@ -260,14 +272,6 @@ const SUPPORTED_AGENT_TOOLS = new Set([
   "write",
   "bash",
 ]);
-const SAFE_BASH_RULES: AgentPermissionRule[] = [
-  { resource: "*", effect: "deny" },
-  ...SAFE_READ_ONLY_COMMAND_PREFIXES.map((resource) => ({
-    resource: `${resource}*`,
-    effect: "allow" as const,
-  })),
-];
-
 function readOnlyPermissions(): AgentPermissions {
   return {
     read: [{ resource: "*", effect: "allow" }],
@@ -276,7 +280,7 @@ function readOnlyPermissions(): AgentPermissions {
     ls: [{ resource: "*", effect: "allow" }],
     edit: [{ resource: "*", effect: "deny" }],
     write: [{ resource: "*", effect: "deny" }],
-    bash: structuredClone(SAFE_BASH_RULES),
+    bash: [{ resource: "*", effect: "deny" }],
   };
 }
 
@@ -531,7 +535,7 @@ export class GoalStore {
     return { goals, stateDirectory };
   }
 
-  acceptSpec(spec: Omit<GoalSpec, "revision">): GoalRecord {
+  acceptSpec(spec: GoalSpecInput): GoalRecord {
     const record = this.requireActive();
     if (record.stage !== "preparing" && record.stage !== "awaiting_approval") {
       throw new Error(`Cannot submit a Goal spec while goal is ${record.stage}`);
@@ -551,9 +555,7 @@ export class GoalStore {
       description: task.description,
       profile: task.profile ?? "worker",
       dependsOn: normalizeStrings(task.dependsOn ?? []),
-      allowedPaths: normalizeStrings(
-        task.allowedPaths ?? normalized.allowedPaths,
-      ),
+      grants: structuredClone(task.grants ?? normalized.grants),
       acceptanceCriteria: normalizeStrings(
         task.acceptanceCriteria ?? normalized.acceptanceCriteria,
       ),
@@ -574,9 +576,7 @@ export class GoalStore {
     }
     record.lease = {
       specRevision: record.spec.revision,
-      allowedTools: record.spec.allowedTools,
-      allowedPaths: record.spec.allowedPaths,
-      allowedCommands: record.spec.allowedCommands,
+      grants: structuredClone(record.spec.grants),
       approvedAt: this.now(),
     };
     record.stage = "executing";
@@ -641,39 +641,6 @@ export class GoalStore {
     }
     task.status = status;
     task.result = result ? structuredClone(result) : task.result;
-    record.revision += 1;
-    record.updatedAt = this.now();
-    this.persist();
-    return this.current() as GoalRecord;
-  }
-
-  extendLease(
-    tool: string,
-    options: { path?: string; command?: string } = {},
-  ): GoalRecord {
-    const record = this.requireActive();
-    if (!record.lease || !record.spec) {
-      throw new Error("Goal has no active capability lease");
-    }
-    if (record.lease.specRevision !== record.spec.revision) {
-      throw new Error("Goal capability lease is stale");
-    }
-    record.lease.allowedTools = normalizeStrings([
-      ...record.lease.allowedTools,
-      tool,
-    ]);
-    if (options.path) {
-      record.lease.allowedPaths = normalizeStrings([
-        ...record.lease.allowedPaths,
-        options.path,
-      ]);
-    }
-    if (options.command) {
-      record.lease.allowedCommands = normalizeStrings([
-        ...record.lease.allowedCommands,
-        options.command,
-      ]);
-    }
     record.revision += 1;
     record.updatedAt = this.now();
     this.persist();
@@ -748,9 +715,7 @@ export class GoalStore {
       capability: goal.lease
         ? {
             specRevision: goal.lease.specRevision,
-            tools: goal.lease.allowedTools,
-            paths: goal.lease.allowedPaths,
-            commands: goal.lease.allowedCommands,
+            grants: goal.lease.grants,
           }
         : undefined,
     };
@@ -776,7 +741,7 @@ export class GoalStore {
     ).map(normalizeRelativePattern);
     if (targetIds.size === 0 && findingPaths.length > 0) {
       for (const task of record.tasks) {
-        const taskPaths = task.allowedPaths
+        const taskPaths = fileGrantPaths(task.grants)
           .map(normalizeRelativePattern)
           .filter((path) => path !== "" && path !== ".");
         if (
@@ -834,10 +799,13 @@ export class GoalStore {
       dependsOn: record.tasks
         .filter((task) => task.status === "completed")
         .map((task) => task.id),
-      allowedPaths:
+      grants: legacyGrantSet(
+        ["read", "grep", "find", "ls", "edit", "write"],
         findingPaths.length > 0
           ? findingPaths
-          : (record.spec?.allowedPaths ?? ["."]),
+          : fileGrantPaths(record.spec?.grants ?? { matchers: [] }),
+        [],
+      ),
       acceptanceCriteria: review.findings.map(
         (finding) => finding.recommendation,
       ),
@@ -938,7 +906,50 @@ export function loadHarnessConfig(
     join(cwd, ".nabla", "agents"),
     diagnostics,
   );
-  return { ...projectConfig, diagnostics };
+  return restrictProjectPermissions(globalConfig, projectConfig, diagnostics);
+}
+
+function restrictProjectPermissions(
+  globalConfig: HarnessConfig,
+  projectConfig: HarnessConfig,
+  diagnostics: AgentConfigDiagnostic[],
+): HarnessConfig {
+  const profiles = Object.fromEntries(
+    Object.entries(projectConfig.profiles).map(([name, projectProfile]) => {
+      const parent = globalConfig.profiles[name];
+      if (!parent) {
+        diagnostics.push({
+          type: "warning",
+          message:
+            `Project profile ${name} has no user-managed parent and cannot expose tools`,
+          path: projectProfile.source,
+          profile: name,
+        });
+        return [name, { ...projectProfile, tools: [], permission: {}, disabled: true }];
+      }
+      const permission: AgentPermissions = {};
+      for (const tool of new Set([
+        ...Object.keys(parent.permission),
+        ...Object.keys(projectProfile.permission),
+      ])) {
+        permission[tool] = [
+          ...(parent.permission[tool] ?? []),
+          ...(projectProfile.permission[tool] ?? []).filter(
+            (rule) => rule.effect !== "allow",
+          ),
+        ];
+      }
+      return [
+        name,
+        {
+          ...projectProfile,
+          tools: projectProfile.tools.filter((tool) => parent.tools.includes(tool)),
+          permission,
+        },
+      ];
+    }),
+  );
+  return { ...projectConfig, profiles, diagnostics };
 }
 
 export function saveWorkspaceTrust(
@@ -1001,24 +1012,18 @@ export function agentPermissionEffect(
   tool: string,
   resource = "*",
 ): AgentPermissionEffect {
-  if (
-    tool === "bash" &&
-    resource !== "*" &&
-    usesSafeReadOnlyBashRules(profile.permission.bash) &&
-    !isSafeReadOnlyCommand(resource)
-  ) {
-    return "deny";
-  }
   const fallback = READ_ONLY_TOOL_NAMES.includes(
     tool as (typeof READ_ONLY_TOOL_NAMES)[number],
   )
     ? "allow"
     : "ask";
-  let effect: AgentPermissionEffect = fallback;
-  for (const rule of profile.permission[tool] ?? []) {
-    if (agentResourceMatches(rule.resource, resource)) effect = rule.effect;
-  }
-  return effect;
+  const effects = (profile.permission[tool] ?? [])
+    .filter((rule) => agentResourceMatches(rule.resource, resource))
+    .map((rule) => rule.effect);
+  if (effects.includes("deny")) return "deny";
+  if (effects.includes("ask")) return "ask";
+  if (effects.includes("allow")) return "allow";
+  return fallback;
 }
 
 export function agentPermissionSummary(profile: AgentProfile): string {
@@ -1031,6 +1036,10 @@ export function goalSpecFromToolParams(
   params: Record<string, unknown>,
   options: { fallbackSummary: string; sourcePlan?: PlanArtifactV2 },
 ): Omit<GoalSpec, "revision"> {
+  const grants = capabilityGrantSet(params.grants);
+  if (params.grants !== undefined && !grants) {
+    throw new Error("Goal grants must contain valid capability matchers");
+  }
   const sourcePlan = options.sourcePlan
     ? {
         id: options.sourcePlan.id,
@@ -1045,6 +1054,7 @@ export function goalSpecFromToolParams(
         ? params.summary
         : sourcePlan?.artifact.bodyMarkdown ?? options.fallbackSummary,
     acceptanceCriteria: stringArray(params.acceptanceCriteria),
+    grants,
     allowedTools: stringArray(params.allowedTools),
     allowedPaths: stringArray(params.allowedPaths),
     allowedCommands: stringArray(params.allowedCommands),
@@ -1053,7 +1063,7 @@ export function goalSpecFromToolParams(
   });
 }
 
-export function pathAllowedByLease(
+export function pathAllowedByGrant(
   cwd: string,
   path: string,
   allowedPaths: readonly string[],
@@ -1078,40 +1088,6 @@ export function pathAllowedByLease(
   });
 }
 
-export function commandAllowedByLease(
-  command: string,
-  allowedCommands: readonly string[],
-): boolean {
-  const normalized = command.trim().replace(/\s+/gu, " ");
-  if (
-    !normalized ||
-    isHighRiskCommand(normalized) ||
-    hasShellControlSyntax(command)
-  ) {
-    return false;
-  }
-  return allowedCommands.some((prefix) => {
-    const normalizedPrefix = prefix.trim().replace(/\s+/gu, " ");
-    return (
-      normalized === normalizedPrefix ||
-      normalized.startsWith(`${normalizedPrefix} `)
-    );
-  });
-}
-
-function usesSafeReadOnlyBashRules(
-  rules: readonly AgentPermissionRule[] | undefined,
-): boolean {
-  return (
-    rules?.length === SAFE_BASH_RULES.length &&
-    rules.every(
-      (rule, index) =>
-        rule.resource === SAFE_BASH_RULES[index]?.resource &&
-        rule.effect === SAFE_BASH_RULES[index]?.effect,
-    )
-  );
-}
-
 export function isCredentialPath(path: string): boolean {
   const normalized = path.replace(/\\/gu, "/").toLocaleLowerCase();
   return [
@@ -1125,16 +1101,29 @@ export function isCredentialPath(path: string): boolean {
 }
 
 function normalizeGoalSpec(
-  spec: Omit<GoalSpec, "revision">,
+  spec: GoalSpecInput,
 ): Omit<GoalSpec, "revision"> {
   const acceptanceCriteria = normalizeStrings(
     spec.acceptanceCriteria?.length
       ? spec.acceptanceCriteria
       : spec.sourcePlan?.artifact.testPlan ?? [],
   );
+  const allowedTools = normalizeStrings(
+    spec.allowedTools?.length
+      ? spec.allowedTools
+      : ["read", "grep", "find", "ls", "edit", "write", "bash"],
+  );
   const allowedPaths = normalizeStrings(
     spec.allowedPaths?.length ? spec.allowedPaths : ["."],
   );
+  const grants =
+    spec.grants && spec.grants.matchers.length > 0
+      ? normalizeGrantSet(spec.grants)
+      : legacyGrantSet(
+          allowedTools,
+          allowedPaths,
+          normalizeStrings(spec.allowedCommands ?? []),
+        );
   const summary = spec.summary.trim();
   if (!summary) throw new Error("Goal spec summary must not be empty");
   const tasks =
@@ -1145,7 +1134,14 @@ function normalizeGoalSpec(
           description: task.description.trim(),
           profile: task.profile?.trim() || "worker",
           dependsOn: normalizeStrings(task.dependsOn ?? []),
-          allowedPaths: normalizeStrings(task.allowedPaths ?? allowedPaths),
+          grants:
+            task.grants && task.grants.matchers.length > 0
+              ? normalizeGrantSet(task.grants)
+              : legacyGrantSet(
+                  allowedTools,
+                  normalizeStrings(task.allowedPaths ?? allowedPaths),
+                  normalizeStrings(spec.allowedCommands ?? []),
+                ),
           acceptanceCriteria: normalizeStrings(
             task.acceptanceCriteria ?? acceptanceCriteria,
           ),
@@ -1157,7 +1153,7 @@ function normalizeGoalSpec(
             description: spec.sourcePlan?.artifact.bodyMarkdown ?? summary,
             profile: "worker",
             dependsOn: [],
-            allowedPaths,
+            grants,
             acceptanceCriteria,
           },
         ];
@@ -1165,13 +1161,7 @@ function normalizeGoalSpec(
   return {
     summary,
     acceptanceCriteria,
-    allowedTools: normalizeStrings(
-      spec.allowedTools?.length
-        ? spec.allowedTools
-        : ["read", "grep", "find", "ls", "edit", "write", "bash"],
-    ),
-    allowedPaths,
-    allowedCommands: normalizeStrings(spec.allowedCommands ?? []),
+    grants,
     sourcePlan: spec.sourcePlan
       ? structuredClone(spec.sourcePlan)
       : undefined,
@@ -1696,6 +1686,91 @@ function normalizeStrings(values: readonly string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
+const ALL_FILE_OPERATIONS: FileOperation[] = [
+  "read",
+  "list",
+  "create",
+  "write",
+  "append",
+  "rename",
+  "delete",
+];
+
+function legacyGrantSet(
+  tools: readonly string[],
+  paths: readonly string[],
+  commands: readonly string[],
+): CapabilityGrantSet {
+  const operations = new Set<FileOperation>();
+  if (tools.some((tool) => ["read", "grep", "find"].includes(tool))) {
+    operations.add("read");
+  }
+  if (tools.includes("ls")) operations.add("list");
+  if (tools.includes("edit")) operations.add("write");
+  if (tools.includes("write")) {
+    operations.add("create");
+    operations.add("write");
+  }
+  const matchers: CapabilityMatcher[] = [];
+  for (const path of normalizeStrings(paths.length > 0 ? paths : ["."])) {
+    for (const operation of operations) {
+      matchers.push({ kind: "file", operation, path, recursive: true });
+    }
+  }
+  for (const tool of normalizeStrings(tools)) {
+    if (["read", "grep", "find", "ls", "edit", "write", "bash"].includes(tool)) {
+      continue;
+    }
+    matchers.push({ kind: "tool", tool });
+  }
+  for (const command of normalizeStrings(commands)) {
+    matchers.push({ kind: "shell_intent", command });
+  }
+  return { matchers };
+}
+
+function normalizeGrantSet(grants: CapabilityGrantSet): CapabilityGrantSet {
+  return { matchers: structuredClone(grants.matchers) };
+}
+
+function fileGrantPaths(grants: CapabilityGrantSet): string[] {
+  return normalizeStrings(
+    grants.matchers.flatMap((matcher) =>
+      matcher.kind === "file" ? [matcher.path] : []),
+  );
+}
+
+function capabilityGrantSet(value: unknown): CapabilityGrantSet | undefined {
+  if (!isRecord(value) || !Array.isArray(value.matchers)) return undefined;
+  const matchers = value.matchers.filter(isCapabilityMatcher);
+  return matchers.length === value.matchers.length ? { matchers } : undefined;
+}
+
+function isCapabilityMatcher(value: unknown): value is CapabilityMatcher {
+  if (!isRecord(value) || typeof value.kind !== "string") return false;
+  if (value.kind === "tool") return typeof value.tool === "string";
+  if (value.kind === "shell_intent") return typeof value.command === "string";
+  if (value.kind === "file") {
+    return (
+      ALL_FILE_OPERATIONS.includes(value.operation as FileOperation) &&
+      typeof value.path === "string"
+    );
+  }
+  if (value.kind === "exec") {
+    return typeof value.executable === "string" &&
+      (value.argv === undefined || Array.isArray(value.argv));
+  }
+  if (value.kind === "network") {
+    return (
+      (value.operation === "connect" || value.operation === "listen") &&
+      typeof value.host === "string"
+    );
+  }
+  return value.kind === "opaque_code" &&
+    typeof value.runtime === "string" &&
+    typeof value.digest === "string";
+}
+
 function normalizeRelativePattern(value: string): string {
   return value
     .trim()
@@ -1705,7 +1780,7 @@ function normalizeRelativePattern(value: string): string {
     .replace(/\/+$/u, "");
 }
 
-function taskArray(value: unknown): GoalSpec["tasks"] {
+function taskArray(value: unknown): GoalSpecInput["tasks"] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item) => {
     if (
@@ -1715,6 +1790,10 @@ function taskArray(value: unknown): GoalSpec["tasks"] {
     ) {
       return [];
     }
+    const grants = capabilityGrantSet(item.grants);
+    if (item.grants !== undefined && !grants) {
+      throw new Error("Goal task grants must contain valid capability matchers");
+    }
     return [
       {
         id: typeof item.id === "string" ? item.id : "",
@@ -1722,6 +1801,7 @@ function taskArray(value: unknown): GoalSpec["tasks"] {
         description: item.description,
         profile: typeof item.profile === "string" ? item.profile : undefined,
         dependsOn: stringArray(item.dependsOn),
+        grants,
         allowedPaths: stringArray(item.allowedPaths),
         acceptanceCriteria: stringArray(item.acceptanceCriteria),
       },
@@ -1744,6 +1824,13 @@ function isGoalRecord(value: unknown): value is GoalRecord {
     typeof value.stage === "string" &&
     typeof value.revision === "number" &&
     Array.isArray(value.tasks) &&
+    value.tasks.every(
+      (task) => isRecord(task) && capabilityGrantSet(task.grants) !== undefined,
+    ) &&
+    (value.spec === undefined ||
+      (isRecord(value.spec) && capabilityGrantSet(value.spec.grants) !== undefined)) &&
+    (value.lease === undefined ||
+      (isRecord(value.lease) && capabilityGrantSet(value.lease.grants) !== undefined)) &&
     Array.isArray(value.reviews) &&
     (value.verification === undefined || Array.isArray(value.verification))
   );
@@ -1753,7 +1840,7 @@ function normalizeStoredGoal(value: unknown): GoalRecord | undefined {
   if (isGoalRecord(value)) return structuredClone(value);
   if (
     !isRecord(value) ||
-    value.schemaVersion !== 1 ||
+    (value.schemaVersion !== 1 && value.schemaVersion !== 2) ||
     typeof value.id !== "string" ||
     typeof value.workspace !== "string" ||
     typeof value.sessionId !== "string" ||
@@ -1769,26 +1856,61 @@ function normalizeStoredGoal(value: unknown): GoalRecord | undefined {
   const legacyDetails = isRecord(value.planDetails)
     ? value.planDetails
     : undefined;
+  const storedSpec = isRecord(value.spec) ? value.spec : undefined;
+  const specValue = storedSpec ?? legacyDetails;
   const acceptanceCriteria = stringArray(value.acceptanceCriteria);
-  const legacyTasks = structuredClone(value.tasks) as GoalTask[];
+  const legacyTasks = value.tasks.flatMap((task, index): GoalTask[] => {
+    if (!isRecord(task)) return [];
+    const taskPaths = stringArray(task.allowedPaths);
+    return [{
+      id: typeof task.id === "string" ? task.id : `task-${index + 1}`,
+      title: typeof task.title === "string" ? task.title : `Task ${index + 1}`,
+      description: typeof task.description === "string" ? task.description : "",
+      profile: typeof task.profile === "string" ? task.profile : "worker",
+      dependsOn: stringArray(task.dependsOn),
+      grants:
+        capabilityGrantSet(task.grants) ??
+        legacyGrantSet(
+          stringArray(specValue?.allowedTools),
+          taskPaths.length > 0 ? taskPaths : stringArray(specValue?.allowedPaths),
+          stringArray(specValue?.allowedCommands),
+        ),
+      acceptanceCriteria: stringArray(task.acceptanceCriteria),
+      status: typeof task.status === "string"
+        ? task.status as TaskStatus
+        : "pending",
+      ...(isRecord(task.result)
+        ? { result: structuredClone(task.result) as unknown as TaskResult }
+        : {}),
+    }];
+  });
   const spec =
-    legacyPlan || legacyDetails
+    legacyPlan || specValue
       ? normalizeGoalSpec({
           summary:
-            typeof legacyPlan?.bodyMarkdown === "string"
+            typeof specValue?.summary === "string"
+              ? specValue.summary
+              : typeof legacyPlan?.bodyMarkdown === "string"
               ? legacyPlan.bodyMarkdown
               : value.objective,
-          acceptanceCriteria,
-          allowedTools: stringArray(legacyDetails?.allowedTools),
-          allowedPaths: stringArray(legacyDetails?.allowedPaths),
-          allowedCommands: stringArray(legacyDetails?.allowedCommands),
+          acceptanceCriteria:
+            stringArray(specValue?.acceptanceCriteria).length > 0
+              ? stringArray(specValue?.acceptanceCriteria)
+              : acceptanceCriteria,
+          grants: capabilityGrantSet(specValue?.grants),
+          allowedTools: stringArray(specValue?.allowedTools),
+          allowedPaths: stringArray(specValue?.allowedPaths),
+          allowedCommands: stringArray(specValue?.allowedCommands),
+          ...(isRecord(specValue?.sourcePlan)
+            ? { sourcePlan: structuredClone(specValue.sourcePlan) as unknown as GoalSourcePlan }
+            : {}),
           tasks: legacyTasks.map((task) => ({
             id: task.id,
             title: task.title,
             description: task.description,
             profile: task.profile,
             dependsOn: task.dependsOn,
-            allowedPaths: task.allowedPaths,
+            grants: task.grants,
             acceptanceCriteria: task.acceptanceCriteria,
           })),
         })
@@ -1815,10 +1937,17 @@ function normalizeStoredGoal(value: unknown): GoalRecord | undefined {
     ...(legacyLease
       ? {
           lease: {
-            specRevision: 1,
-            allowedTools: stringArray(legacyLease.allowedTools),
-            allowedPaths: stringArray(legacyLease.allowedPaths),
-            allowedCommands: stringArray(legacyLease.allowedCommands),
+            specRevision:
+              typeof legacyLease.specRevision === "number"
+                ? legacyLease.specRevision
+                : 1,
+            grants:
+              capabilityGrantSet(legacyLease.grants) ??
+              legacyGrantSet(
+                stringArray(legacyLease.allowedTools),
+                stringArray(legacyLease.allowedPaths),
+                stringArray(legacyLease.allowedCommands),
+              ),
             approvedAt:
               typeof legacyLease.approvedAt === "string"
                 ? legacyLease.approvedAt
