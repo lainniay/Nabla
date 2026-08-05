@@ -489,42 +489,6 @@ test("checkpoint is stable, model-only, structured, and avoids a duplicate plan 
   assert.doesNotMatch(deduplicatedText, /bodyMarkdown/);
 });
 
-test("checkpoint carries only the stable host goal view after compaction", () => {
-  const manager = new ContextBudgetManager({ policy: policy(), now: () => 42 });
-  const messages = [
-    {
-      role: "compactionSummary",
-      summary: "Earlier work.",
-      tokensBefore: 100_000,
-      timestamp: 1,
-    },
-  ] as Messages;
-  const goal = {
-    id: "goal-1",
-    revision: 7,
-    objective: "Implement the harness",
-    stage: "executing",
-    currentTasks: [{ id: "host", status: "running" }],
-  };
-
-  const result = manager.filter(messages, undefined, {
-    planMode: false,
-    goal,
-  });
-  const checkpoint = result.messages[1] as unknown as {
-    content: string;
-    display: boolean;
-    details: Record<string, unknown>;
-  };
-  assert.equal(checkpoint.display, false);
-  assert.match(checkpoint.content, /"goal-1"/u);
-  assert.match(checkpoint.content, /"currentTasks"/u);
-  assert.doesNotMatch(checkpoint.content, /statePath|reviews|fullOutput/u);
-  assert.equal(checkpoint.details.epoch, 0);
-  assert.equal(checkpoint.details.goalId, "goal-1");
-  assert.equal(checkpoint.details.goalRevision, 7);
-});
-
 test("unknown messages fail open once and disabled pruning returns the original view", () => {
   const manager = new ContextBudgetManager({ policy: policy() });
   const unknown = [{ role: "futurePiMessage", payload: "new" }] as unknown as Messages;

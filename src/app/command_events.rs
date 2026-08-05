@@ -153,44 +153,6 @@ impl App {
                 }
                 Err(error) => self.set_error(format!("Unable to update permissions: {error}")),
             },
-            CommandEvent::GoalStateFinished(result) | CommandEvent::GoalActionFinished(result) => {
-                match result {
-                    Ok(snapshot) => {
-                        self.receive_goal(*snapshot, true);
-                    }
-                    Err(error) => self.set_error(format!("Unable to update Goal: {error}")),
-                }
-            }
-            CommandEvent::GoalStarted(result) => match result {
-                Ok(snapshot) => {
-                    self.receive_goal(*snapshot, true);
-                }
-                Err(error) => self.set_error(format!("Unable to start Goal: {error}")),
-            },
-            CommandEvent::GoalApproved(result) => match result {
-                Ok(snapshot) => {
-                    if self.receive_goal(*snapshot, true)
-                        && self
-                            .state
-                            .goal
-                            .as_ref()
-                            .and_then(|snapshot| snapshot.goal.as_ref())
-                            .is_some_and(|goal| goal.stage == "executing")
-                    {
-                        self.state.goal_approval = None;
-                    }
-                }
-                Err(error) => {
-                    if let Some(approval) = self.state.goal_approval.as_mut() {
-                        approval.submitting = false;
-                    }
-                    self.set_error(format!("Unable to approve Goal: {error}"));
-                }
-            },
-            CommandEvent::GoalsFinished(result) => match result {
-                Ok(snapshot) => self.state.transcript.push(TranscriptItem::Goals(*snapshot)),
-                Err(error) => self.set_error(format!("Unable to list Goals: {error}")),
-            },
             CommandEvent::ModelsFinished(result) => match result {
                 Ok(data) => {
                     if !self.state.selection_panel.as_ref().is_some_and(|panel| {

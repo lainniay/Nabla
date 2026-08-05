@@ -23,7 +23,6 @@ export interface ApprovalRequest {
   agentId?: string;
   agentProfile?: string;
   model?: string;
-  goalId?: string;
   reason?: string;
 }
 

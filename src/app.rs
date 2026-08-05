@@ -24,15 +24,15 @@ pub use crate::state::{
     ApprovalState, AssistantMessage, AuthChoice, AuthFlowState, AuthPromptKind, AuthPromptOption,
     AuthPromptState, AuthState, CompactionRecord, ConnectionState, ContextCategory,
     ContextCategoryEstimate, ContextConsumer, ContextPolicy, ContextPruneEstimate, ContextSnapshot,
-    ContextUsageState, EditorState, GoalApprovalState, GoalSnapshot, IntegrationPromptState,
-    PermissionManagerState, PlanArtifact, PlanExecutionTarget, PlanQuestion, PlanReviewState,
-    PlanStatus, PruneReason, QuestionAnswer, QuestionFlowState, ResourceSnapshot, RunState,
-    SelectionPanelAction, SelectionPanelKind, SelectionPanelOption, SelectionPanelState,
-    SessionBrowserSnapshot, SessionBrowserState, SessionHistoryItem, SessionScope, SessionSortMode,
-    SessionSummary, SubagentTranscript, THINKING_LEVELS, ToolExecution, ToolStatus, TranscriptItem,
-    TranscriptViewMode, TranscriptViewerState, TreeBrowserState, TreeFilterMode, TreeItem,
-    TreePhase, TreeSnapshot, TurnSeparator, UiModalKind, UserMessage, UserMessageStatus,
-    WorktreeIntegrationSnapshot, matching_auth_choice_indices, parse_tool_diff,
+    ContextUsageState, EditorState, IntegrationPromptState, PermissionManagerState, PlanArtifact,
+    PlanExecutionTarget, PlanQuestion, PlanReviewState, PlanStatus, PruneReason, QuestionAnswer,
+    QuestionFlowState, ResourceSnapshot, RunState, SelectionPanelAction, SelectionPanelKind,
+    SelectionPanelOption, SelectionPanelState, SessionBrowserSnapshot, SessionBrowserState,
+    SessionHistoryItem, SessionScope, SessionSortMode, SessionSummary, SubagentTranscript,
+    THINKING_LEVELS, ToolExecution, ToolStatus, TranscriptItem, TranscriptViewMode,
+    TranscriptViewerState, TreeBrowserState, TreeFilterMode, TreeItem, TreePhase, TreeSnapshot,
+    TurnSeparator, UiModalKind, UserMessage, UserMessageStatus, WorktreeIntegrationSnapshot,
+    matching_auth_choice_indices, parse_tool_diff,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,14 +63,6 @@ pub enum AppEffect {
     GetApprovalRules,
     RevokeApprovalRule(String),
     ClearApprovalRules,
-    GetGoal,
-    GetGoals,
-    StartGoal {
-        objective: Option<String>,
-        from_plan: bool,
-    },
-    GoalAction(String),
-    ApproveGoal,
     ListModels,
     SetModel {
         provider: String,
@@ -200,11 +192,6 @@ enum LocalCommandCompletion {
     Resources,
     ResourceReload,
     WorkspaceTrust,
-    Goal,
-    Goals,
-    GoalStart,
-    GoalAction,
-    GoalApproval,
     ModelSet,
     ThinkingSet,
     Agents,
@@ -226,11 +213,6 @@ impl LocalCommandCompletion {
                     Self::WorkspaceTrust,
                     CommandEvent::WorkspaceTrustFinished(_)
                 )
-                | (Self::Goal, CommandEvent::GoalStateFinished(_))
-                | (Self::Goals, CommandEvent::GoalsFinished(_))
-                | (Self::GoalStart, CommandEvent::GoalStarted(_))
-                | (Self::GoalAction, CommandEvent::GoalActionFinished(_))
-                | (Self::GoalApproval, CommandEvent::GoalApproved(_))
                 | (Self::ModelSet, CommandEvent::ModelSetFinished(_))
                 | (Self::ThinkingSet, CommandEvent::ThinkingSetFinished(_))
                 | (Self::Agents, CommandEvent::AgentsFinished(_))
@@ -270,7 +252,6 @@ impl App {
         self.state.plan_mode_active = bootstrap.plan_mode.active;
         self.state.plan = bootstrap.plan.artifact;
         self.state.resources = bootstrap.resources;
-        self.state.goal = Some(bootstrap.goal);
         self.state.agents = bootstrap.agents;
         self.state.context = bootstrap.context;
         for pending in bootstrap.pending_integrations {

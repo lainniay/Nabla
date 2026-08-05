@@ -62,7 +62,6 @@ mod tests {
             agent_id: None,
             agent_profile: None,
             model: None,
-            goal_id: None,
             reason: None,
             risk: Some("credential".to_owned()),
             selected: 0,

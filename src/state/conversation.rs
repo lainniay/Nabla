@@ -28,7 +28,6 @@ pub enum UiModalKind {
     Approval,
     Permissions,
     Integration,
-    GoalApproval,
     PlanReview,
 }
 

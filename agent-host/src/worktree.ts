@@ -40,8 +40,6 @@ export interface AgentIsolationPolicy {
 export interface WorktreeRecoveryState {
   profile: string;
   task: string;
-  taskId?: string;
-  goalId?: string;
   direct: boolean;
   planReadOnly: boolean;
   model: string;

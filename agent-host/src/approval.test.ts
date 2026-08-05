@@ -78,7 +78,7 @@ test("approval queue fails closed on abort, disconnect, and stale replies", asyn
   assert.equal(queue.reply("approval-missing", "allow_once"), false);
 });
 
-test("approval queue preserves agent and Goal metadata for a scoped decision", async () => {
+test("approval queue preserves agent metadata for a scoped decision", async () => {
   const queue = new ApprovalQueue();
   let event: Record<string, unknown> | undefined;
   const result = queue.request(
@@ -89,7 +89,6 @@ test("approval queue preserves agent and Goal metadata for a scoped decision", a
       agentId: "agent-1",
       agentProfile: "verifier",
       model: "provider/model",
-      goalId: "goal-1",
       reason: "Command is outside the current lease",
       risk: "normal",
       availableDecisions: ["allow_once", "allow_session", "deny"],
@@ -101,7 +100,6 @@ test("approval queue preserves agent and Goal metadata for a scoped decision", a
   );
   await Promise.resolve();
   assert.equal(event?.agentProfile, "verifier");
-  assert.equal(event?.goalId, "goal-1");
   assert.equal(queue.reply(String(event?.requestId), "allow_session"), true);
   assert.equal(await result, "allow_session");
 });

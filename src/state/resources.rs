@@ -11,7 +11,6 @@ pub struct ApprovalState {
     pub agent_id: Option<String>,
     pub agent_profile: Option<String>,
     pub model: Option<String>,
-    pub goal_id: Option<String>,
     pub reason: Option<String>,
     pub risk: Option<String>,
     pub summary: String,

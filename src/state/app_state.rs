@@ -23,14 +23,12 @@ pub struct AppState {
     pub question: Option<QuestionFlowState>,
     pub plan: Option<PlanArtifact>,
     pub plan_review: Option<PlanReviewState>,
-    pub goal_approval: Option<GoalApprovalState>,
     pub session_browser: Option<SessionBrowserState>,
     pub tree_browser: Option<TreeBrowserState>,
     pub transcript_viewer: Option<TranscriptViewerState>,
     pub transcript_view_mode: TranscriptViewMode,
     pub context: ContextSnapshot,
     pub resources: ResourceSnapshot,
-    pub goal: Option<GoalSnapshot>,
     pub agents: AgentsSnapshot,
     pub selection_panel: Option<SelectionPanelState>,
     pub agent_picker: Option<AgentPickerState>,
@@ -79,14 +77,12 @@ impl AppState {
             question: None,
             plan: None,
             plan_review: None,
-            goal_approval: None,
             session_browser: None,
             tree_browser: None,
             transcript_viewer: None,
             transcript_view_mode: TranscriptViewMode::Normal,
             context: ContextSnapshot::default(),
             resources: ResourceSnapshot::default(),
-            goal: None,
             agents: AgentsSnapshot::default(),
             selection_panel: None,
             agent_picker: None,
@@ -154,8 +150,6 @@ impl AppState {
             Some(UiModalKind::Permissions)
         } else if self.integration_prompt.is_some() {
             Some(UiModalKind::Integration)
-        } else if self.goal_approval.is_some() {
-            Some(UiModalKind::GoalApproval)
         } else if self.plan_review.is_some() {
             Some(UiModalKind::PlanReview)
         } else {

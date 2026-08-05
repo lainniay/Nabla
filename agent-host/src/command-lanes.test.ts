@@ -35,10 +35,10 @@ test("command lanes serialize one domain while allowing unrelated queries", asyn
 
 test("command lane continues after a failed mutation", async () => {
   const lanes = new CommandLanes();
-  const first = lanes.run("goal", async () => {
+  const first = lanes.run("mutation", async () => {
     throw new Error("failed");
   });
-  const second = lanes.run("goal", async () => "continued");
+  const second = lanes.run("mutation", async () => "continued");
   await assert.rejects(first, /failed/u);
   assert.equal(await second, "continued");
 });

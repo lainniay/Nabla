@@ -29,6 +29,7 @@ pub enum ComponentPhase {
 
 type RenderCacheKey = (u16, u64, u64);
 type RenderCache = Arc<Mutex<HashMap<RenderCacheKey, Vec<VisualRow>>>>;
+const RENDER_CACHE_MAX_ENTRIES: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct TranscriptBlock {
@@ -134,10 +135,14 @@ impl TranscriptBlock {
         if self.trailing_blank {
             rows.push(VisualRow::blank(self.id.clone()));
         }
-        self.render_cache
+        let mut cache = self
+            .render_cache
             .lock()
-            .expect("transcript render cache poisoned")
-            .insert(cache_key, rows.clone());
+            .expect("transcript render cache poisoned");
+        if cache.len() >= RENDER_CACHE_MAX_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(cache_key, rows.clone());
         rows
     }
 }
@@ -931,30 +936,6 @@ fn render_item(id: &str, item: &TranscriptItem, width: u16, animation_frame: u8)
                 snapshot.extensions.len(),
                 snapshot.trusted
             ),
-            CellStyle::foreground(Color::Cyan),
-        ),
-        TranscriptItem::Goal(snapshot) => {
-            let body = snapshot.goal.as_ref().map_or_else(
-                || "No active Goal".to_owned(),
-                |goal| {
-                    format!(
-                        "{} [{}]\n{} tasks",
-                        goal.objective,
-                        goal.stage,
-                        goal.tasks.len()
-                    )
-                },
-            );
-            ("Goal", body, CellStyle::foreground(Color::Cyan))
-        }
-        TranscriptItem::Goals(snapshot) => (
-            "Goals",
-            snapshot
-                .goals
-                .iter()
-                .map(|goal| format!("{} [{}]", goal.objective, goal.stage))
-                .collect::<Vec<_>>()
-                .join("\n"),
             CellStyle::foreground(Color::Cyan),
         ),
         TranscriptItem::Agents(snapshot) => (
@@ -2202,6 +2183,27 @@ mod tests {
         assert_eq!(block.render_cache.lock().unwrap().len(), 1);
         block.render(20);
         assert_eq!(block.render_cache.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn render_cache_is_bounded_across_terminal_widths() {
+        let mut state = state();
+        state
+            .transcript
+            .push(TranscriptItem::Assistant(AssistantMessage {
+                id: 13,
+                text: "bounded cache".to_owned(),
+                text_revision: 1,
+                complete: true,
+                ..AssistantMessage::default()
+            }));
+        let mut store = TranscriptStore::default();
+        store.sync(&state);
+        let block = store.uncommitted_components().next().unwrap();
+        for width in 1..=70 {
+            block.render(width);
+        }
+        assert!(block.render_cache.lock().unwrap().len() <= RENDER_CACHE_MAX_ENTRIES);
     }
 
     #[test]

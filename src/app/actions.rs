@@ -70,8 +70,6 @@ impl App {
                 | LocalCommand::Reload
                 | LocalCommand::Trust(_)
                 | LocalCommand::Permissions(_)
-                | LocalCommand::Goal(_)
-                | LocalCommand::Goals
                 | LocalCommand::Model(_)
                 | LocalCommand::Thinking(_)
                 | LocalCommand::Agents(_)
@@ -240,22 +238,6 @@ impl App {
                     Vec::new()
                 }
             },
-            LocalCommand::Goal(argument) => match argument.as_deref() {
-                None => vec![AppEffect::GetGoal],
-                Some("pause" | "resume" | "cancel") => {
-                    vec![AppEffect::GoalAction(argument.expect("matched argument"))]
-                }
-                Some("approve") => vec![AppEffect::ApproveGoal],
-                Some("from-plan") => vec![AppEffect::StartGoal {
-                    objective: None,
-                    from_plan: true,
-                }],
-                Some(objective) => vec![AppEffect::StartGoal {
-                    objective: Some(objective.to_owned()),
-                    from_plan: false,
-                }],
-            },
-            LocalCommand::Goals => vec![AppEffect::GetGoals],
             LocalCommand::Model(argument) => {
                 let Some(reference) = argument else {
                     self.state.selection_panel = Some(SelectionPanelState::loading_models());
@@ -358,46 +340,6 @@ impl App {
         self.state
             .transcript
             .push(TranscriptItem::User(UserMessage { text, status }));
-    }
-
-    pub(super) fn receive_goal(&mut self, snapshot: GoalSnapshot, show: bool) -> bool {
-        if !self.snapshot_scope_matches(snapshot.scope_id.as_deref()) {
-            return false;
-        }
-        let stale = self
-            .state
-            .goal
-            .as_ref()
-            .and_then(|current| current.goal.as_ref())
-            .zip(snapshot.goal.as_ref())
-            .is_some_and(|(current, incoming)| {
-                (current.id == incoming.id
-                    && (current.revision > incoming.revision
-                        || (current.revision == incoming.revision
-                            && current.updated_at > incoming.updated_at)))
-                    || (current.id != incoming.id && current.updated_at > incoming.updated_at)
-            });
-        if stale {
-            return false;
-        }
-        let previous_approval = self.state.goal_approval.take();
-        self.state.goal_approval = snapshot
-            .goal
-            .as_ref()
-            .is_some_and(|goal| goal.stage == "awaiting_approval")
-            .then(|| {
-                previous_approval.unwrap_or(GoalApprovalState {
-                    selected: 0,
-                    submitting: false,
-                })
-            });
-        self.state.goal = Some(snapshot.clone());
-        if show {
-            self.state
-                .transcript
-                .push(TranscriptItem::Goal(Box::new(snapshot)));
-        }
-        true
     }
 
     pub(super) fn receive_plan(&mut self, artifact: PlanArtifact, show_review: bool) {
@@ -534,11 +476,6 @@ fn local_command_completion(effect: &AppEffect) -> Option<LocalCommandCompletion
         AppEffect::GetApprovalRules
         | AppEffect::RevokeApprovalRule(_)
         | AppEffect::ClearApprovalRules => None,
-        AppEffect::GetGoal => Some(LocalCommandCompletion::Goal),
-        AppEffect::GetGoals => Some(LocalCommandCompletion::Goals),
-        AppEffect::StartGoal { .. } => Some(LocalCommandCompletion::GoalStart),
-        AppEffect::GoalAction(_) => Some(LocalCommandCompletion::GoalAction),
-        AppEffect::ApproveGoal => Some(LocalCommandCompletion::GoalApproval),
         AppEffect::ListModels => None,
         AppEffect::SetModel { .. } => Some(LocalCommandCompletion::ModelSet),
         AppEffect::SetThinking(_) => Some(LocalCommandCompletion::ThinkingSet),

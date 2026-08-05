@@ -35,24 +35,17 @@ import {
   type ContextSnapshot,
 } from "./context-manager.ts";
 import {
-  GoalStore,
   agentPermissionEffect,
   agentPermissionSummary,
   filterContextFilesByTrust,
-  goalSpecFromToolParams,
   isCredentialPath,
   loadHarnessConfig,
   modelReference,
-  pathAllowedByGrant,
   saveWorkspaceTrust,
   workspaceIsTrusted,
   type AgentProfile,
-  type GoalReview,
-  type ReviewFinding,
-  type GoalSpec,
   type HarnessConfig,
   type ResourceSnapshot,
-  type TaskResult,
 } from "./harness.ts";
 import {
   MUTATING_TOOL_NAMES,
@@ -111,28 +104,18 @@ import type { Authorization } from "./permissions/kernel.ts";
 import { ExecutionBroker } from "./permissions/execution/broker.ts";
 import { DirectRunner } from "./permissions/execution/direct-runner.ts";
 import type {
-  CapabilityGrantSet,
-  CapabilityMatcher,
   ExecutionProfile,
   PermissionIntent,
   PermissionRule,
   ToolContext,
 } from "./permissions/model.ts";
-import { matcherMatches } from "./permissions/evaluator.ts";
 import { mutatesManagedWorktree } from "./permissions/managed-worktree.ts";
 import { PolicyStore } from "./permissions/policy-store.ts";
 import { digestValue } from "./permissions/shell/digest.ts";
 import { resolveWorkspaceIdentity } from "./permissions/workspace-identity.ts";
-import {
-  parseSubagentOutput,
-  type SubagentOutputKind,
-} from "./protocol/subagent-output.ts";
+import { parseSubagentOutput } from "./protocol/subagent-output.ts";
 import { CommandLanes } from "./protocol/command-lanes.ts";
-import {
-  isJsonObject,
-  stringArray,
-  type JsonObject,
-} from "./protocol/validation.ts";
+import { isJsonObject, type JsonObject } from "./protocol/validation.ts";
 import type {
   ActiveAgentSnapshot,
   AgentsSnapshot,
@@ -175,7 +158,6 @@ const EXTERNAL_TOOL_EXECUTION_PROFILE: ExecutionProfile = {
 };
 const STANDARD_INSTRUCTIONS = [
   "Follow Pi's normal interactive agent behavior and the user's direct request.",
-  "Do not create or advance a structured Goal unless the user explicitly invokes /goal.",
   "Mutation tools remain subject to the host's fine-grained approval policy.",
 ].join(" ");
 const FILE_REFERENCE_INSTRUCTIONS =
@@ -201,9 +183,6 @@ interface ActiveFlow {
 interface SubagentOptions {
   task: string;
   profile: string;
-  taskId?: string;
-  goalId?: string;
-  outputKind?: SubagentOutputKind;
   parentSignal?: AbortSignal;
   direct?: boolean;
   preparedIsolation?: PreparedIsolation;
@@ -216,8 +195,6 @@ interface ActiveSubagent {
   id: string;
   profile: string;
   task: string;
-  taskId?: string;
-  goalId?: string;
   direct: boolean;
   planReadOnly: boolean;
   lifecycle:
@@ -322,7 +299,6 @@ class HostBridge {
   private readonly modelRuntime: ModelRuntime;
   private readonly planMode: PlanModeController;
   private readonly contextBudget: ContextBudgetManager;
-  private readonly goals: GoalStore;
   private readonly afterLogin: (providerId: string) => Promise<unknown>;
   private readonly sessionCatalogs = new Map<string, SessionCatalog>();
   private readonly subagents = new Map<string, ActiveSubagent>();
@@ -337,9 +313,6 @@ class HostBridge {
   private resourceRevision = 1;
   private agentsRevision = 0;
   private subagentSequence = 0;
-  private goalOperationGeneration = 0;
-  private goalPreparationRunning = false;
-  private goalAutomationRunning = false;
   private writeSubagentTail: Promise<unknown> = Promise.resolve();
   private replacementPlan?: PlanArtifactV2;
   private readonly worktreeRecoveryWarnings: string[] = [];
@@ -349,7 +322,6 @@ class HostBridge {
     id?: string;
     socket: Socket;
   }>();
-  private readonly capacityWaiters = new Set<() => void>();
   private connectionGeneration = 0;
 
   constructor(
@@ -358,7 +330,6 @@ class HostBridge {
     planMode: PlanModeController,
     plans: PlanStore,
     contextBudget: ContextBudgetManager,
-    goals: GoalStore,
     config: HarnessConfig,
     afterLogin: (providerId: string) => Promise<unknown>,
   ) {
@@ -367,7 +338,6 @@ class HostBridge {
     this.planMode = planMode;
     this.plans = plans;
     this.contextBudget = contextBudget;
-    this.goals = goals;
     this.config = config;
     this.afterLogin = afterLogin;
     this.permissionPolicies.setBuiltin(
@@ -482,7 +452,6 @@ class HostBridge {
           parameters: Type.Object({
             task: Type.String({ minLength: 1 }),
             profile: Type.Optional(Type.String()),
-            taskId: Type.Optional(Type.String()),
           }),
           execute: async (_toolCallId, params, signal) => {
             const profile =
@@ -491,8 +460,6 @@ class HostBridge {
             const result = await this.runSubagent({
               task: params.task,
               profile,
-              taskId: params.taskId,
-              goalId: params.taskId ? this.goals.active()?.id : undefined,
               parentSignal: signal,
             });
             return {
@@ -505,11 +472,6 @@ class HostBridge {
           this.contextBudget.onSessionStart(
             context.sessionManager.getSessionId(),
           );
-          const goalSnapshot = this.goals.attach(
-            context.cwd,
-            context.sessionManager.getSessionId(),
-          );
-          this.send({ type: "goal_state", snapshot: goalSnapshot });
           this.sendContextBudget(
             this.contextBudget.onModelResponse(context.getContextUsage()),
           );
@@ -590,7 +552,6 @@ class HostBridge {
             {
               planMode: this.planMode.current(),
               plan: this.plans.latest(),
-              goal: this.goals.goalView(),
             },
           );
           this.sendContextBudget(result.snapshot);
@@ -879,21 +840,6 @@ class HostBridge {
             );
           }
           break;
-        case "goal_state":
-          this.response(id, command, true, this.goalSnapshot());
-          break;
-        case "goals_state":
-          this.response(id, command, true, this.goals.list());
-          break;
-        case "goal_start":
-          this.startGoal(id, request);
-          break;
-        case "goal_action":
-          this.goalAction(id, request);
-          break;
-        case "goal_approve":
-          this.approveGoal(id);
-          break;
         case "queue_clear":
           this.clearQueue(id);
           break;
@@ -992,24 +938,6 @@ class HostBridge {
     return { ...snapshot, scopeId: this.currentScopeId() };
   }
 
-  private goalSnapshot(goal = this.goals.current()): ReturnType<GoalStore["snapshot"]> {
-    return {
-      ...this.goals.snapshot(),
-      scopeId: this.currentScopeId(),
-      goal: goal ?? null,
-    };
-  }
-
-  private hasMutableGoalTask(taskId: string, goalId?: string): boolean {
-    const goal = this.goals.active();
-    return (
-      goal !== undefined &&
-      goal.stage !== "blocked" &&
-      (!goalId || goal.id === goalId) &&
-      goal.tasks.some((task) => task.id === taskId)
-    );
-  }
-
   private reportHostWarning(message: string): void {
     if (!this.worktreeRecoveryWarnings.includes(message)) {
       this.worktreeRecoveryWarnings.push(message);
@@ -1086,7 +1014,6 @@ class HostBridge {
       },
       plan: { artifact: this.plans.latest() ?? null },
       resources: this.resourceSnapshot(),
-      goal: this.goalSnapshot(),
       agents: this.agentsSnapshot(session),
       context: this.contextSnapshot(),
       pendingIntegrations: [...this.completedSubagents.values()].map(
@@ -1158,174 +1085,6 @@ class HostBridge {
     this.sendPlanModeState();
     const { resources } = this.publishWorkspaceState(runtime.session);
     this.response(id, "workspace_trust", true, resources);
-  }
-
-  private sendGoalState(goal = this.goals.current()): void {
-    this.send({
-      type: "goal_state",
-      snapshot: this.goalSnapshot(goal),
-    });
-  }
-
-  private startGoal(id: string | undefined, request: JsonObject): void {
-    const constraints = stringArrayField(request, "constraints");
-    const fromPlan = request.fromPlan === true;
-    const sourcePlan = fromPlan ? this.plans.latest() : undefined;
-    if (fromPlan && !sourcePlan) {
-      throw new Error("No submitted Plan is available on the current branch");
-    }
-    if (sourcePlan?.status === "executing") {
-      throw new Error("Cannot create a Goal from a Plan that is executing");
-    }
-    const objective =
-      optionalStringField(request, "objective")?.trim() ||
-      sourcePlan?.title ||
-      "";
-    if (!objective) throw new Error("Goal objective must not be empty");
-    const goal = this.goals.start(objective, constraints, sourcePlan);
-    this.goalOperationGeneration += 1;
-    this.sendGoalState(goal);
-    this.response(id, "goal_start", true, this.goalSnapshot());
-    void this.prepareGoal(goal.id);
-  }
-
-  private goalAction(id: string | undefined, request: JsonObject): void {
-    const action = enumField(
-      request,
-      "action",
-      ["pause", "resume", "cancel"] as const,
-    );
-    let goal;
-    if (action === "pause") {
-      if (this.goals.current()?.stage === "paused") {
-        throw new Error("Goal is already paused");
-      }
-      this.goalOperationGeneration += 1;
-      this.cancelGoalSubagents(this.goals.current()?.id);
-      goal = this.goals.transition("paused");
-    } else if (action === "resume") {
-      this.goalOperationGeneration += 1;
-      goal = this.goals.resume();
-      if (goal.stage === "preparing") {
-        void this.prepareGoal(goal.id);
-      } else if (goal.stage === "awaiting_approval" && goal.spec) {
-        this.send({ type: "goal_spec_ready", snapshot: this.goalSnapshot() });
-      } else if (goal.stage === "executing") {
-        void this.runGoalExecution();
-      } else if (goal.stage === "verifying" || goal.stage === "reviewing") {
-        goal = this.goals.transition("executing");
-        void this.runGoalExecution();
-      }
-    } else {
-      this.goalOperationGeneration += 1;
-      this.cancelGoalSubagents(this.goals.current()?.id);
-      goal = this.goals.transition("cancelled");
-    }
-    this.sendGoalState(goal);
-    this.response(id, "goal_action", true, this.goalSnapshot());
-  }
-
-  private approveGoal(id: string | undefined): void {
-    const goal = this.goals.approveSpec();
-    this.sendGoalState(goal);
-    this.response(id, "goal_approve", true, this.goalSnapshot());
-    void this.runGoalExecution();
-  }
-
-  private async prepareGoal(goalId: string): Promise<void> {
-    if (this.goalPreparationRunning) return;
-    const generation = this.goalOperationGeneration;
-    this.goalPreparationRunning = true;
-    try {
-      const goal = this.goals.active();
-      if (!goal || goal.id !== goalId || goal.stage !== "preparing") return;
-      const result = await this.runSubagent({
-        profile: "planner",
-        goalId,
-        outputKind: "goal_spec",
-        task: [
-          `Prepare an executable Goal specification for: ${goal.objective}`,
-          goal.constraints.length > 0
-            ? `Constraints:\n${goal.constraints.map((item) => `- ${item}`).join("\n")}`
-            : "",
-          goal.sourcePlan
-            ? `Source Plan snapshot:\n${planExecutionPrompt(goal.sourcePlan.artifact)}`
-            : "",
-          "Inspect the workspace without modifying it.",
-          "Return summary, acceptanceCriteria, grants.matchers, and dependency-aware tasks with optional grants.matchers.",
-        ]
-          .filter(Boolean)
-          .join("\n\n"),
-      });
-      const current = this.goals.active();
-      if (!current || current.id !== goalId || current.stage !== "preparing") {
-        return;
-      }
-      const spec = goalSpecFromToolParams(result, {
-        fallbackSummary: current.objective,
-        sourcePlan: current.sourcePlan?.artifact,
-      });
-      this.validateGoalSpecProfiles(spec);
-      const prepared = this.goals.acceptSpec(spec);
-      this.sendGoalState(prepared);
-      this.send({ type: "goal_spec_ready", snapshot: this.goalSnapshot() });
-    } catch (error) {
-      if (generation === this.goalOperationGeneration) {
-        this.goalFailed(
-          `Goal preparation failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
-    } finally {
-      this.goalPreparationRunning = false;
-      const current = this.goals.active();
-      if (
-        generation !== this.goalOperationGeneration &&
-        current?.id === goalId &&
-        current.stage === "preparing"
-      ) {
-        void this.prepareGoal(goalId);
-      }
-    }
-  }
-
-  private validateGoalSpecProfiles(spec: Omit<GoalSpec, "revision">): void {
-    const requiredProfiles = [
-      ...spec.tasks.map((task) => task.profile ?? "worker"),
-      "verifier",
-      "reviewer",
-    ];
-    const unknown = requiredProfiles.filter(
-      (profile) => !this.config.profiles[profile],
-    );
-    if (unknown.length > 0) {
-      throw new Error(
-        `Goal uses unknown subagent profiles: ${[...new Set(unknown)].join(", ")}`,
-      );
-    }
-    const unavailable = [...new Set(requiredProfiles)].flatMap((name) => {
-      const profile = this.config.profiles[name];
-      if (!profile) return [];
-      if (profile.disabled) return [`${name}: disabled`];
-      const reason = this.profileUnavailableReason(profile);
-      return reason ? [`${name}: ${reason}`] : [];
-    });
-    if (unavailable.length > 0) {
-      throw new Error(
-        `Goal uses unavailable subagent profiles: ${unavailable.join("; ")}`,
-      );
-    }
-  }
-
-  private cancelGoalSubagents(goalId: string | undefined): void {
-    if (!goalId) return;
-    for (const subagent of this.subagents.values()) {
-      if (subagent.goalId !== goalId) continue;
-      subagent.controller.abort();
-      if (subagent.session) void subagent.session.abort();
-    }
-    this.notifySubagentCapacity();
   }
 
   private clearQueue(id: string | undefined): void {
@@ -1461,13 +1220,7 @@ class HostBridge {
             continue;
           }
         }
-        this.validateWorktreePaths(
-          record,
-          profile,
-          record.originWorkspace,
-          metadata.taskId,
-          metadata.goalId,
-        );
+        this.validateWorktreePaths(record, profile, record.originWorkspace);
       } catch (error) {
         let warning =
           `Preserved worktree ${record.id}, but recovery validation failed: ${
@@ -1506,8 +1259,6 @@ class HostBridge {
         id: record.agentId,
         profile: metadata.profile,
         task: metadata.task,
-        taskId: metadata.taskId,
-        goalId: metadata.goalId,
         direct: metadata.direct,
         planReadOnly: metadata.planReadOnly,
         lifecycle: "awaiting_integration",
@@ -1548,8 +1299,6 @@ class HostBridge {
       typeof value.planReadOnly === "boolean" &&
       typeof value.model === "string" &&
       typeof value.originSessionId === "string" &&
-      (value.taskId === undefined || typeof value.taskId === "string") &&
-      (value.goalId === undefined || typeof value.goalId === "string") &&
       (value.result === undefined || isJsonObject(value.result))
     );
   }
@@ -1665,32 +1414,6 @@ class HostBridge {
     } else if (action === "discard") {
       record = await this.worktrees.discard(record);
       this.completedSubagents.delete(agentId);
-      if (
-        completed.agent.taskId &&
-        this.hasMutableGoalTask(
-          completed.agent.taskId,
-          completed.agent.goalId,
-        )
-      ) {
-        const taskResult = normalizeTaskResult({
-          ...completed.result,
-          status: "blocked",
-          blockers: [
-            "The isolated worktree result was discarded before integration",
-          ],
-        });
-        this.goals.updateTask(
-          completed.agent.taskId,
-          "blocked",
-          taskResult,
-        );
-        this.sendGoalState(
-          this.goals.transition(
-            "blocked",
-            `Goal task ${completed.agent.taskId} was discarded`,
-          ),
-        );
-      }
     } else {
       const result = await this.worktrees.integrate(record);
       record = result.record;
@@ -1714,28 +1437,6 @@ class HostBridge {
       integrationWarning = result.error;
       completed.agent.integrationStatus = "applied";
       this.completedSubagents.delete(agentId);
-      if (
-        completed.agent.taskId &&
-        this.hasMutableGoalTask(
-          completed.agent.taskId,
-          completed.agent.goalId,
-        )
-      ) {
-        const taskResult = normalizeTaskResult(completed.result);
-        this.goals.updateTask(
-          completed.agent.taskId,
-          taskResult.status,
-          taskResult,
-        );
-        const goal = this.goals.current();
-        if (goal?.stage === "paused") {
-          const resumed = this.goals.resume();
-          this.sendGoalState(resumed);
-          if (resumed.stage === "executing") void this.runGoalExecution();
-        } else {
-          this.sendGoalState();
-        }
-      }
     }
     completed.record = record;
     completed.agent.integrationStatus = record.integrationStatus;
@@ -1762,13 +1463,6 @@ class HostBridge {
       throw new Error(`Subagent has no pending worktree result: ${agentId}`);
     }
     completed.agent.lifecycle = "resolving";
-    if (
-      completed.agent.goalId &&
-      this.goals.current()?.id === completed.agent.goalId &&
-      this.goals.current()?.stage === "paused"
-    ) {
-      this.sendGoalState(this.goals.resume());
-    }
     this.send({
       type: "subagent_integration",
       event: "resolving",
@@ -1804,9 +1498,6 @@ class HostBridge {
       return this.startSubagent({
         profile: completed.agent.profile,
         task: conflictContext,
-        taskId: completed.agent.taskId,
-        goalId: completed.agent.goalId,
-        outputKind: "task",
         direct: true,
         preparedIsolation: prepared.isolation,
         forceAutoIntegrate: true,
@@ -1835,23 +1526,6 @@ class HostBridge {
     if (pending.agent.lifecycle === "awaiting_integration") return;
     pending.agent.lifecycle = "awaiting_integration";
     pending.agent.integrationStatus = pending.record.integrationStatus;
-    if (
-      pending.agent.taskId &&
-      this.hasMutableGoalTask(pending.agent.taskId, pending.agent.goalId)
-    ) {
-      this.goals.updateTask(
-        pending.agent.taskId,
-        "awaiting_integration",
-        normalizeTaskResult(pending.result),
-      );
-      if (this.goals.current()?.stage !== "paused") {
-        this.goals.transition(
-          "paused",
-          `Conflict resolution failed for ${agentId}`,
-        );
-      }
-      this.sendGoalState();
-    }
     this.send({
       type: "subagent_integration",
       event: "conflicted",
@@ -1865,63 +1539,7 @@ class HostBridge {
     return this.startSubagent(options).completion;
   }
 
-  private canStartSubagent(profileName: string): boolean {
-    if (this.subagents.size >= this.config.maxParallel) return false;
-    const profile = this.config.profiles[profileName];
-    if (!profile || profile.disabled) return false;
-    const activeForProfile = [...this.subagents.values()].filter(
-      (agent) => agent.profile === profileName,
-    ).length;
-    return activeForProfile < profile.maxParallel;
-  }
-
-  private waitForSubagentCapacity(): Promise<void> {
-    return new Promise((resolvePromise) => {
-      this.capacityWaiters.add(resolvePromise);
-    });
-  }
-
-  private notifySubagentCapacity(): void {
-    const waiters = [...this.capacityWaiters];
-    this.capacityWaiters.clear();
-    for (const waiter of waiters) waiter();
-  }
-
   private startSubagent(options: SubagentOptions): SubagentHandle {
-    const goalTask = options.taskId
-      ? this.goals
-          .active()
-          ?.tasks.find((task) => task.id === options.taskId)
-      : undefined;
-    if (options.taskId && !goalTask) {
-      throw new Error(`Unknown active Goal task: ${options.taskId}`);
-    }
-    if (goalTask) {
-      const goal = this.goals.active();
-      const incomplete = goalTask.dependsOn.filter(
-        (dependency) =>
-          goal?.tasks.find((task) => task.id === dependency)?.status !==
-          "completed",
-      );
-      if (incomplete.length > 0) {
-        throw new Error(
-          `Task ${goalTask.id} is waiting for: ${incomplete.join(", ")}`,
-        );
-      }
-      const allowedStatuses = options.resolutionForAgentId
-        ? ["awaiting_integration"]
-        : ["pending", "interrupted"];
-      if (!allowedStatuses.includes(goalTask.status)) {
-        throw new Error(
-          `Task ${goalTask.id} cannot start while it is ${goalTask.status}`,
-        );
-      }
-      if (goalTask.profile !== options.profile) {
-        throw new Error(
-          `Task ${goalTask.id} requires profile ${goalTask.profile}, not ${options.profile}`,
-        );
-      }
-    }
     const profile = this.config.profiles[options.profile];
     if (!profile) {
       throw new Error(`Unknown agent profile: ${options.profile}`);
@@ -1945,10 +1563,7 @@ class HostBridge {
       );
     }
     const runtime = this.planMode.runtimeHandle();
-    const cwd =
-      options.goalId && this.goals.current()?.id === options.goalId
-        ? this.goals.current()!.workspace
-        : runtime.session.sessionManager.getCwd();
+    const cwd = runtime.session.sessionManager.getCwd();
     const modelRef = modelReference(profile);
     const model = modelRef
       ? this.modelRuntime.getModel(modelRef.provider, modelRef.id)
@@ -1974,10 +1589,8 @@ class HostBridge {
       id: agentId,
       profile: options.profile,
       task: options.task,
-      taskId: options.taskId,
-      goalId: options.goalId,
       direct: options.direct === true,
-      planReadOnly: this.planMode.current() && !options.goalId,
+      planReadOnly: this.planMode.current(),
       lifecycle: "queued",
       originSession: runtime.session,
       originSessionId: runtime.session.sessionId,
@@ -2056,7 +1669,6 @@ class HostBridge {
             error instanceof Error ? error.message : String(error),
           );
           this.subagents.delete(active.id);
-          this.notifySubagentCapacity();
           this.publishAgentsState();
         }
         throw error;
@@ -2150,13 +1762,6 @@ class HostBridge {
     const session = result.session;
     active.session = session;
     active.lifecycle = "running";
-    if (
-      options.taskId &&
-      this.hasMutableGoalTask(options.taskId, options.goalId)
-    ) {
-      this.goals.updateTask(options.taskId, "running");
-      this.sendGoalState();
-    }
     this.send({
       type: "subagent_state",
       event: "started",
@@ -2180,29 +1785,17 @@ class HostBridge {
     const abortChild = () => void session.abort();
     controller.signal.addEventListener("abort", abortChild, { once: true });
     try {
-      const candidateGoal = options.goalId ? this.goals.current() : undefined;
-      const goal =
-        candidateGoal?.id === options.goalId ? candidateGoal : undefined;
-      const outputInstruction =
-        options.outputKind === "goal_spec"
-          ? "Return one JSON object only: {summary, acceptanceCriteria, grants:{matchers:[...]}, tasks:[{id,title,description,profile,dependsOn,grants:{matchers:[...]},acceptanceCriteria}]}."
-          : options.outputKind === "review" || options.profile === "reviewer"
-            ? "Return one JSON object only: {verdict, summary, findings}. Each finding should identify affected taskIds and paths when known."
-            : "Return one JSON object only: {status, summary, evidence, changedPaths, verification, blockers}.";
       const prompt = [
         `You are Nabla subagent ${agentId} using profile ${options.profile}.`,
-        goal
-          ? `Goal: ${goal.objective}\nStage: ${goal.stage}\nSpec revision: ${goal.spec?.revision ?? "none"}`
-          : "",
         `Assigned task:\n${options.task}`,
-        outputInstruction,
+        "Return one JSON object only: {status, summary, evidence, changedPaths, verification, blockers}.",
       ]
         .filter(Boolean)
         .join("\n\n");
       await session.prompt(prompt);
       if (controller.signal.aborted) throw new Error("Subagent cancelled");
       const text = lastAssistantText(finalMessages);
-      const parsed = parseSubagentOutput(text, options.outputKind ?? "task");
+      const parsed = parseSubagentOutput(text);
       let completed: JsonObject = {
         ...parsed,
         agentId,
@@ -2220,8 +1813,6 @@ class HostBridge {
           captured.record,
           profile,
           originCwd,
-          options.taskId,
-          options.goalId,
         );
         if (options.resolutionForAgentId) {
           await this.worktrees.assertResolved(captured.record);
@@ -2248,9 +1839,7 @@ class HostBridge {
           !options.discardWorktreeChanges &&
           (!captured.hasChanges ||
             (options.forceAutoIntegrate === true ||
-              profile.isolation.integration === "auto" ||
-              (profile.isolation.integration === "source" &&
-                options.goalId !== undefined)));
+              profile.isolation.integration === "auto"));
         if (autoIntegrate) {
           const integration = await this.worktrees.integrate(
             captured.record,
@@ -2270,32 +1859,6 @@ class HostBridge {
               result: completed,
               record: active.worktree,
             });
-            if (
-              options.taskId &&
-              this.hasMutableGoalTask(options.taskId, options.goalId)
-            ) {
-              this.goals.updateTask(
-                options.taskId,
-                "awaiting_integration",
-                normalizeTaskResult(completed),
-              );
-              this.goals.transition(
-                "paused",
-                integration.status === "conflicted"
-                  ? `Goal task ${options.taskId} has an integration conflict`
-                  : `Goal task ${options.taskId} requires integration reconciliation`,
-              );
-              this.sendGoalState();
-              if (integration.status === "conflicted") {
-                setTimeout(() => {
-                  void this.resolvePendingSubagent(agentId)
-                    .then((handle) => handle.completion)
-                    .catch((error) => {
-                      this.restoreResolutionFailure(agentId, error);
-                    });
-                }, 0);
-              }
-            }
           } else if (integration.error) {
             this.reportHostWarning(integration.error);
           }
@@ -2353,21 +1916,6 @@ class HostBridge {
           });
         }
       }
-      if (
-        options.taskId &&
-        !integrationPending &&
-        this.hasMutableGoalTask(options.taskId, options.goalId)
-      ) {
-        const taskResult = normalizeTaskResult(completed);
-        this.goals.updateTask(options.taskId, taskResult.status, taskResult);
-        this.sendGoalState();
-        if (
-          options.resolutionForAgentId &&
-          this.goals.active()?.stage === "executing"
-        ) {
-          void this.runGoalExecution();
-        }
-      }
       if (active.direct) await this.injectDirectSubagentResult(active, completed);
       this.finishSubagent(
         active,
@@ -2423,20 +1971,6 @@ class HostBridge {
               }. The registered checkout was preserved for recovery.`,
             );
           }
-        }
-        if (
-          options.taskId &&
-          this.hasMutableGoalTask(options.taskId, options.goalId)
-        ) {
-          this.goals.updateTask(options.taskId, "blocked", {
-            status: "blocked",
-            summary: String(limited.summary),
-            evidence: [],
-            changedPaths: [],
-            verification: [],
-            blockers: [`maxTurns ${profile.maxTurns} reached`],
-          });
-          this.sendGoalState();
         }
         if (active.direct) {
           await this.injectDirectSubagentResult(active, limited);
@@ -2500,24 +2034,6 @@ class HostBridge {
           );
         }
       }
-      if (
-        options.taskId &&
-        this.hasMutableGoalTask(options.taskId, options.goalId)
-      ) {
-        if (controller.signal.aborted) {
-          this.goals.updateTask(options.taskId, "interrupted");
-        } else {
-          this.goals.updateTask(options.taskId, "failed", {
-            status: "failed",
-            summary: message,
-            evidence: [],
-            changedPaths: [],
-            verification: [],
-            blockers: [message],
-          });
-        }
-        this.sendGoalState();
-      }
       this.finishSubagent(
         active,
         controller.signal.aborted ? "cancelled" : "failed",
@@ -2529,7 +2045,6 @@ class HostBridge {
       unsubscribe();
       controller.signal.removeEventListener("abort", abortChild);
       this.subagents.delete(agentId);
-      this.notifySubagentCapacity();
       this.publishAgentsState();
     }
   }
@@ -2608,12 +2123,7 @@ class HostBridge {
             model,
             profileConfig: profile,
             planReadOnly: this.subagents.get(agentId)?.planReadOnly === true,
-            goalId: this.subagents.get(agentId)?.goalId,
             sessionId: context.sessionManager.getSessionId(),
-            grants: this.goals
-              .active()
-              ?.tasks.find((task) => task.id === this.subagents.get(agentId)?.taskId)
-              ?.grants,
           }),
         );
         pi.on("tool_result", (event) => {
@@ -2628,8 +2138,6 @@ class HostBridge {
       id: agent.id,
       profile: agent.profile,
       task: agent.task,
-      taskId: agent.taskId,
-      goalId: agent.goalId,
       lifecycle: agent.lifecycle,
       startedAt: agent.startedAt,
       turns: agent.turns,
@@ -2663,8 +2171,6 @@ class HostBridge {
     return {
       profile: agent.profile,
       task: agent.task,
-      taskId: agent.taskId,
-      goalId: agent.goalId,
       direct: agent.direct,
       planReadOnly: agent.planReadOnly,
       model: agent.model,
@@ -2677,14 +2183,7 @@ class HostBridge {
     record: WorktreeRecord,
     profile: AgentProfile,
     originCwd: string,
-    taskId?: string,
-    goalId?: string,
   ): void {
-    const goal =
-      goalId && this.goals.active()?.id === goalId
-        ? this.goals.active()
-        : undefined;
-    const task = goal?.tasks.find((candidate) => candidate.id === taskId);
     for (const path of record.changedPaths) {
       const absolute = resolve(record.repoRoot, path);
       if (isCredentialPath(absolute)) {
@@ -2697,18 +2196,6 @@ class HostBridge {
         workspaceRelative = workspaceRelativePath(originCwd, absolute);
       } catch {
         throw new Error(`Worktree result changes outside the workspace: ${path}`);
-      }
-      if (
-        task &&
-        !pathAllowedByGrant(
-          originCwd,
-          workspaceRelative,
-          filePathsFromGrantSet(task.grants),
-        )
-      ) {
-        throw new Error(
-          `Worktree result changes a path outside the Goal task lease: ${workspaceRelative}`,
-        );
       }
       const pathTools = ["edit", "write"].filter((tool) =>
         profile.tools.includes(tool),
@@ -2726,199 +2213,6 @@ class HostBridge {
         );
       }
     }
-  }
-
-  private async runGoalExecution(): Promise<void> {
-    if (this.goalAutomationRunning) return;
-    const generation = this.goalOperationGeneration;
-    const goal = this.goals.active();
-    if (!goal || goal.stage !== "executing") return;
-    this.goalAutomationRunning = true;
-    try {
-      while (true) {
-        const current = this.goals.active();
-        if (!current || current.stage !== "executing") return;
-        const failed = current.tasks.find(
-          (task) => task.status === "failed" || task.status === "blocked",
-        );
-        if (failed) {
-          throw new Error(`Goal task ${failed.id} is ${failed.status}`);
-        }
-        const runnable = current.tasks.filter(
-          (task) =>
-            (task.status === "pending" || task.status === "interrupted") &&
-            task.dependsOn.every(
-              (dependency) =>
-                current.tasks.find((candidate) => candidate.id === dependency)
-                  ?.status === "completed",
-            ),
-        );
-        if (runnable.length > 0) {
-          const handles: SubagentHandle[] = [];
-          for (const task of runnable) {
-            if (!this.canStartSubagent(task.profile)) continue;
-            handles.push(
-              this.startSubagent({
-                profile: task.profile,
-                taskId: task.id,
-                goalId: current.id,
-                outputKind: "task",
-                task: [
-                  `Execute Goal task ${task.id}: ${task.title}`,
-                  task.description,
-                  current.reviews.at(-1)?.verdict === "changes_required"
-                    ? `Repair findings:\n${current.reviews
-                        .at(-1)!
-                        .findings.map(
-                          (finding) =>
-                            `- [${finding.severity}] ${finding.title}: ${finding.evidence}\n  ${finding.recommendation}`,
-                        )
-                        .join("\n")}`
-                    : "",
-                  `Acceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`,
-                  `Allowed paths:\n${filePathsFromGrantSet(task.grants).map((item) => `- ${item}`).join("\n")}`,
-                ].join("\n\n"),
-              }),
-            );
-          }
-          if (handles.length === 0) {
-            await this.waitForSubagentCapacity();
-            continue;
-          }
-          let firstFailure: unknown;
-          await Promise.all(
-            handles.map(async (handle) => {
-              try {
-                await handle.completion;
-              } catch (error) {
-                if (firstFailure === undefined) {
-                  firstFailure = error;
-                  for (const sibling of handles) {
-                    if (sibling !== handle) sibling.agent.controller.abort();
-                  }
-                }
-                throw error;
-              }
-            }),
-          ).catch(() => undefined);
-          if (firstFailure !== undefined) {
-            await Promise.allSettled(handles.map((handle) => handle.completion));
-            throw firstFailure;
-          }
-          continue;
-        }
-        if (current.tasks.some((task) => task.status !== "completed")) {
-          throw new Error("Goal task graph has unresolved dependencies");
-        }
-        await this.verifyAndReviewGoal(current.id);
-        const reviewed = this.goals.active();
-        if (!reviewed || reviewed.stage !== "executing") return;
-      }
-    } catch (error) {
-      if (generation === this.goalOperationGeneration) {
-        this.goalFailed(
-          `Goal execution failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
-    } finally {
-      this.goalAutomationRunning = false;
-      const current = this.goals.active();
-      if (
-        generation !== this.goalOperationGeneration &&
-        current?.stage === "executing"
-      ) {
-        void this.runGoalExecution();
-      }
-    }
-  }
-
-  private async verifyAndReviewGoal(goalId: string): Promise<void> {
-    const active = this.goals.active();
-    if (!active || active.id !== goalId || active.stage !== "executing") return;
-    const verifying = this.goals.transition("verifying");
-    this.sendGoalState(verifying);
-    const verifierResult = await this.runSubagent({
-      profile: "verifier",
-      goalId,
-      outputKind: "task",
-      discardWorktreeChanges: true,
-      task: [
-        `Verify Goal: ${verifying.objective}`,
-        `Acceptance criteria:\n${verifying.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`,
-        "Inspect the implementation and run the relevant test/check commands. Do not modify source files.",
-      ].join("\n\n"),
-    });
-    const normalizedVerification = normalizeTaskResult(verifierResult);
-    this.goals.addVerification({
-      result: normalizedVerification,
-      agentId:
-        typeof verifierResult.agentId === "string"
-          ? verifierResult.agentId
-          : "verifier",
-      model:
-        typeof verifierResult.model === "string"
-          ? verifierResult.model
-          : undefined,
-    });
-    const failedCommand = normalizedVerification.verification.find(
-      (evidence) => evidence.exitCode !== 0,
-    );
-    if (normalizedVerification.status !== "completed" || failedCommand) {
-      throw new Error(
-        normalizedVerification.status !== "completed"
-          ? `Verifier reported ${normalizedVerification.status}: ${normalizedVerification.summary}`
-          : `Verifier command failed: ${failedCommand?.command}`,
-      );
-    }
-
-    const reviewing = this.goals.transition("reviewing");
-    this.sendGoalState(reviewing);
-    const reviewerResult = await this.runSubagent({
-      profile: "reviewer",
-      goalId,
-      outputKind: "review",
-      task: [
-        `Independently review Goal: ${reviewing.objective}`,
-        `Acceptance criteria:\n${reviewing.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`,
-        `Approved Goal specification:\n${reviewing.spec?.summary ?? ""}`,
-        `Task results:\n${JSON.stringify(reviewing.tasks.map((task) => ({ id: task.id, status: task.status, result: task.result })))}`,
-        `Verification evidence:\n${JSON.stringify(verifierResult)}`,
-        "Return verdict pass, changes_required, or blocked with artifact-backed findings. Do not edit files.",
-      ].join("\n\n"),
-    });
-    const review = normalizeGoalReview(reviewerResult);
-    const reviewed = this.goals.addReview({
-      ...review,
-      agentId:
-        typeof reviewerResult.agentId === "string"
-          ? reviewerResult.agentId
-          : "reviewer",
-      model:
-        typeof reviewerResult.model === "string"
-          ? reviewerResult.model
-          : undefined,
-    });
-    this.sendGoalState(reviewed);
-    this.send({
-      type: "goal_review",
-      goalId: reviewed.id,
-      review: reviewed.reviews.at(-1),
-    });
-  }
-
-  private goalFailed(message: string): void {
-    const goal = this.goals.active();
-    if (
-      !goal ||
-      ["paused", "blocked", "completed", "cancelled"].includes(goal.stage)
-    ) {
-      return;
-    }
-    const blocked = this.goals.transition("blocked", message);
-    this.sendGoalState(blocked);
-    this.send({ type: "goal_error", goalId: blocked.id, error: message });
   }
 
   private async listProviders(): Promise<unknown[]> {
@@ -3360,7 +2654,6 @@ class HostBridge {
       },
       cwd: manager.getCwd(),
       planMode: this.planMode.current(),
-      goal: this.goalSnapshot(),
       history: projectSessionHistory(manager.buildContextEntries()),
       plan: this.plans.latest() ?? null,
       context: this.contextSnapshot(),
@@ -3484,9 +2777,7 @@ class HostBridge {
       model?: string;
       profileConfig?: AgentProfile;
       planReadOnly?: boolean;
-      goalId?: string;
       sessionId?: string;
-      grants?: CapabilityGrantSet;
     } = {},
   ): Promise<ToolCallEventResult | undefined> {
     const toolName = event.toolName;
@@ -3588,26 +2879,6 @@ class HostBridge {
       }
     }
 
-    const candidateGoal = this.goals.active();
-    const activeGoal =
-      agent.goalId && candidateGoal?.id === agent.goalId
-        ? candidateGoal
-        : undefined;
-    const lease = activeGoal?.lease;
-    const leaseActive =
-      activeGoal !== undefined &&
-      ["executing", "verifying", "reviewing"].includes(activeGoal.stage);
-    const leaseCovers =
-      activeGoal &&
-      leaseActive &&
-      lease &&
-      activeGoal.spec &&
-      lease.specRevision === activeGoal.spec.revision &&
-      grantSetCoversIntent(intent, lease.grants, agent.grants, cwd);
-    if (activeGoal && !leaseCovers) {
-      addToolRule(`goal-${activeGoal.id}-boundary`, "deny", "managed");
-    }
-
     const authorization = await this.permissionKernel.authorize(
       permissionContext.requestId,
       intent,
@@ -3641,7 +2912,6 @@ class HostBridge {
             agentId: agent.agentId,
             agentProfile: agent.profile,
             model: agent.model,
-            goalId: activeGoal?.id,
             reason,
           },
           approvalSignal,
@@ -3775,50 +3045,6 @@ function permissionIntentForTool(
   }]);
 }
 
-function grantSetCoversIntent(
-  intent: PermissionIntent,
-  goalGrants: CapabilityGrantSet,
-  taskGrants: CapabilityGrantSet | undefined,
-  cwd: string,
-): boolean {
-  return intent.atoms.every(
-    (atom) =>
-      goalGrants.matchers.some((matcher) =>
-        matcherMatches(resolveGrantMatcher(matcher, cwd), atom, intent)) &&
-      (!taskGrants ||
-        taskGrants.matchers.some((matcher) =>
-          matcherMatches(resolveGrantMatcher(matcher, cwd), atom, intent))),
-  );
-}
-
-function resolveGrantMatcher(
-  matcher: CapabilityMatcher,
-  cwd: string,
-): CapabilityMatcher {
-  if (matcher.kind === "file") {
-    return {
-      ...matcher,
-      path: resolve(cwd, matcher.path),
-      ...(matcher.destination
-        ? { destination: resolve(cwd, matcher.destination) }
-        : {}),
-    };
-  }
-  if (matcher.kind === "exec" && matcher.cwd) {
-    return { ...matcher, cwd: resolve(cwd, matcher.cwd) };
-  }
-  return matcher;
-}
-
-function filePathsFromGrantSet(grants: CapabilityGrantSet): string[] {
-  return [
-    ...new Set(
-      grants.matchers.flatMap((matcher) =>
-        matcher.kind === "file" ? [matcher.path] : []),
-    ),
-  ];
-}
-
 function isStringRecord(value: unknown): value is Record<string, string> {
   return (
     isJsonObject(value) &&
@@ -3904,13 +3130,6 @@ function commandLane(request: JsonObject): string | undefined {
   ) {
     return "configuration";
   }
-  if (
-    command === "goal_start" ||
-    command === "goal_action" ||
-    command === "goal_approve"
-  ) {
-    return "goal";
-  }
   if (command === "subagent_integrate") {
     const agentId =
       typeof request.agentId === "string" ? request.agentId : "unknown";
@@ -3972,102 +3191,6 @@ function lastAssistantText(messages: unknown[]): string {
   throw new Error("Subagent returned no assistant text");
 }
 
-function normalizeTaskResult(value: JsonObject): TaskResult {
-  if (
-    value.status !== "completed" &&
-    value.status !== "failed" &&
-    value.status !== "blocked"
-  ) {
-    throw new Error(`Invalid task result status: ${String(value.status)}`);
-  }
-  const status = value.status;
-  const verification = Array.isArray(value.verification)
-    ? value.verification.flatMap((item) => {
-        if (!isJsonObject(item) || typeof item.command !== "string") return [];
-        return [
-          {
-            command: item.command,
-            exitCode:
-              typeof item.exitCode === "number" ? item.exitCode : null,
-            output: typeof item.output === "string" ? item.output : "",
-            ...(typeof item.fullOutputPath === "string"
-              ? { fullOutputPath: item.fullOutputPath }
-              : {}),
-          },
-        ];
-      })
-    : [];
-  return {
-    status,
-    summary:
-      typeof value.summary === "string" && value.summary.trim()
-        ? value.summary
-        : (() => {
-            throw new Error("Task result summary must not be empty");
-          })(),
-    evidence: stringArray(value.evidence),
-    changedPaths: stringArray(value.changedPaths),
-    verification,
-    blockers: stringArray(value.blockers),
-  };
-}
-
-function normalizeGoalReview(
-  value: JsonObject,
-): Omit<GoalReview, "cycle" | "reviewedAt" | "agentId" | "model"> {
-  const verdict =
-    value.verdict === "pass" ||
-    value.verdict === "changes_required" ||
-    value.verdict === "blocked"
-      ? value.verdict
-      : "blocked";
-  const findings = Array.isArray(value.findings)
-    ? value.findings.flatMap((item) => {
-        if (
-          !isJsonObject(item) ||
-          typeof item.title !== "string" ||
-          typeof item.evidence !== "string"
-        ) {
-          return [];
-        }
-        const severity: ReviewFinding["severity"] =
-          item.severity === "critical" ||
-          item.severity === "high" ||
-          item.severity === "medium" ||
-          item.severity === "low"
-            ? item.severity
-            : "medium";
-        return [
-          {
-            severity,
-            title: item.title,
-            evidence: item.evidence,
-            ...(typeof item.path === "string" ? { path: item.path } : {}),
-            ...(typeof item.line === "number" ? { line: item.line } : {}),
-            recommendation:
-              typeof item.recommendation === "string"
-                ? item.recommendation
-                : "Inspect and repair the finding",
-            ...(Array.isArray(item.taskIds)
-              ? { taskIds: stringArray(item.taskIds) }
-              : {}),
-            ...(Array.isArray(item.paths)
-              ? { paths: stringArray(item.paths) }
-              : {}),
-          },
-        ];
-      })
-    : [];
-  return {
-    verdict,
-    summary:
-      typeof value.summary === "string"
-        ? value.summary
-        : "Independent review returned no summary",
-    findings,
-  };
-}
-
 function expandHomePath(value: string): string {
   if (value === "~") return homedir();
   if (value.startsWith("~/")) return resolve(homedir(), value.slice(2));
@@ -4094,10 +3217,6 @@ const startupSessionManager = createStartupSessionManager(
   cwd,
   configuredSessionDir,
 );
-const goals = new GoalStore({
-  cwd,
-  sessionId: startupSessionManager.getSessionId(),
-});
 let runtime: AgentSessionRuntime | undefined;
 const hostBridge = new HostBridge(
   socketPath,
@@ -4105,7 +3224,6 @@ const hostBridge = new HostBridge(
   planMode,
   plans,
   contextBudget,
-  goals,
   startupConfig,
   async (providerId) => {
     const currentRuntime = runtime;

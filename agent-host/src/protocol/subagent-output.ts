@@ -5,16 +5,11 @@ import {
   type JsonObject,
 } from "./validation.ts";
 
-export type SubagentOutputKind = "task" | "goal_spec" | "review";
-
 export function parseSubagentOutput(
   text: string,
-  kind: SubagentOutputKind,
 ): JsonObject {
   const value = parseObject(text);
-  if (kind === "task") validateTaskResult(value);
-  else if (kind === "goal_spec") validateGoalSpec(value);
-  else validateReview(value);
+  validateTaskResult(value);
   return value;
 }
 
@@ -80,82 +75,6 @@ function validateTaskResult(value: JsonObject): void {
       throw new Error(
         `task_result.verification[${index}].fullOutputPath must be a string`,
       );
-    }
-  }
-}
-
-function validateGoalSpec(value: JsonObject): void {
-  requireString(value, "summary", "goal_spec");
-  requireStringArray(value, "acceptanceCriteria", "goal_spec");
-  validateGrantSet(value.grants, "goal_spec.grants");
-  if (!Array.isArray(value.tasks) || value.tasks.length === 0) {
-    throw new Error("goal_spec.tasks must be a non-empty array");
-  }
-  for (const [index, task] of value.tasks.entries()) {
-    if (!isJsonObject(task)) {
-      throw new Error(`goal_spec.tasks[${index}] must be an object`);
-    }
-    const context = `goal_spec.tasks[${index}]`;
-    requireString(task, "id", context);
-    requireString(task, "title", context);
-    requireString(task, "description", context);
-    if (task.profile !== undefined) requireString(task, "profile", context);
-    for (const field of ["dependsOn", "acceptanceCriteria"]) {
-      if (task[field] !== undefined) requireStringArray(task, field, context);
-    }
-    if (task.grants !== undefined) {
-      validateGrantSet(task.grants, `${context}.grants`);
-    }
-  }
-}
-
-function validateGrantSet(value: unknown, context: string): void {
-  if (!isJsonObject(value) || !Array.isArray(value.matchers)) {
-    throw new Error(`${context} must contain a matchers array`);
-  }
-  for (const [index, matcher] of value.matchers.entries()) {
-    if (!isJsonObject(matcher) || typeof matcher.kind !== "string") {
-      throw new Error(`${context}.matchers[${index}] must be a capability matcher`);
-    }
-  }
-}
-
-function validateReview(value: JsonObject): void {
-  if (
-    value.verdict !== "pass" &&
-    value.verdict !== "changes_required" &&
-    value.verdict !== "blocked"
-  ) {
-    throw new Error(
-      "review_result.verdict must be pass, changes_required, or blocked",
-    );
-  }
-  requireString(value, "summary", "review_result");
-  if (!Array.isArray(value.findings)) {
-    throw new Error("review_result.findings must be an array");
-  }
-  for (const [index, finding] of value.findings.entries()) {
-    if (!isJsonObject(finding)) {
-      throw new Error(`review_result.findings[${index}] must be an object`);
-    }
-    const context = `review_result.findings[${index}]`;
-    if (!["critical", "high", "medium", "low"].includes(String(finding.severity))) {
-      throw new Error(`${context}.severity is invalid`);
-    }
-    requireString(finding, "title", context);
-    requireString(finding, "evidence", context);
-    requireString(finding, "recommendation", context);
-    if (finding.path !== undefined && typeof finding.path !== "string") {
-      throw new Error(`${context}.path must be a string`);
-    }
-    if (finding.line !== undefined && typeof finding.line !== "number") {
-      throw new Error(`${context}.line must be a number`);
-    }
-    if (finding.taskIds !== undefined) {
-      requireStringArray(finding, "taskIds", context);
-    }
-    if (finding.paths !== undefined) {
-      requireStringArray(finding, "paths", context);
     }
   }
 }

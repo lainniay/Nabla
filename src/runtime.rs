@@ -255,64 +255,6 @@ impl EffectDispatcher {
                     )
                 });
             }
-            AppEffect::GetGoal => {
-                let host = self.host.clone();
-                self.spawn(async move {
-                    CommandEvent::GoalStateFinished(
-                        host.get_goal()
-                            .await
-                            .map(Box::new)
-                            .map_err(|error| error.to_string()),
-                    )
-                });
-            }
-            AppEffect::GetGoals => {
-                let host = self.host.clone();
-                self.spawn(async move {
-                    CommandEvent::GoalsFinished(
-                        host.get_goals()
-                            .await
-                            .map(Box::new)
-                            .map_err(|error| error.to_string()),
-                    )
-                });
-            }
-            AppEffect::StartGoal {
-                objective,
-                from_plan,
-            } => {
-                let host = self.host.clone();
-                self.spawn(async move {
-                    CommandEvent::GoalStarted(
-                        host.start_goal(objective, from_plan)
-                            .await
-                            .map(Box::new)
-                            .map_err(|error| error.to_string()),
-                    )
-                });
-            }
-            AppEffect::GoalAction(action) => {
-                let host = self.host.clone();
-                self.spawn(async move {
-                    CommandEvent::GoalActionFinished(
-                        host.goal_action(action)
-                            .await
-                            .map(Box::new)
-                            .map_err(|error| error.to_string()),
-                    )
-                });
-            }
-            AppEffect::ApproveGoal => {
-                let host = self.host.clone();
-                self.spawn(async move {
-                    CommandEvent::GoalApproved(
-                        host.approve_goal()
-                            .await
-                            .map(Box::new)
-                            .map_err(|error| error.to_string()),
-                    )
-                });
-            }
             AppEffect::ListModels => {
                 let host = self.host.clone();
                 self.spawn(async move {

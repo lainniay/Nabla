@@ -2,7 +2,6 @@ import type { ContextSnapshot } from "../context-manager.ts";
 import type {
   AgentConfigDiagnostic,
   AgentProfile,
-  GoalSnapshot,
   ResourceSnapshot,
 } from "../harness.ts";
 import type { PlanArtifactV2 } from "../plan.ts";
@@ -43,8 +42,6 @@ export interface ActiveAgentSnapshot {
   id: string;
   profile: string;
   task: string;
-  taskId?: string;
-  goalId?: string;
   lifecycle: string;
   startedAt: string;
   turns: number;
@@ -87,7 +84,6 @@ export interface BootstrapState {
   planMode: HostPlanModeSnapshot;
   plan: { artifact: PlanArtifactV2 | null };
   resources: ResourceSnapshot;
-  goal: GoalSnapshot;
   agents: AgentsSnapshot;
   context: ContextSnapshot;
   pendingIntegrations: PendingIntegrationSnapshot[];
@@ -104,7 +100,6 @@ export function parseBootstrapState(value: unknown): BootstrapState {
   const plan = requireObject(value, "plan", "bootstrap");
   if (plan.artifact !== null) validatePlanArtifact(plan.artifact);
   validateResources(requireObject(value, "resources", "bootstrap"));
-  validateGoalSnapshot(requireObject(value, "goal", "bootstrap"));
   validateAgents(requireObject(value, "agents", "bootstrap"));
   validateContext(requireObject(value, "context", "bootstrap"));
 
@@ -167,38 +162,6 @@ function validateResources(value: JsonObject): void {
     requireArray(value, field, "bootstrap.resources");
   }
   requireFiniteNumber(value, "revision", "bootstrap.resources");
-}
-
-function validateGoalSnapshot(value: JsonObject): void {
-  requireString(value, "scopeId", "bootstrap.goal");
-  requireString(value, "statePath", "bootstrap.goal");
-  if (value.goal === null) return;
-  if (!isJsonObject(value.goal)) {
-    throw new Error("bootstrap.goal.goal must be an object or null");
-  }
-  const goal = value.goal;
-  for (const field of [
-    "id",
-    "workspace",
-    "sessionId",
-    "objective",
-    "stage",
-    "createdAt",
-    "updatedAt",
-  ]) {
-    requireString(goal, field, "bootstrap.goal.goal");
-  }
-  requireFiniteNumber(goal, "schemaVersion", "bootstrap.goal.goal");
-  requireFiniteNumber(goal, "revision", "bootstrap.goal.goal");
-  for (const field of [
-    "constraints",
-    "acceptanceCriteria",
-    "tasks",
-    "reviews",
-    "verification",
-  ]) {
-    requireArray(goal, field, "bootstrap.goal.goal");
-  }
 }
 
 function validateAgents(value: JsonObject): void {

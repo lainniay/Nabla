@@ -1028,27 +1028,6 @@ fn primary_panel_request(state: &AppState, width: u16) -> Option<PanelRequest> {
             let height = rows.len();
             PanelRequest::new(rows, Some(prompt.selected.saturating_add(1)), height)
         }),
-        Some(UiModalKind::GoalApproval) => state.goal_approval.as_ref().and_then(|approval| {
-            let rows = [
-                ("Approve Goal", "Start executing this Goal"),
-                ("Cancel", "Return without starting"),
-            ]
-            .iter()
-            .enumerate()
-            .map(|(index, (label, description))| {
-                panel_choice_row(
-                    "goal-approval",
-                    label,
-                    description,
-                    index == approval.selected,
-                    true,
-                    width,
-                )
-            })
-            .collect::<Vec<_>>();
-            let height = rows.len();
-            PanelRequest::new(rows, Some(approval.selected), height)
-        }),
         Some(UiModalKind::PlanReview) => state.plan_review.as_ref().and_then(|review| {
             let (rows, selected_row) =
                 match review {
@@ -2506,7 +2485,6 @@ mod tests {
             agent_id: None,
             agent_profile: None,
             model: None,
-            goal_id: None,
             reason: Some("run tests".to_owned()),
             risk: Some("normal".to_owned()),
             summary: "run tests".to_owned(),
@@ -2588,7 +2566,6 @@ mod tests {
         assert!(text.contains("Workspace saves: exec cargo test @ /workspace"));
         assert!(text.contains("file_digest /workspace/Cargo.toml=manifest-digest"));
         assert!(text.contains("Deny"));
-        assert!(!text.contains("Allow for Goal"));
         assert!(
             panel
                 .rows
@@ -2625,7 +2602,6 @@ mod tests {
             agent_id: None,
             agent_profile: None,
             model: None,
-            goal_id: Some("goal".to_owned()),
             reason: Some("inspect credentials".to_owned()),
             risk: Some("credential".to_owned()),
             selected: 1,
@@ -2654,7 +2630,6 @@ mod tests {
         assert!(text.contains("printenv SECRET_TOKEN"));
         assert!(!text.contains("Credential risk"));
         assert!(!text.contains("inspect credentials"));
-        assert!(!text.contains("Allow for Goal"));
         assert!(!text.contains("Allow for Session"));
         assert!(!text.contains("Always allow matching"));
         assert!(
@@ -2692,7 +2667,6 @@ mod tests {
             agent_id: Some("agent-1".to_owned()),
             agent_profile: Some("worker".to_owned()),
             model: Some("provider/model".to_owned()),
-            goal_id: Some("goal-1".to_owned()),
             reason: Some("Apply a requested change".to_owned()),
             risk: Some("outside_workspace".to_owned()),
             selected: 2,

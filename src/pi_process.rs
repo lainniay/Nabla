@@ -459,7 +459,6 @@ mod tests {
                 .iter()
                 .any(|path| path.contains("nabla-control"))
         );
-        assert!(host.get_goal().await.unwrap().goal.is_none());
         let agents = host.get_agents().await.unwrap();
         assert!(
             agents

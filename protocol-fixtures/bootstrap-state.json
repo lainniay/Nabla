@@ -2,7 +2,11 @@
   "scopeId": "session-contract",
   "planMode": {
     "active": false,
-    "activeTools": ["read", "grep", "delegate_task"]
+    "activeTools": [
+      "read",
+      "grep",
+      "delegate_task"
+    ]
   },
   "plan": {
     "artifact": {
@@ -13,8 +17,12 @@
       "title": "Contract plan",
       "summary": "Exercise every Plan field",
       "bodyMarkdown": "# Contract plan\n\nImplement it.",
-      "assumptions": ["The fixture is versioned"],
-      "testPlan": ["Round-trip both protocol implementations"],
+      "assumptions": [
+        "The fixture is versioned"
+      ],
+      "testPlan": [
+        "Round-trip both protocol implementations"
+      ],
       "sourceSessionId": "session-contract",
       "createdAt": "2026-07-31T00:00:00.000Z",
       "updatedAt": "2026-07-31T00:01:00.000Z",
@@ -24,7 +32,9 @@
   "resources": {
     "scopeId": "session-contract",
     "trusted": true,
-    "contextFiles": ["AGENTS.md"],
+    "contextFiles": [
+      "AGENTS.md"
+    ],
     "skills": [
       {
         "name": "contract-skill",
@@ -39,7 +49,9 @@
         "description": "Contract prompt"
       }
     ],
-    "extensions": ["/workspace/.agents/extensions/contract.ts"],
+    "extensions": [
+      "/workspace/.agents/extensions/contract.ts"
+    ],
     "commands": [
       {
         "name": "contract",
@@ -56,130 +68,6 @@
     ],
     "revision": 7
   },
-  "goal": {
-    "scopeId": "session-contract",
-    "goal": {
-      "schemaVersion": 2,
-      "id": "goal-contract",
-      "workspace": "/workspace",
-      "sessionId": "session-contract",
-      "objective": "Exercise every Goal field",
-      "stage": "paused",
-      "previousStage": "executing",
-      "revision": 9,
-      "constraints": ["Keep Plan and Goal separate"],
-      "acceptanceCriteria": ["Protocol round-trips"],
-      "sourcePlan": {
-        "id": "plan-contract",
-        "revision": 3,
-        "sourceSessionId": "session-contract",
-        "artifact": {
-          "schemaVersion": 2,
-          "id": "plan-contract",
-          "revision": 3,
-          "status": "submitted",
-          "title": "Contract plan",
-          "summary": "Exercise every Plan field",
-          "bodyMarkdown": "# Contract plan",
-          "assumptions": [],
-          "testPlan": [],
-          "sourceSessionId": "session-contract",
-          "createdAt": "2026-07-31T00:00:00.000Z",
-          "updatedAt": "2026-07-31T00:01:00.000Z",
-          "lastExecutionError": "previous failure"
-        }
-      },
-      "spec": {
-        "revision": 2,
-        "summary": "Contract goal specification",
-        "acceptanceCriteria": ["All fields survive"],
-        "grants": {
-          "matchers": [
-            {"kind": "file", "operation": "read", "path": "src", "recursive": true},
-            {"kind": "file", "operation": "write", "path": "src", "recursive": true},
-            {"kind": "shell_digest", "digest": "46b54e632fb509e603362a785238ddd4c8cecbc6f4c9dfab3715c46f37d34d24"}
-          ]
-        },
-        "sourcePlan": {
-          "id": "plan-contract",
-          "revision": 3
-        },
-        "tasks": [
-          {
-            "id": "task-contract",
-            "title": "Contract task",
-            "description": "Verify the contract",
-            "profile": "worker",
-            "dependsOn": [],
-            "grants": {
-              "matchers": [
-                {"kind": "file", "operation": "read", "path": "src", "recursive": true},
-                {"kind": "file", "operation": "write", "path": "src", "recursive": true}
-              ]
-            },
-            "acceptanceCriteria": ["Pass"]
-          }
-        ]
-      },
-      "tasks": [
-        {
-          "id": "task-contract",
-          "title": "Contract task",
-          "description": "Verify the contract",
-          "profile": "worker",
-          "dependsOn": [],
-          "grants": {
-            "matchers": [
-              {"kind": "file", "operation": "read", "path": "src", "recursive": true},
-              {"kind": "file", "operation": "write", "path": "src", "recursive": true}
-            ]
-          },
-          "acceptanceCriteria": ["Pass"],
-          "status": "completed",
-          "result": {
-            "status": "completed",
-            "summary": "done",
-            "evidence": ["test"],
-            "changedPaths": ["src/lib.rs"],
-            "verification": [],
-            "blockers": []
-          }
-        }
-      ],
-      "lease": {
-        "specRevision": 2,
-        "grants": {
-          "matchers": [
-            {"kind": "file", "operation": "read", "path": "src", "recursive": true},
-            {"kind": "file", "operation": "write", "path": "src", "recursive": true},
-            {"kind": "shell_digest", "digest": "46b54e632fb509e603362a785238ddd4c8cecbc6f4c9dfab3715c46f37d34d24"}
-          ]
-        }
-      },
-      "reviews": [
-        {
-          "cycle": 1,
-          "verdict": "pass",
-          "summary": "looks good",
-          "findings": []
-        }
-      ],
-      "verification": [
-        {
-          "cycle": 1,
-          "result": {
-            "status": "completed",
-            "summary": "verified"
-          }
-        }
-      ],
-      "repairCycles": 1,
-      "lastError": "paused for inspection",
-      "createdAt": "2026-07-31T00:02:00.000Z",
-      "updatedAt": "2026-07-31T00:03:00.000Z"
-    },
-    "statePath": "/workspace/.nabla/goals/goal-contract.json"
-  },
   "agents": {
     "scopeId": "session-contract",
     "revision": 5,
@@ -191,8 +79,14 @@
         "source": "builtin",
         "model": "provider/model",
         "thinkingLevel": "high",
-        "skills": ["contract-skill"],
-        "tools": ["read", "edit", "bash"],
+        "skills": [
+          "contract-skill"
+        ],
+        "tools": [
+          "read",
+          "edit",
+          "bash"
+        ],
         "permission": "configured",
         "maxParallel": 2,
         "maxTurns": 8,
@@ -209,8 +103,6 @@
         "id": "agent-active",
         "profile": "worker",
         "task": "Active task",
-        "taskId": "task-contract",
-        "goalId": "goal-contract",
         "lifecycle": "running",
         "startedAt": "2026-07-31T00:04:00.000Z",
         "turns": 2,
@@ -227,8 +119,6 @@
         "id": "agent-pending",
         "profile": "worker",
         "task": "Pending integration",
-        "taskId": "task-contract",
-        "goalId": "goal-contract",
         "lifecycle": "awaiting_integration",
         "startedAt": "2026-07-31T00:05:00.000Z",
         "turns": 4,
@@ -340,8 +230,6 @@
         "id": "agent-pending",
         "profile": "worker",
         "task": "Pending integration",
-        "taskId": "task-contract",
-        "goalId": "goal-contract",
         "lifecycle": "awaiting_integration",
         "startedAt": "2026-07-31T00:05:00.000Z",
         "turns": 4,
@@ -357,12 +245,18 @@
         "status": "pending",
         "warning": "pending warning",
         "artifactId": "worktree-contract",
-        "changedPaths": ["src/lib.rs"],
+        "changedPaths": [
+          "src/lib.rs"
+        ],
         "patchBytes": 512,
-        "excludedPaths": ["node_modules"],
+        "excludedPaths": [
+          "node_modules"
+        ],
         "resolverAvailable": true
       }
     }
   ],
-  "warnings": ["recovered pending integration"]
+  "warnings": [
+    "recovered pending integration"
+  ]
 }

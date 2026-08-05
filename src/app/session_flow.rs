@@ -702,7 +702,6 @@ impl App {
             state,
             cwd: _,
             plan_mode,
-            goal,
             history,
             plan,
             context,
@@ -723,21 +722,6 @@ impl App {
         self.state.plan_mode_active = plan_mode;
         self.state.context = context;
         self.state.plan = plan;
-        self.state.goal = Some(goal);
-        self.state.goal_approval = if self
-            .state
-            .goal
-            .as_ref()
-            .and_then(|snapshot| snapshot.goal.as_ref())
-            .is_some_and(|goal| goal.stage == "awaiting_approval")
-        {
-            Some(GoalApprovalState {
-                selected: 0,
-                submitting: false,
-            })
-        } else {
-            None
-        };
         self.state.plan_review = self
             .state
             .plan

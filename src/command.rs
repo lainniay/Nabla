@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub const COMMAND_MENU_VISIBLE_ROWS: usize = 7;
 
-const LOCAL_COMMANDS: [LocalCommandDefinition; 18] = [
+const LOCAL_COMMANDS: [LocalCommandDefinition; 16] = [
     LocalCommandDefinition::new(
         "login",
         "Show how to authenticate Pi",
@@ -35,16 +35,6 @@ const LOCAL_COMMANDS: [LocalCommandDefinition; 18] = [
         "permissions",
         "Manage persistent approvals for this project",
         LocalCommandKind::Permissions,
-    ),
-    LocalCommandDefinition::new(
-        "goal",
-        "Start or control a structured Goal",
-        LocalCommandKind::Goal,
-    ),
-    LocalCommandDefinition::new(
-        "goals",
-        "Inspect the Goal sidecar for this session",
-        LocalCommandKind::Goals,
     ),
     LocalCommandDefinition::new("model", "List or select a model", LocalCommandKind::Model),
     LocalCommandDefinition::new(
@@ -94,8 +84,6 @@ enum LocalCommandKind {
     Reload,
     Trust,
     Permissions,
-    Goal,
-    Goals,
     Model,
     Thinking,
     Agents,
@@ -134,8 +122,6 @@ impl LocalCommandKind {
             Self::Reload => LocalCommand::Reload,
             Self::Trust => LocalCommand::Trust(argument),
             Self::Permissions => LocalCommand::Permissions(argument),
-            Self::Goal => LocalCommand::Goal(argument),
-            Self::Goals => LocalCommand::Goals,
             Self::Model => LocalCommand::Model(argument),
             Self::Thinking => LocalCommand::Thinking(argument),
             Self::Agents => LocalCommand::Agents(argument),
@@ -194,8 +180,6 @@ pub enum LocalCommand {
     Reload,
     Trust(Option<String>),
     Permissions(Option<String>),
-    Goal(Option<String>),
-    Goals,
     Model(Option<String>),
     Thinking(Option<String>),
     Agents(Option<String>),

@@ -1,7 +1,7 @@
 use super::*;
 
 // INFO: Host events are scope-checked before reduction so an old session cannot
-// overwrite the active goal, plan, resources, or approval workflow.
+// overwrite the active plan, resources, or approval workflow.
 impl App {
     pub(super) fn update_host(&mut self, event: RpcEvent) -> Vec<AppEffect> {
         let mut effects = Vec::new();
@@ -129,7 +129,6 @@ impl App {
                     agent_id: string_field(&event.payload, "agentId"),
                     agent_profile: string_field(&event.payload, "agentProfile"),
                     model: string_field(&event.payload, "model"),
-                    goal_id: string_field(&event.payload, "goalId"),
                     reason: string_field(&event.payload, "reason"),
                     risk: string_field(&event.payload, "risk"),
                     summary,
@@ -277,20 +276,6 @@ impl App {
                     self.state.resources = snapshot;
                 }
             }
-            "goal_state" => {
-                if let Ok(snapshot) =
-                    serde_json::from_value::<GoalSnapshot>(event.payload["snapshot"].clone())
-                {
-                    self.receive_goal(snapshot, false);
-                }
-            }
-            "goal_spec_ready" => {
-                if let Ok(snapshot) =
-                    serde_json::from_value::<GoalSnapshot>(event.payload["snapshot"].clone())
-                {
-                    self.receive_goal(snapshot, true);
-                }
-            }
             "agents_state" => {
                 if let Ok(snapshot) =
                     serde_json::from_value::<AgentsSnapshot>(event.payload["snapshot"].clone())
@@ -388,18 +373,6 @@ impl App {
                         }
                     )));
                 }
-            }
-            "goal_review" => {
-                let verdict = string_field(&event.payload["review"], "verdict")
-                    .unwrap_or_else(|| "unknown".to_owned());
-                self.state.transcript.push(TranscriptItem::Notice(format!(
-                    "Independent Goal review: {verdict}."
-                )));
-            }
-            "goal_error" => {
-                let error = string_field(&event.payload, "error")
-                    .unwrap_or_else(|| "Goal failed".to_owned());
-                self.set_error(error);
             }
             "host_warning" => {
                 let warning = string_field(&event.payload, "message")

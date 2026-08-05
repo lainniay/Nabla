@@ -10,8 +10,8 @@ use crate::{
     },
     rpc::RpcEvent,
     state::{
-        AgentsSnapshot, ApprovalRulesSnapshot, ContextSnapshot, GoalSnapshot, GoalsSnapshot,
-        PlanExecutionTarget, ResourceSnapshot, SessionBrowserSnapshot, TreeSnapshot,
+        AgentsSnapshot, ApprovalRulesSnapshot, ContextSnapshot, PlanExecutionTarget,
+        ResourceSnapshot, SessionBrowserSnapshot, TreeSnapshot,
     },
 };
 
@@ -50,11 +50,6 @@ pub enum CommandEvent {
     ApprovalRulesFinished(Result<Box<ApprovalRulesSnapshot>, String>),
     ApprovalRuleRevoked(Result<Box<ApprovalRulesSnapshot>, String>),
     ApprovalRulesCleared(Result<Box<ApprovalRulesSnapshot>, String>),
-    GoalStateFinished(Result<Box<GoalSnapshot>, String>),
-    GoalsFinished(Result<Box<GoalsSnapshot>, String>),
-    GoalStarted(Result<Box<GoalSnapshot>, String>),
-    GoalActionFinished(Result<Box<GoalSnapshot>, String>),
-    GoalApproved(Result<Box<GoalSnapshot>, String>),
     QueueCleared(Result<Box<QueueClearData>, String>),
     AbortAndQueueCleared(Result<Box<QueueClearData>, String>),
     ModelsFinished(Result<Box<ModelListData>, String>),

@@ -12,10 +12,10 @@ use tokio::{
 use crate::rpc::PiState;
 use crate::rpc::{JsonLineRpcPeer, RPC_EVENT_BUFFER, RpcError, RpcEvent, RpcResponse};
 use crate::state::{
-    ActiveAgentSnapshot, AgentsSnapshot, ApprovalRulesSnapshot, ContextSnapshot, GoalSnapshot,
-    GoalsSnapshot, PlanArtifact, PlanExecutionTarget, QuestionAnswer, ResourceSnapshot,
-    SessionBrowserSnapshot, SessionHistoryItem, SessionScope, SessionSortMode, TreeFilterMode,
-    TreeSnapshot, WorktreeIntegrationSnapshot,
+    ActiveAgentSnapshot, AgentsSnapshot, ApprovalRulesSnapshot, ContextSnapshot, PlanArtifact,
+    PlanExecutionTarget, QuestionAnswer, ResourceSnapshot, SessionBrowserSnapshot,
+    SessionHistoryItem, SessionScope, SessionSortMode, TreeFilterMode, TreeSnapshot,
+    WorktreeIntegrationSnapshot,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -93,7 +93,6 @@ pub struct BootstrapStateData {
     pub plan_mode: HostPlanModeData,
     pub plan: PlanStateData,
     pub resources: ResourceSnapshot,
-    pub goal: GoalSnapshot,
     pub agents: AgentsSnapshot,
     pub context: ContextSnapshot,
     #[serde(default)]
@@ -116,7 +115,6 @@ pub struct SessionActivationData {
     pub state: PiState,
     pub cwd: String,
     pub plan_mode: bool,
-    pub goal: GoalSnapshot,
     pub history: Vec<SessionHistoryItem>,
     pub plan: Option<PlanArtifact>,
     pub context: ContextSnapshot,
@@ -264,42 +262,6 @@ impl HostClient {
 
     pub async fn clear_approval_rules(&self) -> Result<ApprovalRulesSnapshot, RpcError> {
         self.request_data("approval_rules_clear", Map::new(), self.request_timeout)
-            .await
-    }
-
-    pub async fn get_goal(&self) -> Result<GoalSnapshot, RpcError> {
-        self.request_data("goal_state", Map::new(), self.request_timeout)
-            .await
-    }
-
-    pub async fn get_goals(&self) -> Result<GoalsSnapshot, RpcError> {
-        self.request_data("goals_state", Map::new(), self.request_timeout)
-            .await
-    }
-
-    pub async fn start_goal(
-        &self,
-        objective: Option<String>,
-        from_plan: bool,
-    ) -> Result<GoalSnapshot, RpcError> {
-        let mut parameters = Map::new();
-        if let Some(objective) = objective {
-            parameters.insert("objective".to_owned(), Value::String(objective));
-        }
-        parameters.insert("fromPlan".to_owned(), Value::Bool(from_plan));
-        self.request_data("goal_start", parameters, self.request_timeout)
-            .await
-    }
-
-    pub async fn goal_action(&self, action: String) -> Result<GoalSnapshot, RpcError> {
-        let mut parameters = Map::new();
-        parameters.insert("action".to_owned(), Value::String(action));
-        self.request_data("goal_action", parameters, self.request_timeout)
-            .await
-    }
-
-    pub async fn approve_goal(&self) -> Result<GoalSnapshot, RpcError> {
-        self.request_data("goal_approve", Map::new(), self.request_timeout)
             .await
     }
 
@@ -765,7 +727,6 @@ mod tests {
                 "diagnostics": [],
                 "revision": 1
             },
-            "goal": {"goal": null, "statePath": "/state/session-1.json"},
             "agents": {
                 "maxParallel": 3,
                 "profiles": [],
@@ -810,6 +771,8 @@ mod tests {
         let state: BootstrapStateData = serde_json::from_value(fixture.clone()).unwrap();
         let round_trip = serde_json::to_value(state).unwrap();
 
+        assert!(fixture.get("goal").is_none());
+        assert!(round_trip.get("goal").is_none());
         assert_eq!(round_trip, fixture);
     }
 
@@ -901,10 +864,6 @@ mod tests {
                 },
                 "cwd": "/workspace/old",
                 "planMode": false,
-                "goal": {
-                    "goal": null,
-                    "statePath": "/state/session-old.json"
-                },
                 "history": [
                     {"kind": "user", "text": "fix parser"},
                     {

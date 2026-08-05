@@ -16,7 +16,6 @@ impl App {
                 self.state.approval = None;
                 self.state.question = None;
                 self.state.plan_review = None;
-                self.state.goal_approval = None;
                 self.state.session_browser = None;
                 self.state.tree_browser = None;
                 self.state.selection_panel = None;

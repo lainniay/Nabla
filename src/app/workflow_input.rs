@@ -180,37 +180,6 @@ impl App {
         Vec::new()
     }
 
-    pub(super) fn update_goal_approval_key(&mut self, key: KeyEvent) -> Vec<AppEffect> {
-        let Some(approval) = self.state.goal_approval.as_mut() else {
-            return Vec::new();
-        };
-        if approval.submitting {
-            return Vec::new();
-        }
-        let plain_character = !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
-        if plain_character && matches!(key.code, KeyCode::Char('n' | 'N')) {
-            self.state.goal_approval = None;
-            return Vec::new();
-        }
-        if plain_character && matches!(key.code, KeyCode::Char('y' | 'Y')) {
-            approval.selected = 0;
-        } else {
-            match update_choice_navigation(key, &mut approval.selected, &[true, true]) {
-                ChoiceNavAction::Handled => return Vec::new(),
-                ChoiceNavAction::Cancel | ChoiceNavAction::Confirm(1) => {
-                    self.state.goal_approval = None;
-                    return Vec::new();
-                }
-                ChoiceNavAction::Confirm(0) => {}
-                ChoiceNavAction::Confirm(_) | ChoiceNavAction::Unhandled => return Vec::new(),
-            }
-        }
-        approval.submitting = true;
-        vec![AppEffect::ApproveGoal]
-    }
-
     pub(super) fn choose_plan_review(&mut self, selected: usize) -> Vec<AppEffect> {
         if self.state.run_state.is_busy() {
             return Vec::new();

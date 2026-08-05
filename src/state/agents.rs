@@ -7,6 +7,28 @@ pub struct AgentIsolationSnapshot {
     pub integration: String,
 }
 
+/// Host-side profile metadata included in agent snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProfileSnapshot {
+    pub name: String,
+    pub description: String,
+    pub source: String,
+    pub model: Option<String>,
+    pub thinking_level: Option<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    pub tools: Vec<String>,
+    pub permission: String,
+    pub max_parallel: u64,
+    pub max_turns: u64,
+    #[serde(default)]
+    pub isolation: AgentIsolationSnapshot,
+    pub disabled: bool,
+    #[serde(default)]
+    pub unavailable_reason: Option<String>,
+}
+
 impl Default for AgentIsolationSnapshot {
     fn default() -> Self {
         Self {
@@ -22,10 +44,6 @@ pub struct ActiveAgentSnapshot {
     pub id: String,
     pub profile: String,
     pub task: String,
-    #[serde(default)]
-    pub task_id: Option<String>,
-    #[serde(default)]
-    pub goal_id: Option<String>,
     pub lifecycle: String,
     pub started_at: String,
     pub turns: u64,

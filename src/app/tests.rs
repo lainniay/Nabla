@@ -98,11 +98,6 @@ fn activation(session_id: &str) -> SessionActivationData {
         state: pi_state,
         cwd: "/workspace/restored".to_owned(),
         plan_mode: false,
-        goal: GoalSnapshot {
-            scope_id: Some(session_id.to_owned()),
-            goal: None,
-            state_path: "/state/session.json".to_owned(),
-        },
         history: vec![
             SessionHistoryItem::User {
                 text: "restored question".to_owned(),
@@ -504,13 +499,13 @@ fn file_completion_keeps_visible_candidates_while_refreshing() {
 #[test]
 fn local_commands_do_not_expand_file_references() {
     let mut app = App::new(state());
-    app.state.editor.insert_text("/goal inspect @missing.txt");
+    app.state.editor.insert_text("/agent inspect @missing.txt");
     let effects = app.update(press(KeyCode::Enter));
     assert_eq!(
         effects,
-        vec![AppEffect::StartGoal {
-            objective: Some("inspect @missing.txt".to_owned()),
-            from_plan: false,
+        vec![AppEffect::StartSubagent {
+            profile: "inspect".to_owned(),
+            task: "@missing.txt".to_owned(),
         }]
     );
     assert!(app.state.editor.text().is_empty());
@@ -558,14 +553,14 @@ fn running_input_uses_pi_steer_follow_up_and_restores_cleared_queue() {
 }
 
 #[test]
-fn harness_commands_are_local_and_goal_is_explicit() {
+fn harness_commands_are_local_and_agents_are_explicit() {
     let mut app = App::new(state());
     assert!(!app.state().plan_mode_active);
 
     for (source, expected) in [
         ("/resources", AppEffect::GetResources),
         ("/reload", AppEffect::ReloadResources),
-        ("/goals", AppEffect::GetGoals),
+        ("/context", AppEffect::GetContextState),
         ("/agents", AppEffect::GetAgents),
         ("/agents reload", AppEffect::ReloadAgents),
         (
@@ -579,24 +574,6 @@ fn harness_commands_are_local_and_goal_is_explicit() {
         app.state.editor.replace(source.to_owned());
         assert_eq!(app.update(press(KeyCode::Enter)), vec![expected]);
     }
-    app.state
-        .editor
-        .replace("/goal implement leases".to_owned());
-    assert_eq!(
-        app.update(press(KeyCode::Enter)),
-        vec![AppEffect::StartGoal {
-            objective: Some("implement leases".to_owned()),
-            from_plan: false,
-        }]
-    );
-    app.state.editor.replace("/goal from-plan".to_owned());
-    assert_eq!(
-        app.update(press(KeyCode::Enter)),
-        vec![AppEffect::StartGoal {
-            objective: None,
-            from_plan: true,
-        }]
-    );
     assert!(
         !app.state()
             .transcript
@@ -774,8 +751,6 @@ fn subagent_lifecycle_updates_active_state_and_structured_transcript() {
         "id": "agent-1",
         "profile": "reviewer",
         "task": "Review",
-        "taskId": null,
-        "goalId": null,
         "lifecycle": "running",
         "startedAt": "2026-01-01T00:00:00Z",
         "turns": 2,
@@ -960,50 +935,6 @@ fn modal_priority_routes_keys_to_the_visible_question() {
 }
 
 #[test]
-fn newer_goal_lifecycle_event_wins_over_an_earlier_rpc_response() {
-    let mut app = App::new(state());
-    let snapshot = |revision: u64, stage: &str| {
-        serde_json::from_value::<GoalSnapshot>(json!({
-            "goal": {
-                "id": "goal-1",
-                "sessionId": "session-1",
-                "objective": "Implement",
-                "stage": stage,
-                "revision": revision,
-                "constraints": [],
-                "acceptanceCriteria": [],
-                "tasks": [],
-                "reviews": [],
-                "repairCycles": 0
-            },
-            "statePath": "/state/goal.json"
-        }))
-        .unwrap()
-    };
-    app.update(AppEvent::Host(RpcEvent {
-        kind: "goal_state".to_owned(),
-        payload: json!({
-            "type": "goal_state",
-            "snapshot": serde_json::to_value(snapshot(2, "blocked")).unwrap()
-        }),
-    }));
-    app.update(AppEvent::Command(CommandEvent::GoalStarted(Ok(Box::new(
-        snapshot(1, "preparing"),
-    )))));
-
-    let goal = app
-        .state()
-        .goal
-        .as_ref()
-        .and_then(|snapshot| snapshot.goal.as_ref())
-        .unwrap();
-    assert_eq!(goal.revision, 2);
-    assert_eq!(goal.stage, "blocked");
-    assert_ne!(app.state().run_state, RunState::Submitting);
-    assert!(!app.state().plan_mode_active);
-}
-
-#[test]
 fn stale_plan_status_and_foreign_scope_snapshots_cannot_replace_current_state() {
     let mut app = App::new(state());
     let mut current = plan(PlanStatus::Executing);
@@ -1032,43 +963,6 @@ fn stale_plan_status_and_foreign_scope_snapshots_cannot_replace_current_state() 
         }),
     ))));
     assert_eq!(app.state.plan.as_ref().unwrap(), &current);
-}
-
-#[test]
-fn stale_cross_goal_and_lower_revision_snapshots_are_ignored() {
-    let mut app = App::new(state());
-    let snapshot = |id: &str, revision: u64, updated_at: &str| {
-        serde_json::from_value::<GoalSnapshot>(json!({
-            "scopeId": "session-1",
-            "goal": {
-                "id": id,
-                "sessionId": "session-1",
-                "objective": "Implement",
-                "stage": "executing",
-                "revision": revision,
-                "constraints": [],
-                "acceptanceCriteria": [],
-                "tasks": [],
-                "reviews": [],
-                "repairCycles": 0,
-                "updatedAt": updated_at
-            },
-            "statePath": "/state/goal.json"
-        }))
-        .unwrap()
-    };
-    assert!(app.receive_goal(snapshot("goal-new", 2, "2026-01-01T00:00:03.000Z"), false,));
-    assert!(!app.receive_goal(snapshot("goal-old", 99, "2026-01-01T00:00:02.000Z"), false,));
-    assert!(!app.receive_goal(snapshot("goal-new", 1, "2026-01-01T00:00:04.000Z"), false,));
-    assert_eq!(
-        app.state
-            .goal
-            .as_ref()
-            .and_then(|snapshot| snapshot.goal.as_ref())
-            .unwrap()
-            .id,
-        "goal-new"
-    );
 }
 
 #[test]
@@ -1136,54 +1030,6 @@ fn workspace_state_updates_resources_and_agents_atomically() {
     })));
     assert!(app.state.resources.trusted);
     assert_eq!(app.state.agents.revision, 2);
-}
-
-#[test]
-fn goal_spec_approval_is_independent_from_plan_mode_and_plan_review() {
-    let mut app = App::new(state());
-    app.state.plan_mode_active = true;
-    app.update(AppEvent::Host(RpcEvent {
-        kind: "goal_spec_ready".to_owned(),
-        payload: json!({
-            "snapshot": {
-                "goal": {
-                    "id": "goal-1",
-                    "sessionId": "session-1",
-                    "objective": "Background work",
-                    "stage": "awaiting_approval",
-                    "revision": 2,
-                    "constraints": [],
-                    "acceptanceCriteria": ["cargo test"],
-                    "spec": {
-                        "revision": 1,
-                        "summary": "Execute independently",
-                        "acceptanceCriteria": ["cargo test"],
-                        "allowedTools": ["read"],
-                        "allowedPaths": ["."],
-                        "allowedCommands": []
-                    },
-                    "tasks": [],
-                    "reviews": [],
-                    "repairCycles": 0
-                },
-                "statePath": "/state/goal.json"
-            }
-        }),
-    }));
-
-    assert!(app.state.plan_mode_active);
-    assert!(app.state.plan_review.is_none());
-    assert!(matches!(
-        app.state.goal_approval,
-        Some(GoalApprovalState {
-            submitting: false,
-            ..
-        })
-    ));
-    assert_eq!(
-        app.update(press(KeyCode::Enter)),
-        vec![AppEffect::ApproveGoal]
-    );
 }
 
 #[test]
@@ -1731,7 +1577,6 @@ fn approval_interrupt_denies_and_aborts_the_agent() {
         agent_id: None,
         agent_profile: None,
         model: None,
-        goal_id: None,
         reason: None,
         risk: None,
         selected: 0,
@@ -1747,7 +1592,7 @@ fn approval_interrupt_denies_and_aborts_the_agent() {
 }
 
 #[test]
-fn approval_and_goal_approval_use_shared_navigation_before_confirming() {
+fn approval_navigation_uses_shared_choice_before_confirming() {
     let mut app = App::new(state());
     app.state.run_state = RunState::Running;
     app.state.approval = Some(ApprovalState {
@@ -1758,7 +1603,6 @@ fn approval_and_goal_approval_use_shared_navigation_before_confirming() {
         agent_id: None,
         agent_profile: None,
         model: None,
-        goal_id: Some("goal-1".to_owned()),
         reason: None,
         risk: None,
         selected: 0,
@@ -1795,25 +1639,6 @@ fn approval_and_goal_approval_use_shared_navigation_before_confirming() {
             decision: ApprovalDecision::Deny,
         }]
     );
-
-    app.state.approval = None;
-    app.state.goal_approval = Some(GoalApprovalState {
-        selected: 0,
-        submitting: false,
-    });
-    assert!(
-        app.update(press_with(KeyCode::Char('n'), KeyModifiers::CONTROL,))
-            .is_empty()
-    );
-    assert_eq!(app.state.goal_approval.as_ref().unwrap().selected, 1);
-    assert!(
-        app.update(press_with(KeyCode::Char('p'), KeyModifiers::CONTROL,))
-            .is_empty()
-    );
-    assert_eq!(app.state.goal_approval.as_ref().unwrap().selected, 0);
-    assert!(app.update(press(KeyCode::Tab)).is_empty());
-    assert!(app.update(press(KeyCode::Enter)).is_empty());
-    assert!(app.state.goal_approval.is_none());
 }
 
 #[test]
@@ -1828,7 +1653,6 @@ fn approval_scope_follows_available_decisions_instead_of_risk() {
         agent_id: None,
         agent_profile: None,
         model: None,
-        goal_id: None,
         reason: None,
         risk: Some("normal".to_owned()),
         selected: 0,
@@ -1865,7 +1689,6 @@ fn approval_scope_follows_available_decisions_instead_of_risk() {
         agent_id: None,
         agent_profile: None,
         model: None,
-        goal_id: None,
         reason: None,
         risk: Some("high".to_owned()),
         selected: 0,
@@ -2139,8 +1962,8 @@ fn command_navigation_reaches_candidates_beyond_the_visible_window() {
     let mut app = App::new(state());
     app.state.editor.insert_text("/");
 
-    assert_eq!(app.state().command_candidates().len(), 18);
-    for _ in 0..17 {
+    assert_eq!(app.state().command_candidates().len(), 16);
+    for _ in 0..15 {
         app.update(press(KeyCode::Tab));
     }
     assert_eq!(
@@ -2420,7 +2243,6 @@ fn context_budget_events_update_status_without_querying_or_disturbing_active_ui_
         agent_id: None,
         agent_profile: None,
         model: None,
-        goal_id: None,
         reason: None,
         risk: None,
         selected: 0,
@@ -3076,7 +2898,6 @@ fn approval_can_open_full_tool_details_and_escape_back_to_the_inline_panel() {
         agent_id: None,
         agent_profile: None,
         model: None,
-        goal_id: None,
         reason: Some("run tests".to_owned()),
         risk: Some("normal".to_owned()),
         selected: 0,

@@ -54,16 +54,15 @@ losing isolation. The host owns worktree creation, patch capture, integration,
 and cleanup; subagents are not asked to run `git worktree` themselves.
 
 `isolation.integration` accepts `source`, `auto`, `ask`, or `manual`. `source`
-automatically applies clean Goal patches and asks before applying direct
-`/agent` results. Conflicts remain outside the main workspace and may be sent
+asks before applying patches; `auto` applies clean patches automatically and
+asks on conflict. Conflicts remain outside the main workspace and may be sent
 to one isolated resolver attempt. If that attempt fails, the host returns to
 the integration prompt and will not start a second resolver for the same
 patch.
 
-Goal leases remain an upper bound. Credential paths, paths outside the
-workspace, and high-risk commands always require confirmation even when a
-profile says `allow`. Subagents started while the foreground session is in Plan
-mode are read-only.
+Credential paths, paths outside the workspace, and high-risk commands always
+require confirmation even when a profile says `allow`. Subagents started while
+the foreground session is in Plan mode are read-only.
 
 Commands:
 

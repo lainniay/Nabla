@@ -8,8 +8,6 @@ pub enum TranscriptItem {
     Plan(PlanArtifact),
     Context(ContextSnapshot),
     Resources(ResourceSnapshot),
-    Goal(Box<GoalSnapshot>),
-    Goals(GoalsSnapshot),
     Agents(AgentsSnapshot),
     Subagent(SubagentTranscript),
     Compaction(CompactionRecord),

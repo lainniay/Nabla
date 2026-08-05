@@ -15,7 +15,7 @@ import {
 import { digestValue } from "../shell/digest.ts";
 
 export interface AgentInput {
-  action: "spawn" | "goal_start" | "goal_update";
+  action: "spawn";
   profile?: string;
   grants?: CapabilityGrantSet;
   payload?: unknown;

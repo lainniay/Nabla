@@ -65,12 +65,6 @@ pub enum PlanReviewState {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GoalApprovalState {
-    pub selected: usize,
-    pub submitting: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestionOption {

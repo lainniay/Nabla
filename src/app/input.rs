@@ -14,7 +14,6 @@ impl App {
                 UiModalKind::Approval => self.update_approval_key(key),
                 UiModalKind::Permissions => self.update_permissions_key(key),
                 UiModalKind::Integration => self.update_integration_prompt_key(key),
-                UiModalKind::GoalApproval => self.update_goal_approval_key(key),
                 UiModalKind::PlanReview => self.update_plan_review_key(key),
             };
         }

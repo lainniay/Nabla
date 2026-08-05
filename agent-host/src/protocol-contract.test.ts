@@ -17,8 +17,10 @@ test("shared bootstrap fixture satisfies the TypeScript protocol contract", () =
   );
 
   assert.equal(parsed.scopeId, "session-contract");
-  assert.equal(parsed.goal.goal?.tasks[0]?.description, "Verify the contract");
+  assert.equal("goal" in parsed, false);
   assert.equal(parsed.agents.pending[0]?.id, "agent-pending");
+  assert.equal("goalId" in parsed.agents.pending[0]!, false);
+  assert.equal("taskId" in parsed.agents.pending[0]!, false);
   assert.equal(parsed.pendingIntegrations[0]?.integration.patchBytes, 512);
   assert.equal(parsed.context.pruning.length, 3);
 });

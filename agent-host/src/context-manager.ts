@@ -83,7 +83,6 @@ export interface ContextSnapshot {
 export interface ContextActiveState {
   planMode: boolean;
   plan?: PlanArtifactV2;
-  goal?: Record<string, unknown>;
 }
 
 export interface ContextFilterResult {
@@ -509,7 +508,6 @@ export class ContextBudgetManager {
       ...(plan && planAlreadyPresent
         ? { planAlreadyPresent: { id: plan.id, revision: plan.revision } }
         : {}),
-      ...(activeState.goal ? { goal: activeState.goal } : {}),
     };
     const key = JSON.stringify(checkpointState);
     if (this.checkpoint?.key !== key) {
@@ -527,14 +525,6 @@ export class ContextBudgetManager {
             epoch: this.epoch,
             planId: plan?.id,
             planRevision: plan?.revision,
-            goalId:
-              typeof activeState.goal?.id === "string"
-                ? activeState.goal.id
-                : undefined,
-            goalRevision:
-              typeof activeState.goal?.revision === "number"
-                ? activeState.goal.revision
-                : undefined,
           },
           timestamp: this.now(),
         } as AgentMessage,

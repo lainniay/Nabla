@@ -5,7 +5,7 @@
 Nabla has a Rust core library and a cooperating TypeScript host:
 
 - `src/app.rs` is the application reducer facade; `src/app/` contains submodules split by input, workflow, and protocol event source.
-- `src/state.rs` is the state facade; `src/state/` groups sessions, context, resources, goals, agents, planning, authentication, navigation, and transcript concerns.
+- `src/state.rs` is the state facade; `src/state/` groups sessions, context, resources, agents, planning, authentication, navigation, and transcript concerns.
 - `host.rs`, `pi_process.rs`, and `rpc.rs` handle JSONL communication with Pi and the TypeScript host.
 - `agent-host/src/` contains the TypeScript Pi host. Domain logic lives in files such as `context-manager.ts`, `harness.ts`, and `worktree.ts`; shared validation, policy, and persistence utilities live under `protocol/`, `policy/`, and `persistence/`.
 - TypeScript tests are colocated as `*.test.ts`. Rust unit tests are generally colocated in their source modules.
@@ -37,7 +37,7 @@ Add focused regression tests with every behavior change. Stateful features need 
 
 ## Architecture & Safety
 
-Keep Plan and Goal as separate workflows. Pi remains the source of truth for sessions and compaction. Preserve user work and tool output; do not trim Git-reported paths or bypass workspace-boundary helpers. Never log credentials or full authentication input.
+Keep Plan as its own workflow. Pi remains the source of truth for sessions and compaction. Preserve user work and tool output; do not trim Git-reported paths or bypass workspace-boundary helpers. Never log credentials or full authentication input.
 
 ## Commit & Pull Request Guidelines
 
