@@ -722,12 +722,7 @@ impl App {
         self.state.plan_mode_active = plan_mode;
         self.state.context = context;
         self.state.plan = plan;
-        self.state.plan_review = self
-            .state
-            .plan
-            .as_ref()
-            .is_some_and(|plan| plan.status == PlanStatus::Submitted)
-            .then_some(PlanReviewState::Menu { selected: 0 });
+        self.state.plan_review = None;
         self.state.seen_compactions = transcript
             .iter()
             .filter_map(|item| match item {

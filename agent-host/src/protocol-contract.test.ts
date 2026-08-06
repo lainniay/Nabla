@@ -18,6 +18,23 @@ test("shared bootstrap fixture satisfies the TypeScript protocol contract", () =
 
   assert.equal(parsed.scopeId, "session-contract");
   assert.equal("goal" in parsed, false);
+  assert.equal(parsed.plan.artifact?.handoffMarkdown, "Preserve the protocol contract and update both Rust and TypeScript.");
+  assert.deepEqual(
+    Object.keys(parsed.plan.artifact!).sort(),
+    [
+      "assumptions",
+      "bodyMarkdown",
+      "createdAt",
+      "handoffMarkdown",
+      "id",
+      "revision",
+      "sourceSessionId",
+      "summary",
+      "testPlan",
+      "title",
+      "updatedAt",
+    ].sort(),
+  );
   assert.equal(parsed.agents.pending[0]?.id, "agent-pending");
   assert.equal("goalId" in parsed.agents.pending[0]!, false);
   assert.equal("taskId" in parsed.agents.pending[0]!, false);

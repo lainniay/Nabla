@@ -8,8 +8,8 @@ use crate::{
     command::COMMAND_MENU_VISIBLE_ROWS,
     host::ApprovalDecision,
     state::{
-        AppState, AuthPromptKind, AuthState, GrantProposal, PlanReviewState, TranscriptItem,
-        TranscriptViewMode, TreeItem, TreePhase, UiModalKind, matching_auth_choice_indices,
+        AppState, AuthPromptKind, AuthState, GrantProposal, TranscriptItem, TranscriptViewMode,
+        TreeItem, TreePhase, UiModalKind, matching_auth_choice_indices,
     },
 };
 
@@ -1029,64 +1029,39 @@ fn primary_panel_request(state: &AppState, width: u16) -> Option<PanelRequest> {
             PanelRequest::new(rows, Some(prompt.selected.saturating_add(1)), height)
         }),
         Some(UiModalKind::PlanReview) => state.plan_review.as_ref().and_then(|review| {
-            let (rows, selected_row) =
-                match review {
-                    PlanReviewState::Menu { selected } => {
-                        let rows = [
-                            "Execute in current context",
-                            "Execute in fresh context",
-                            "Cancel",
-                        ]
-                        .iter()
-                        .enumerate()
-                        .map(|(index, label)| {
-                            let description = match index {
-                                0 => "Continue in this conversation",
-                                1 => "Start with a clean context",
-                                _ => "Return without executing",
-                            };
-                            panel_choice_row(
-                                "plan-review",
-                                label,
-                                description,
-                                index == *selected,
-                                true,
-                                width,
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                        (rows, *selected)
-                    }
-                    PlanReviewState::Confirm {
-                        target, selected, ..
-                    } => {
-                        let mut rows = vec![text_row(
-                            "plan-review",
-                            &format!("Execute in {}?", target.label()),
-                            CellStyle::foreground(Color::Yellow).bold(),
-                            width,
-                        )];
-                        rows.extend(["Execute", "Back"].iter().enumerate().map(
-                            |(index, label)| {
-                                panel_choice_row(
-                                    "plan-review",
-                                    label,
-                                    if index == 0 {
-                                        "Start plan execution"
-                                    } else {
-                                        "Choose another context"
-                                    },
-                                    index == *selected,
-                                    true,
-                                    width,
-                                )
-                            },
-                        ));
-                        (rows, selected.saturating_add(1))
-                    }
-                };
+            let labels = ["Execute", "Fresh execute", "Close"];
+            let descriptions = [
+                "Continue in this conversation",
+                "Start a new session with the Plan and handoff",
+                "Keep the Plan without executing",
+            ];
+            let mut rows = vec![text_row(
+                "plan-review",
+                &state.context.remaining_percent().map_or_else(
+                    || "Current context remaining: unknown".to_owned(),
+                    |remaining| {
+                        format!(
+                            "Current context remaining: {:.0}% ({})",
+                            remaining,
+                            state.context.usage_state.label()
+                        )
+                    },
+                ),
+                CellStyle::foreground(Color::Gray),
+                width,
+            )];
+            rows.extend(labels.iter().enumerate().map(|(index, label)| {
+                panel_choice_row(
+                    "plan-review",
+                    label,
+                    descriptions[index],
+                    index == review.selected,
+                    true,
+                    width,
+                )
+            }));
             let height = rows.len();
-            PanelRequest::new(rows, Some(selected_row), height)
+            PanelRequest::new(rows, Some(review.selected.saturating_add(1)), height)
         }),
         _ => None,
     }
@@ -3100,5 +3075,57 @@ mod tests {
                 .iter()
                 .all(|cell| cell.style.background == Color::Default && !cell.style.reversed)
         );
+    }
+
+    #[test]
+    fn plan_review_panel_shows_only_execute_fresh_execute_close() {
+        let mut domain = state();
+        domain.plan_review = Some(crate::state::PlanReviewState {
+            selected: 0,
+            submitting: false,
+        });
+        domain.context = crate::state::ContextSnapshot {
+            usage_state: crate::state::ContextUsageState::Estimated,
+            actual_tokens: Some(40_000),
+            actual_percent: Some(40.0),
+            context_window: Some(100_000),
+            ..crate::state::ContextSnapshot::default()
+        };
+
+        let panel = primary_panel_request(&domain, 48).expect("plan review panel");
+        let text = panel
+            .rows
+            .iter()
+            .map(|row| row.plain_text())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(text.contains("Current context remaining: 60% (estimated)"));
+        for label in ["Execute", "Fresh execute", "Close"] {
+            assert!(text.contains(label), "missing {label}: {text}");
+        }
+        assert!(!text.contains("Confirm"));
+        assert!(!text.contains("Execute in current context"));
+        assert_eq!(panel.selected_row, Some(1));
+    }
+
+    #[test]
+    fn plan_review_panel_shows_unknown_when_context_is_unavailable() {
+        let mut domain = state();
+        domain.plan_review = Some(crate::state::PlanReviewState {
+            selected: 2,
+            submitting: false,
+        });
+
+        let panel = primary_panel_request(&domain, 48).expect("plan review panel");
+        let text = panel
+            .rows
+            .iter()
+            .map(|row| row.plain_text())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(text.contains("Current context remaining: unknown"));
+        assert_eq!(panel.selected_row, Some(3));
     }
 }

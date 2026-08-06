@@ -10,7 +10,7 @@ use crate::{
     },
     rpc::RpcEvent,
     state::{
-        AgentsSnapshot, ApprovalRulesSnapshot, ContextSnapshot, PlanExecutionTarget,
+        AgentsSnapshot, ApprovalRulesSnapshot, ContextSnapshot, PlanExecutionContext,
         ResourceSnapshot, SessionBrowserSnapshot, TreeSnapshot,
     },
 };
@@ -88,7 +88,7 @@ pub enum CommandEvent {
     PlanStateFinished(Result<Box<PlanStateData>, String>),
     QuestionReplyFinished(Result<(), String>),
     PlanExecutionFinished {
-        target: PlanExecutionTarget,
+        context: PlanExecutionContext,
         result: Result<Box<PlanExecutionData>, String>,
     },
     ApprovalReplyFinished {

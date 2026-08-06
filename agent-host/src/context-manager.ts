@@ -3,7 +3,7 @@ import type {
   ContextUsage,
 } from "@earendil-works/pi-coding-agent";
 
-import type { PlanArtifactV2 } from "./plan.ts";
+import { PLAN_ENTRY_TYPE, type PlanArtifact } from "./plan.ts";
 import { MUTATING_TOOL_NAMES } from "./policy/tool-policy.ts";
 import { isJsonObject as isObject } from "./protocol/validation.ts";
 import {
@@ -82,7 +82,14 @@ export interface ContextSnapshot {
 
 export interface ContextActiveState {
   planMode: boolean;
-  plan?: PlanArtifactV2;
+  plan?: PlanArtifact;
+}
+
+export interface ContextRemaining {
+  usedTokens: number;
+  usedPercent: number | null;
+  remainingTokens: number | null;
+  remainingPercent: number | null;
 }
 
 export interface ContextFilterResult {
@@ -235,6 +242,9 @@ export class ContextBudgetManager {
       const unfilteredTokens = estimateMessages(messages);
       const categories = estimateCategories(messages);
       const topConsumers = estimateTopConsumers(messages);
+      const withoutPlanEntries = messages.filter(
+        (message) => !isPlanEntry(message),
+      );
 
       if (!this.policy.enabled) {
         this.lastRequestEstimate = unfilteredTokens;
@@ -248,13 +258,16 @@ export class ContextBudgetManager {
           topConsumers,
         });
         return {
-          messages,
+          messages:
+            withoutPlanEntries.length === messages.length
+              ? messages
+              : withoutPlanEntries,
           snapshot: this.snapshot(),
           applied: false,
         };
       }
 
-      const filtered = structuredClone(messages);
+      const filtered = structuredClone(withoutPlanEntries);
       const toolCalls = collectToolCalls(filtered);
       const pruneStats = mutablePruning();
       const toolResults = collectToolResults(filtered, toolCalls);
@@ -650,7 +663,7 @@ function injectCheckpoint(
 
 function containsPlanRevision(
   message: AgentMessage,
-  plan: PlanArtifactV2,
+  plan: PlanArtifact,
 ): boolean {
   if (!isObject(message)) return false;
   const candidates: unknown[] = [message.details];
@@ -660,16 +673,25 @@ function containsPlanRevision(
   for (const candidate of candidates) {
     if (
       isObject(candidate) &&
-      ((candidate.id === plan.id && candidate.revision === plan.revision) ||
-        (candidate.planId === plan.id &&
-          candidate.revision === plan.revision) ||
-        (candidate.planId === plan.id &&
-          candidate.planRevision === plan.revision))
+      candidate.id === plan.id &&
+      candidate.revision === plan.revision
     ) {
       return true;
     }
   }
-  return false;
+  const text = messageContentText(message.content);
+  return (
+    text.includes(`Plan ${plan.id} revision ${plan.revision}`) &&
+    text.includes("## Source objective and handoff")
+  );
+}
+
+function isPlanEntry(message: AgentMessage): boolean {
+  return (
+    isObject(message) &&
+    message.role === "custom" &&
+    message.customType === PLAN_ENTRY_TYPE
+  );
 }
 
 function collectToolCalls(messages: AgentMessage[]): Map<string, ToolCallInfo> {
@@ -1057,8 +1079,25 @@ function estimateMessage(message: AgentMessage): number {
   }
 }
 
-function estimateTextTokens(value: string): number {
+export function estimateTextTokens(value: string): number {
   return value.length === 0 ? 0 : Math.ceil(value.length / 4);
+}
+
+export function contextRemaining(snapshot: ContextSnapshot): ContextRemaining {
+  const usedTokens =
+    snapshot.actualTokens ?? snapshot.estimatedNextRequestTokens;
+  const usedPercent =
+    snapshot.actualPercent ??
+    (snapshot.contextWindow && snapshot.contextWindow > 0
+      ? (usedTokens / snapshot.contextWindow) * 100
+      : null);
+  const remainingTokens =
+    snapshot.contextWindow === null || snapshot.contextWindow <= 0
+      ? null
+      : Math.max(0, snapshot.contextWindow - usedTokens);
+  const remainingPercent =
+    usedPercent === null ? null : Math.max(0, 100 - usedPercent);
+  return { usedTokens, usedPercent, remainingTokens, remainingPercent };
 }
 
 function toolResultText(message: ToolResultMessage): string {

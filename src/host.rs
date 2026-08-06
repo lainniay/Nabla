@@ -13,7 +13,7 @@ use crate::rpc::PiState;
 use crate::rpc::{JsonLineRpcPeer, RPC_EVENT_BUFFER, RpcError, RpcEvent, RpcResponse};
 use crate::state::{
     ActiveAgentSnapshot, AgentsSnapshot, ApprovalRulesSnapshot, ContextSnapshot, PlanArtifact,
-    PlanExecutionTarget, QuestionAnswer, ResourceSnapshot, SessionBrowserSnapshot,
+    PlanExecutionContext, QuestionAnswer, ResourceSnapshot, SessionBrowserSnapshot,
     SessionHistoryItem, SessionScope, SessionSortMode, TreeFilterMode, TreeSnapshot,
     WorktreeIntegrationSnapshot,
 };
@@ -104,9 +104,8 @@ pub struct BootstrapStateData {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanExecutionData {
-    pub artifact: PlanArtifact,
     pub session_id: String,
-    pub fresh: bool,
+    pub context: PlanExecutionContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -495,13 +494,14 @@ impl HostClient {
 
     pub async fn execute_plan(
         &self,
-        target: PlanExecutionTarget,
+        context: PlanExecutionContext,
     ) -> Result<PlanExecutionData, RpcError> {
-        let command = match target {
-            PlanExecutionTarget::Current => "execute_plan_current",
-            PlanExecutionTarget::Fresh => "execute_plan_fresh",
-        };
-        self.request_data(command, Map::new(), self.request_timeout)
+        let mut parameters = Map::new();
+        parameters.insert(
+            "context".to_owned(),
+            serde_json::to_value(context).map_err(|error| RpcError::Json(error.to_string()))?,
+        );
+        self.request_data("plan_execute", parameters, self.request_timeout)
             .await
     }
 
@@ -682,33 +682,43 @@ mod tests {
     #[test]
     fn parses_plan_state_and_execution_responses() {
         let artifact = serde_json::json!({
-            "schemaVersion": 2,
             "id": "plan-1",
             "revision": 2,
-            "status": "submitted",
             "title": "Plan",
             "summary": "Summary",
             "bodyMarkdown": "Implementation",
             "assumptions": [],
             "testPlan": ["cargo test"],
+            "handoffMarkdown": "Handoff",
             "sourceSessionId": "session-1",
             "createdAt": "2026-01-01T00:00:00.000Z",
             "updatedAt": "2026-01-01T00:00:01.000Z"
         });
         let state: PlanStateData =
             serde_json::from_value(serde_json::json!({"artifact": artifact.clone()})).unwrap();
-        let mut executing_artifact = artifact;
-        executing_artifact["status"] = serde_json::json!("executing");
         let execution: PlanExecutionData = serde_json::from_value(serde_json::json!({
-            "artifact": executing_artifact,
             "sessionId": "session-2",
-            "fresh": true
+            "context": "fresh"
+        }))
+        .unwrap();
+        let current: PlanExecutionData = serde_json::from_value(serde_json::json!({
+            "sessionId": "session-1",
+            "context": "current"
         }))
         .unwrap();
 
         assert_eq!(state.artifact.unwrap().revision, 2);
-        assert!(execution.fresh);
+        assert_eq!(execution.context, PlanExecutionContext::Fresh);
         assert_eq!(execution.session_id, "session-2");
+        assert_eq!(current.context, PlanExecutionContext::Current);
+        assert_eq!(
+            serde_json::to_value(PlanExecutionContext::Current).unwrap(),
+            serde_json::json!("current")
+        );
+        assert_eq!(
+            serde_json::to_value(PlanExecutionContext::Fresh).unwrap(),
+            serde_json::json!("fresh")
+        );
     }
 
     #[test]

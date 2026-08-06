@@ -10,23 +10,21 @@
   },
   "plan": {
     "artifact": {
-      "schemaVersion": 2,
       "id": "plan-contract",
       "revision": 3,
-      "status": "submitted",
       "title": "Contract plan",
       "summary": "Exercise every Plan field",
       "bodyMarkdown": "# Contract plan\n\nImplement it.",
       "assumptions": [
-        "The fixture is versioned"
+        "The fixture is intentional"
       ],
       "testPlan": [
         "Round-trip both protocol implementations"
       ],
+      "handoffMarkdown": "Preserve the protocol contract and update both Rust and TypeScript.",
       "sourceSessionId": "session-contract",
       "createdAt": "2026-07-31T00:00:00.000Z",
-      "updatedAt": "2026-07-31T00:01:00.000Z",
-      "lastExecutionError": "previous failure"
+      "updatedAt": "2026-07-31T00:01:00.000Z"
     }
   },
   "resources": {

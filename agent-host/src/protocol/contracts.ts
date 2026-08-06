@@ -4,7 +4,7 @@ import type {
   AgentProfile,
   ResourceSnapshot,
 } from "../harness.ts";
-import type { PlanArtifactV2 } from "../plan.ts";
+import type { PlanArtifact } from "../plan.ts";
 import type { IsolationBackend, IntegrationStatus } from "../worktree.ts";
 import {
   isJsonObject,
@@ -82,7 +82,7 @@ export interface PendingIntegrationSnapshot {
 export interface BootstrapState {
   scopeId: string;
   planMode: HostPlanModeSnapshot;
-  plan: { artifact: PlanArtifactV2 | null };
+  plan: { artifact: PlanArtifact | null };
   resources: ResourceSnapshot;
   agents: AgentsSnapshot;
   context: ContextSnapshot;
@@ -132,17 +132,16 @@ function validatePlanArtifact(value: unknown): void {
   if (!isJsonObject(value)) throw new Error("bootstrap.plan.artifact must be an object or null");
   for (const field of [
     "id",
-    "status",
     "title",
     "summary",
     "bodyMarkdown",
+    "handoffMarkdown",
     "sourceSessionId",
     "createdAt",
     "updatedAt",
   ]) {
     requireString(value, field, "bootstrap.plan.artifact");
   }
-  requireFiniteNumber(value, "schemaVersion", "bootstrap.plan.artifact");
   requireFiniteNumber(value, "revision", "bootstrap.plan.artifact");
   requireStringArray(value, "assumptions", "bootstrap.plan.artifact");
   requireStringArray(value, "testPlan", "bootstrap.plan.artifact");

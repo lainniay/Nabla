@@ -542,15 +542,24 @@ impl App {
                 match result {
                     Ok(mode) if mode.active == requested => {
                         self.state.plan_mode_active = mode.active;
+                        if let Some(prompt) = self.state.pending_plan_prompt.take() {
+                            return self.prepare_delivery(prompt, PromptDelivery::Prompt);
+                        }
                     }
-                    Ok(mode) => self.set_error(format!(
-                        "Host returned Plan mode active={} while active={} was requested",
-                        mode.active, requested
-                    )),
-                    Err(error) => self.set_error(format!(
-                        "Unable to {} Plan mode: {error}",
-                        if requested { "enter" } else { "exit" }
-                    )),
+                    Ok(mode) => {
+                        self.state.pending_plan_prompt = None;
+                        self.set_error(format!(
+                            "Host returned Plan mode active={} while active={} was requested",
+                            mode.active, requested
+                        ));
+                    }
+                    Err(error) => {
+                        self.state.pending_plan_prompt = None;
+                        self.set_error(format!(
+                            "Unable to {} Plan mode: {error}",
+                            if requested { "enter" } else { "exit" }
+                        ));
+                    }
                 }
             }
             CommandEvent::ApprovalReplyFinished {
@@ -605,33 +614,29 @@ impl App {
                 self.set_error(format!("Unable to submit clarification answers: {error}"));
                 return vec![AppEffect::Abort];
             }
-            CommandEvent::PlanExecutionFinished { target, result } => match result {
+            CommandEvent::PlanExecutionFinished { context, result } => match result {
                 Ok(execution) => {
                     self.state.plan_mode_active = false;
                     self.state.pending_plan_mode = None;
-                    self.state.plan = Some(execution.artifact.clone());
                     self.state.plan_review = None;
                     self.state.session.session_id = execution.session_id;
-                    if execution.fresh {
+                    if context == PlanExecutionContext::Fresh {
                         self.state.seen_compactions.clear();
                     }
+                    let revision = self.state.plan.as_ref().map_or(0, |plan| plan.revision);
                     self.state.transcript.push(TranscriptItem::Notice(format!(
-                        "Executing plan {} r{} in {}.",
-                        execution.artifact.id,
-                        execution.artifact.revision,
-                        target.label()
+                        "Started plan r{revision} in {}.",
+                        context.label()
                     )));
                 }
                 Err(error) => {
                     self.state.run_state = RunState::Idle;
-                    if let Some(PlanReviewState::Confirm { submitting, .. }) =
-                        self.state.plan_review.as_mut()
-                    {
-                        *submitting = false;
+                    if let Some(review) = self.state.plan_review.as_mut() {
+                        review.submitting = false;
                     }
                     self.set_error(format!(
                         "Unable to execute plan in {}: {error}",
-                        target.label()
+                        context.label()
                     ));
                 }
             },

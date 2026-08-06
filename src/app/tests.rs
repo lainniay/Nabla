@@ -32,21 +32,19 @@ fn press_with(code: KeyCode, modifiers: KeyModifiers) -> AppEvent {
     AppEvent::Terminal(TerminalEvent::Key(KeyEvent::new(code, modifiers)))
 }
 
-fn plan(status: PlanStatus) -> PlanArtifact {
+fn plan() -> PlanArtifact {
     PlanArtifact {
-        schema_version: 2,
         id: "plan-1".to_owned(),
         revision: 2,
-        status,
         title: "Structured planning".to_owned(),
         summary: "Make plans first-class.".to_owned(),
         body_markdown: "1. Ask questions.\n2. Submit a plan.".to_owned(),
         assumptions: vec!["Single-select questions".to_owned()],
         test_plan: vec!["Run cargo test".to_owned()],
+        handoff_markdown: "Carry the Plan into the implementation turn.".to_owned(),
         source_session_id: "session-1".to_owned(),
         created_at: "2026-01-01T00:00:00.000Z".to_owned(),
         updated_at: "2026-01-01T00:00:01.000Z".to_owned(),
-        last_execution_error: None,
     }
 }
 
@@ -130,7 +128,7 @@ fn activation(session_id: &str) -> SessionActivationData {
                 summary: "restored branch summary".to_owned(),
             },
         ],
-        plan: Some(plan(PlanStatus::Executing)),
+        plan: Some(plan()),
         context: ContextSnapshot {
             usage_state: ContextUsageState::Recalculating,
             epoch: 4,
@@ -194,86 +192,143 @@ fn clarification_questions_are_answered_sequentially_with_custom_input() {
 }
 
 #[test]
-fn plan_review_current_context_requires_confirmation_and_leaves_plan_mode() {
+fn plan_review_executes_in_the_current_context_as_a_normal_turn() {
     let mut app = App::new(state());
     app.state.plan_mode_active = true;
-    let ready = plan(PlanStatus::Submitted);
+    let ready = plan();
     app.update(AppEvent::Host(RpcEvent {
         kind: "plan_ready".to_owned(),
-        payload: json!({"artifact": ready}),
+        payload: json!({"artifact": ready.clone()}),
     }));
 
-    assert!(matches!(
+    assert_eq!(
         app.state.plan_review,
-        Some(PlanReviewState::Menu { selected: 0 })
-    ));
-    assert!(app.update(press(KeyCode::Enter)).is_empty());
-    assert!(matches!(
-        app.state.plan_review,
-        Some(PlanReviewState::Confirm {
-            target: PlanExecutionTarget::Current,
+        Some(PlanReviewState {
+            selected: 0,
             submitting: false,
-            ..
         })
-    ));
-    assert!(
-        app.update(press_with(KeyCode::Char('n'), KeyModifiers::CONTROL,))
-            .is_empty()
     );
-    assert!(matches!(
-        app.state.plan_review,
-        Some(PlanReviewState::Confirm { selected: 1, .. })
-    ));
-    assert!(
-        app.update(press_with(KeyCode::Char('p'), KeyModifiers::CONTROL,))
-            .is_empty()
-    );
-    assert!(matches!(
-        app.state.plan_review,
-        Some(PlanReviewState::Confirm { selected: 0, .. })
-    ));
-
     assert_eq!(
         app.update(press(KeyCode::Enter)),
-        vec![AppEffect::ExecutePlan(PlanExecutionTarget::Current)]
+        vec![AppEffect::ExecutePlan(PlanExecutionContext::Current)]
     );
-    let executing = plan(PlanStatus::Executing);
+    assert_eq!(
+        app.state.plan_review,
+        Some(PlanReviewState {
+            selected: 0,
+            submitting: true,
+        })
+    );
+
     app.update(AppEvent::Command(CommandEvent::PlanExecutionFinished {
-        target: PlanExecutionTarget::Current,
+        context: PlanExecutionContext::Current,
         result: Ok(Box::new(PlanExecutionData {
-            artifact: executing,
             session_id: "session-1".to_owned(),
-            fresh: false,
+            context: PlanExecutionContext::Current,
         })),
     }));
 
     assert!(!app.state.plan_mode_active);
     assert_eq!(app.state.session.session_id, "session-1");
+    assert_eq!(app.state.plan.as_ref(), Some(&ready));
     assert!(app.state.plan_review.is_none());
+    assert!(app.state.transcript.iter().any(|item| matches!(
+        item,
+        TranscriptItem::Notice(text) if text == "Started plan r2 in current context."
+    )));
 }
 
 #[test]
-fn plan_review_fresh_context_is_a_distinct_execution_effect() {
+fn plan_review_fresh_execute_updates_the_session_and_keeps_the_artifact() {
     let mut app = App::new(state());
+    let ready = plan();
     app.update(AppEvent::Host(RpcEvent {
         kind: "plan_ready".to_owned(),
-        payload: json!({"artifact": plan(PlanStatus::Submitted)}),
+        payload: json!({"artifact": ready.clone()}),
     }));
 
     app.update(press(KeyCode::Down));
-    app.update(press(KeyCode::Enter));
-    assert!(matches!(
-        app.state.plan_review,
-        Some(PlanReviewState::Confirm {
-            target: PlanExecutionTarget::Fresh,
-            submitting: false,
-            ..
-        })
-    ));
     assert_eq!(
-        app.update(press(KeyCode::Char('y'))),
-        vec![AppEffect::ExecutePlan(PlanExecutionTarget::Fresh)]
+        app.update(press(KeyCode::Enter)),
+        vec![AppEffect::ExecutePlan(PlanExecutionContext::Fresh)]
     );
+
+    app.update(AppEvent::Command(CommandEvent::PlanExecutionFinished {
+        context: PlanExecutionContext::Fresh,
+        result: Ok(Box::new(PlanExecutionData {
+            session_id: "session-2".to_owned(),
+            context: PlanExecutionContext::Fresh,
+        })),
+    }));
+
+    assert!(!app.state.plan_mode_active);
+    assert_eq!(app.state.session.session_id, "session-2");
+    assert_eq!(app.state.plan.as_ref(), Some(&ready));
+    assert!(app.state.plan_review.is_none());
+    assert!(app.state.transcript.iter().any(|item| matches!(
+        item,
+        TranscriptItem::Notice(text) if text == "Started plan r2 in fresh context."
+    )));
+}
+
+#[test]
+fn plan_review_close_and_escape_keep_plan_mode_and_submitting_locks_input() {
+    let mut app = App::new(state());
+    app.state.plan_mode_active = true;
+    app.update(AppEvent::Host(RpcEvent {
+        kind: "plan_ready".to_owned(),
+        payload: json!({"artifact": plan()}),
+    }));
+
+    app.update(press(KeyCode::Down));
+    app.update(press(KeyCode::Down));
+    assert!(app.update(press(KeyCode::Enter)).is_empty());
+    assert!(app.state.plan_review.is_none());
+    assert!(app.state.plan_mode_active);
+
+    app.update(AppEvent::Host(RpcEvent {
+        kind: "plan_ready".to_owned(),
+        payload: json!({"artifact": plan()}),
+    }));
+    assert!(app.update(press(KeyCode::Esc)).is_empty());
+    assert!(app.state.plan_review.is_none());
+    assert!(app.state.plan_mode_active);
+
+    app.update(AppEvent::Host(RpcEvent {
+        kind: "plan_ready".to_owned(),
+        payload: json!({"artifact": plan()}),
+    }));
+    app.state.plan_review = Some(PlanReviewState {
+        selected: 0,
+        submitting: true,
+    });
+    assert!(app.update(press(KeyCode::Down)).is_empty());
+    assert!(app.update(press(KeyCode::Enter)).is_empty());
+    assert!(app.update(press(KeyCode::Esc)).is_empty());
+}
+
+#[test]
+fn plan_execution_failure_keeps_the_review_open_and_restores_idle() {
+    let mut app = App::new(state());
+    app.update(AppEvent::Host(RpcEvent {
+        kind: "plan_ready".to_owned(),
+        payload: json!({"artifact": plan()}),
+    }));
+    app.update(press(KeyCode::Enter));
+
+    app.update(AppEvent::Command(CommandEvent::PlanExecutionFinished {
+        context: PlanExecutionContext::Current,
+        result: Err("host refused".to_owned()),
+    }));
+
+    assert_eq!(
+        app.state.plan_review,
+        Some(PlanReviewState {
+            selected: 0,
+            submitting: false,
+        })
+    );
+    assert_eq!(app.state.run_state, RunState::Error);
 }
 
 #[test]
@@ -935,13 +990,13 @@ fn modal_priority_routes_keys_to_the_visible_question() {
 }
 
 #[test]
-fn stale_plan_status_and_foreign_scope_snapshots_cannot_replace_current_state() {
+fn stale_and_foreign_scope_plan_snapshots_cannot_replace_current_state() {
     let mut app = App::new(state());
-    let mut current = plan(PlanStatus::Executing);
+    let mut current = plan();
     current.updated_at = "2026-01-01T00:00:03.000Z".to_owned();
     app.state.plan = Some(current.clone());
 
-    let mut stale = plan(PlanStatus::Submitted);
+    let mut stale = plan();
     stale.updated_at = "2026-01-01T00:00:02.000Z".to_owned();
     app.update(AppEvent::Command(CommandEvent::PlanStateFinished(Ok(
         Box::new(crate::host::PlanStateData {
@@ -949,12 +1004,9 @@ fn stale_plan_status_and_foreign_scope_snapshots_cannot_replace_current_state() 
             artifact: Some(stale),
         }),
     ))));
-    assert_eq!(
-        app.state.plan.as_ref().unwrap().status,
-        PlanStatus::Executing
-    );
+    assert_eq!(app.state.plan.as_ref().unwrap(), &current);
 
-    let mut foreign = plan(PlanStatus::Completed);
+    let mut foreign = plan();
     foreign.updated_at = "2026-01-01T00:00:04.000Z".to_owned();
     app.update(AppEvent::Command(CommandEvent::PlanStateFinished(Ok(
         Box::new(crate::host::PlanStateData {
@@ -1483,13 +1535,81 @@ fn shift_tab_and_plan_command_switch_only_after_host_confirmation() {
     assert!(app.state().plan_mode_active);
     assert_eq!(app.state().pending_plan_mode, None);
     assert_eq!(app.state().transcript.len(), transcript_len);
+}
 
+#[test]
+fn plan_command_with_prompt_enters_plan_mode_then_delivers_the_prompt() {
+    let mut app = App::new(state());
+    app.state.editor.insert_text("/plan design the artifact");
+
+    let effects = app.update(press(KeyCode::Enter));
+    assert_eq!(effects, vec![AppEffect::SetPlanMode(true)]);
+    assert_eq!(
+        app.state().pending_plan_prompt.as_deref(),
+        Some("design the artifact")
+    );
+
+    let delivered = app.update(AppEvent::Command(CommandEvent::SetPlanModeFinished {
+        requested: true,
+        result: Ok(HostPlanModeData {
+            active: true,
+            active_tools: vec!["read".to_owned(), "grep".to_owned()],
+        }),
+    }));
+    assert_eq!(
+        delivered,
+        vec![AppEffect::Prompt("design the artifact".to_owned())]
+    );
+    assert!(app.state().plan_mode_active);
+    assert_eq!(app.state().pending_plan_prompt, None);
+    assert!(app.state().transcript.iter().any(|item| matches!(
+        item,
+        TranscriptItem::User(message) if message.text == "design the artifact"
+    )));
+}
+
+#[test]
+fn plan_command_prompt_is_a_plain_prompt_inside_plan_mode() {
+    let mut app = App::new(state());
+    app.state.plan_mode_active = true;
     app.state.editor.insert_text("/plan exit");
+
+    let effects = app.update(press(KeyCode::Enter));
+
+    assert_eq!(effects, vec![AppEffect::Prompt("exit".to_owned())]);
+    assert!(app.state().plan_mode_active);
+
+    let mut with_artifact = App::new(state());
+    with_artifact.state.plan_mode_active = true;
+    with_artifact.state.plan = Some(plan());
+    with_artifact.state.editor.insert_text("/plan");
+    assert!(with_artifact.update(press(KeyCode::Enter)).is_empty());
+    assert_eq!(
+        with_artifact.state.plan_review,
+        Some(PlanReviewState {
+            selected: 0,
+            submitting: false,
+        })
+    );
+}
+
+#[test]
+fn plan_command_without_prompt_enters_plan_mode_or_reopens_review() {
+    let mut app = App::new(state());
+    app.state.editor.insert_text("/plan");
     assert_eq!(
         app.update(press(KeyCode::Enter)),
-        vec![AppEffect::SetPlanMode(false)]
+        vec![AppEffect::SetPlanMode(true)]
     );
-    assert_eq!(app.state().transcript.len(), transcript_len);
+
+    let mut in_plan_mode = App::new(state());
+    in_plan_mode.state.plan_mode_active = true;
+    in_plan_mode.state.editor.insert_text("/plan");
+    assert!(in_plan_mode.update(press(KeyCode::Enter)).is_empty());
+    assert!(in_plan_mode.state().transcript.iter().any(|item| matches!(
+        item,
+        TranscriptItem::Notice(text) if text == "Plan mode is active; no Plan is awaiting review."
+    )));
 }
 
 #[test]

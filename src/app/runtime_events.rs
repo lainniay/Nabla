@@ -24,6 +24,7 @@ impl App {
                 self.state.integration_prompt_queue.clear();
                 self.state.open_agent_picker_on_agents = false;
                 self.state.pending_plan_mode = None;
+                self.state.pending_plan_prompt = None;
                 self.state.auth_state = AuthState::Inactive;
                 self.set_error("Host control service disconnected".to_owned());
             }

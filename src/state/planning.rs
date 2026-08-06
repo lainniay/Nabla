@@ -1,50 +1,29 @@
 use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PlanStatus {
-    #[serde(alias = "ready")]
-    Submitted,
-    Executing,
-    Completed,
-}
-
-impl PlanStatus {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Submitted => "submitted",
-            Self::Executing => "executing",
-            Self::Completed => "completed",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanArtifact {
-    pub schema_version: u8,
     pub id: String,
     pub revision: u64,
-    pub status: PlanStatus,
     pub title: String,
     pub summary: String,
     pub body_markdown: String,
     pub assumptions: Vec<String>,
     pub test_plan: Vec<String>,
+    pub handoff_markdown: String,
     pub source_session_id: String,
     pub created_at: String,
     pub updated_at: String,
-    #[serde(default)]
-    pub last_execution_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlanExecutionTarget {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanExecutionContext {
     Current,
     Fresh,
 }
 
-impl PlanExecutionTarget {
+impl PlanExecutionContext {
     pub fn label(self) -> &'static str {
         match self {
             Self::Current => "current context",
@@ -53,16 +32,10 @@ impl PlanExecutionTarget {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PlanReviewState {
-    Menu {
-        selected: usize,
-    },
-    Confirm {
-        target: PlanExecutionTarget,
-        selected: usize,
-        submitting: bool,
-    },
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanReviewState {
+    pub selected: usize,
+    pub submitting: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

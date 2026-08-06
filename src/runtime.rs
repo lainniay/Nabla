@@ -565,13 +565,13 @@ impl EffectDispatcher {
                     )
                 });
             }
-            AppEffect::ExecutePlan(target) => {
+            AppEffect::ExecutePlan(context) => {
                 let host = self.host.clone();
                 self.spawn(async move {
                     CommandEvent::PlanExecutionFinished {
-                        target,
+                        context,
                         result: host
-                            .execute_plan(target)
+                            .execute_plan(context)
                             .await
                             .map(Box::new)
                             .map_err(|error| error.to_string()),

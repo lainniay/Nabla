@@ -3,11 +3,12 @@ import test from "node:test";
 
 import {
   ContextBudgetManager,
+  contextRemaining,
   compactionRecordFromEntry,
   type ContextActiveState,
   type ContextPolicy,
 } from "./context-manager.ts";
-import type { PlanArtifactV2 } from "./plan.ts";
+import { PLAN_ENTRY_TYPE, type PlanArtifact } from "./plan.ts";
 
 type Messages = Parameters<ContextBudgetManager["filter"]>[0];
 
@@ -85,17 +86,16 @@ function resultById(messages: Messages, id: string): Messages[number] {
   )!;
 }
 
-function plan(): PlanArtifactV2 {
+function plan(): PlanArtifact {
   return {
-    schemaVersion: 2,
     id: "plan-1",
     revision: 3,
-    status: "executing",
     title: "Keep state",
     summary: "Restore active state after compaction.",
     bodyMarkdown: "Implement the complete structured checkpoint.",
     assumptions: ["Pi remains authoritative"],
     testPlan: ["npm test", "cargo test"],
+    handoffMarkdown: "Keep the Plan artifact available after compaction.",
     sourceSessionId: "session-1",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:01.000Z",
@@ -459,6 +459,7 @@ test("checkpoint is stable, model-only, structured, and avoids a duplicate plan 
   assert.equal(checkpoint.display, false);
   assert.match(checkpoint.content, /"planMode":false/);
   assert.match(checkpoint.content, /"bodyMarkdown"/);
+  assert.doesNotMatch(checkpoint.content, /status|lastExecutionError/u);
   assert.equal(first.messages[2], first.messages[2]);
 
   const again = manager.filter(base, undefined, {
@@ -471,10 +472,10 @@ test("checkpoint is stable, model-only, structured, and avoids a duplicate plan 
     base[0],
     {
       role: "custom",
-      customType: "nabla.plan.execution.v1",
+      customType: "test.full-plan",
       content: "the full plan is already here",
       display: false,
-      details: { planId: artifact.id, revision: artifact.revision },
+      details: artifact,
       timestamp: 3,
     },
   ] as Messages;
@@ -487,6 +488,135 @@ test("checkpoint is stable, model-only, structured, and avoids a duplicate plan 
   ).content;
   assert.match(deduplicatedText, /planAlreadyPresent/);
   assert.doesNotMatch(deduplicatedText, /bodyMarkdown/);
+
+  const revised = manager.filter(base, undefined, {
+    planMode: false,
+    plan: { ...artifact, revision: 4 },
+  });
+  assert.notDeepEqual(
+    (revised.messages[1] as unknown as { content: string }).content,
+    checkpoint.content,
+  );
+});
+
+test("checkpoint markers are not treated as the full Plan", () => {
+  let timestamp = 100;
+  const manager = new ContextBudgetManager({
+    policy: policy(),
+    now: () => timestamp++,
+  });
+  const artifact = plan();
+  const markerOnly = [
+    {
+      role: "compactionSummary",
+      summary: "Earlier work.",
+      tokensBefore: 100_000,
+      timestamp: 1,
+    },
+    {
+      role: "custom",
+      customType: "nabla.context-checkpoint",
+      content: JSON.stringify({
+        planAlreadyPresent: { id: artifact.id, revision: artifact.revision },
+      }),
+      display: false,
+      details: { planId: artifact.id, revision: artifact.revision },
+      timestamp: 2,
+    },
+  ] as Messages;
+
+  const result = manager.filter(markerOnly, undefined, {
+    planMode: false,
+    plan: artifact,
+  });
+  const checkpoint = (result.messages[1] as unknown as { content: string })
+    .content;
+  assert.match(checkpoint, /bodyMarkdown/);
+  assert.doesNotMatch(checkpoint, /planAlreadyPresent/);
+});
+
+test("Plan entries stay out of the model view but re-enter after compaction", () => {
+  const manager = new ContextBudgetManager({ policy: policy() });
+  const artifact = plan();
+  const planEntry = {
+    role: "custom",
+    customType: PLAN_ENTRY_TYPE,
+    content: JSON.stringify(artifact),
+    display: false,
+    timestamp: 1,
+  } as Messages[number];
+  const compacted = [
+    {
+      role: "compactionSummary",
+      summary: "Planning finished.",
+      tokensBefore: 50_000,
+      timestamp: 2,
+    },
+    planEntry,
+  ] as Messages;
+
+  const first = manager.filter([planEntry], undefined, {
+    planMode: false,
+    plan: artifact,
+  });
+  assert.equal(first.messages.length, 0);
+
+  const afterCompaction = manager.filter(compacted, undefined, {
+    planMode: false,
+    plan: artifact,
+  });
+  assert.ok(afterCompaction.messages.length >= 2);
+  assert.ok(
+    afterCompaction.messages.some(
+      (message) =>
+        (message as { customType?: string }).customType ===
+        "nabla.context-checkpoint",
+    ),
+  );
+  const checkpoint = afterCompaction.messages.find(
+    (message) =>
+      (message as { customType?: string }).customType ===
+      "nabla.context-checkpoint",
+  ) as unknown as { content: string };
+  assert.match(checkpoint.content, /bodyMarkdown/);
+});
+
+test("context remaining falls back to estimates and stays finite without a window", () => {
+  const actual = contextRemaining({
+    actualTokens: 40_000,
+    actualPercent: 40,
+    contextWindow: 100_000,
+    estimatedNextRequestTokens: 0,
+  } as Parameters<typeof contextRemaining>[0]);
+  assert.deepEqual(actual, {
+    usedTokens: 40_000,
+    usedPercent: 40,
+    remainingTokens: 60_000,
+    remainingPercent: 60,
+  });
+
+  const estimated = contextRemaining({
+    actualTokens: null,
+    actualPercent: null,
+    contextWindow: 200_000,
+    estimatedNextRequestTokens: 80_000,
+  } as Parameters<typeof contextRemaining>[0]);
+  assert.deepEqual(estimated, {
+    usedTokens: 80_000,
+    usedPercent: 40,
+    remainingTokens: 120_000,
+    remainingPercent: 60,
+  });
+
+  const unknown = contextRemaining({
+    actualTokens: null,
+    actualPercent: null,
+    contextWindow: null,
+    estimatedNextRequestTokens: 30_000,
+  } as Parameters<typeof contextRemaining>[0]);
+  assert.equal(unknown.remainingTokens, null);
+  assert.equal(unknown.remainingPercent, null);
+  assert.ok(Number.isFinite(unknown.usedTokens));
 });
 
 test("unknown messages fail open once and disabled pruning returns the original view", () => {

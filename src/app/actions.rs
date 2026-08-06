@@ -124,79 +124,31 @@ impl App {
                     generation: 0,
                 }]
             }
-            LocalCommand::Plan(argument) => match argument.as_deref() {
+            LocalCommand::Plan(argument) => match argument {
                 None => {
-                    if self
-                        .state
-                        .plan
-                        .as_ref()
-                        .is_some_and(|plan| plan.status == PlanStatus::Submitted)
-                    {
-                        self.state.plan_review = Some(PlanReviewState::Menu { selected: 0 });
-                    } else if !self.state.plan_mode_active {
-                        return self.toggle_plan_mode(true);
-                    } else {
-                        self.state.transcript.push(TranscriptItem::Notice(
-                            "Plan mode is active; no submitted Plan is awaiting review.".to_owned(),
-                        ));
-                    }
-                    Vec::new()
-                }
-                Some("exit") => self.toggle_plan_mode(false),
-                Some("status") => {
-                    self.state.transcript.push(TranscriptItem::Notice(format!(
-                        "Plan mode is {}.",
-                        if self.state.plan_mode_active {
-                            "active"
+                    if self.state.plan_mode_active {
+                        if self.state.plan.is_some() {
+                            self.state.plan_review = Some(PlanReviewState {
+                                selected: 0,
+                                submitting: false,
+                            });
                         } else {
-                            "inactive"
+                            self.state.transcript.push(TranscriptItem::Notice(
+                                "Plan mode is active; no Plan is awaiting review.".to_owned(),
+                            ));
                         }
-                    )));
-                    Vec::new()
-                }
-                Some("run" | "run current") => {
-                    if self
-                        .state
-                        .plan
-                        .as_ref()
-                        .is_some_and(|plan| plan.status == PlanStatus::Submitted)
-                    {
-                        self.state.plan_review = Some(PlanReviewState::Confirm {
-                            target: PlanExecutionTarget::Current,
-                            selected: 0,
-                            submitting: false,
-                        });
+                        Vec::new()
                     } else {
-                        self.state.transcript.push(TranscriptItem::Error(
-                            "No submitted Plan is available to run.".to_owned(),
-                        ));
+                        self.toggle_plan_mode(true)
                     }
-                    Vec::new()
                 }
-                Some("run fresh") => {
-                    if self
-                        .state
-                        .plan
-                        .as_ref()
-                        .is_some_and(|plan| plan.status == PlanStatus::Submitted)
-                    {
-                        self.state.plan_review = Some(PlanReviewState::Confirm {
-                            target: PlanExecutionTarget::Fresh,
-                            selected: 0,
-                            submitting: false,
-                        });
+                Some(prompt) => {
+                    if self.state.plan_mode_active {
+                        self.prepare_delivery(prompt, PromptDelivery::Prompt)
                     } else {
-                        self.state.transcript.push(TranscriptItem::Error(
-                            "No submitted Plan is available to run.".to_owned(),
-                        ));
+                        self.state.pending_plan_prompt = Some(prompt);
+                        self.toggle_plan_mode(true)
                     }
-                    Vec::new()
-                }
-                Some(_) => {
-                    self.state.transcript.push(TranscriptItem::Error(
-                        "Usage: /plan [exit|status|run [current|fresh]]".to_owned(),
-                    ));
-                    Vec::new()
                 }
             },
             LocalCommand::Compact(instructions) => {
@@ -365,10 +317,12 @@ impl App {
                 .transcript
                 .push(TranscriptItem::Plan(artifact.clone()));
         }
-        let ready = artifact.status == PlanStatus::Submitted;
         self.state.plan = Some(artifact);
-        if show_review && ready {
-            self.state.plan_review = Some(PlanReviewState::Menu { selected: 0 });
+        if show_review {
+            self.state.plan_review = Some(PlanReviewState {
+                selected: 0,
+                submitting: false,
+            });
         }
     }
 

@@ -8,6 +8,16 @@ pub enum ContextUsageState {
     Recalculating,
 }
 
+impl ContextUsageState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Actual => "actual",
+            Self::Estimated => "estimated",
+            Self::Recalculating => "recalculating",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ContextCategory {
@@ -147,5 +157,21 @@ impl Default for ContextSnapshot {
             },
             epoch: 0,
         }
+    }
+}
+
+impl ContextSnapshot {
+    pub fn remaining_percent(&self) -> Option<f64> {
+        let used_percent = self.actual_percent.or_else(|| {
+            let used_tokens = self
+                .actual_tokens
+                .or(Some(self.estimated_next_request_tokens))?;
+            let window = self.context_window?;
+            if window == 0 {
+                return None;
+            }
+            Some((used_tokens as f64 / window as f64) * 100.0)
+        })?;
+        Some((100.0 - used_percent).max(0.0))
     }
 }

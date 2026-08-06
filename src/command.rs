@@ -54,7 +54,7 @@ const LOCAL_COMMANDS: [LocalCommandDefinition; 16] = [
     ),
     LocalCommandDefinition::new(
         "plan",
-        "Enter Plan mode or control a submitted Plan",
+        "Enter Plan mode and optionally submit a planning prompt",
         LocalCommandKind::Plan,
     ),
     LocalCommandDefinition::new("help", "List available commands", LocalCommandKind::Help),

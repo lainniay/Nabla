@@ -216,26 +216,6 @@ impl App {
                     browser.loading = true;
                 }
             }
-            "plan_executing" => {
-                if let Ok(artifact) =
-                    serde_json::from_value::<PlanArtifact>(event.payload["artifact"].clone())
-                {
-                    self.state.plan = Some(artifact);
-                    self.state.plan_review = None;
-                }
-            }
-            "plan_completed" => {
-                if let Ok(artifact) =
-                    serde_json::from_value::<PlanArtifact>(event.payload["artifact"].clone())
-                {
-                    self.state.transcript.push(TranscriptItem::Notice(format!(
-                        "Plan {} r{} completed.",
-                        artifact.id, artifact.revision
-                    )));
-                    self.state.plan = Some(artifact);
-                    self.state.plan_review = None;
-                }
-            }
             "context_budget" => {
                 if let Ok(snapshot) =
                     serde_json::from_value::<ContextSnapshot>(event.payload["snapshot"].clone())
@@ -378,16 +358,6 @@ impl App {
                 let warning = string_field(&event.payload, "message")
                     .unwrap_or_else(|| "Host reported a recoverable warning".to_owned());
                 self.state.transcript.push(TranscriptItem::Error(warning));
-            }
-            "plan_execution_error" => {
-                if let Ok(artifact) =
-                    serde_json::from_value::<PlanArtifact>(event.payload["artifact"].clone())
-                {
-                    self.receive_plan(artifact, true);
-                }
-                let error = string_field(&event.payload, "error")
-                    .unwrap_or_else(|| "Plan execution failed".to_owned());
-                self.set_error(error);
             }
             "approval_blocked" => {
                 let tool_call_id = string_field(&event.payload, "toolCallId");

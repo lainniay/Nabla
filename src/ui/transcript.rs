@@ -5,8 +5,8 @@ use std::{
 };
 
 use crate::state::{
-    AppState, ToolDiff, ToolDiffFile, ToolDiffLine, ToolDiffLineKind, ToolExecution, ToolStatus,
-    TranscriptItem, TranscriptViewMode, TurnSeparator, UserMessage, UserMessageStatus,
+    AppState, PlanArtifact, ToolDiff, ToolDiffFile, ToolDiffLine, ToolDiffLineKind, ToolExecution,
+    ToolStatus, TranscriptItem, TranscriptViewMode, TurnSeparator, UserMessage, UserMessageStatus,
 };
 
 use super::{
@@ -885,30 +885,7 @@ fn render_item(id: &str, item: &TranscriptItem, width: u16, animation_frame: u8)
         return render_turn_separator(id, separator, width);
     }
     if let TranscriptItem::Plan(plan) = item {
-        let body = format!(
-            "**Plan · {} [{}]**\n\n{}\n\n{}",
-            plan.title,
-            plan.status.label(),
-            plan.summary,
-            plan.body_markdown
-        );
-        let marker_style = CellStyle::foreground(Color::Cyan);
-        let body_style = CellStyle::foreground(Color::White);
-        let content_width = width.saturating_sub(2).max(1);
-        let mut rows = markdown::render(&body, id, content_width, body_style);
-        for (index, row) in rows.iter_mut().enumerate() {
-            let mut prefixed = if index == 0 {
-                vec![
-                    StyledCell::new("◇", 1, marker_style.bold()),
-                    StyledCell::new(" ", 1, marker_style),
-                ]
-            } else {
-                vec![StyledCell::new("  ", 2, body_style)]
-            };
-            prefixed.extend(std::mem::take(&mut row.cells));
-            row.cells = prefixed;
-        }
-        return rows;
+        return render_plan(id, plan, width, false);
     }
 
     let (prefix, body, style) = match item {
@@ -1040,6 +1017,57 @@ fn prefix_assistant_rows(
         prefixed.extend(std::mem::take(&mut row.cells));
         row.cells = prefixed;
     }
+}
+
+fn render_plan(id: &str, plan: &PlanArtifact, width: u16, expanded: bool) -> Vec<VisualRow> {
+    let mut body = format!(
+        "**Plan · {}** (r{})\n\n{}\n\n{}",
+        plan.title, plan.revision, plan.summary, plan.body_markdown
+    );
+    if !plan.assumptions.is_empty() {
+        body.push_str("\n\n## Assumptions\n");
+        body.push_str(
+            &plan
+                .assumptions
+                .iter()
+                .map(|item| format!("- {item}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    if !plan.test_plan.is_empty() {
+        body.push_str("\n\n## Test plan\n");
+        body.push_str(
+            &plan
+                .test_plan
+                .iter()
+                .map(|item| format!("- {item}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    if expanded && !plan.handoff_markdown.is_empty() {
+        body.push_str("\n\n## Handoff\n");
+        body.push_str(&plan.handoff_markdown);
+    }
+
+    let marker_style = CellStyle::foreground(Color::Cyan);
+    let body_style = CellStyle::foreground(Color::White);
+    let content_width = width.saturating_sub(2).max(1);
+    let mut rows = markdown::render(&body, id, content_width, body_style);
+    for (index, row) in rows.iter_mut().enumerate() {
+        let mut prefixed = if index == 0 {
+            vec![
+                StyledCell::new("◇", 1, marker_style.bold()),
+                StyledCell::new(" ", 1, marker_style),
+            ]
+        } else {
+            vec![StyledCell::new("  ", 2, body_style)]
+        };
+        prefixed.extend(std::mem::take(&mut row.cells));
+        row.cells = prefixed;
+    }
+    rows
 }
 
 fn render_user(id: &str, message: &UserMessage, width: u16) -> Vec<VisualRow> {
@@ -1825,6 +1853,7 @@ pub(crate) fn render_viewer_item(
             },
             0,
         ),
+        (_, TranscriptItem::Plan(plan)) if expanded => render_plan(id, plan, width, true),
         _ => render_item(id, item, width, 0),
     };
     if selected {
@@ -3053,5 +3082,50 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].display_width(), 40);
         assert!(rows[0].plain_text().ends_with(" Worked for ~1m 05s ─"));
+    }
+
+    #[test]
+    fn plan_transcript_hides_status_and_expands_handoff() {
+        let artifact = PlanArtifact {
+            id: "plan-1".to_owned(),
+            revision: 2,
+            title: "Structured planning".to_owned(),
+            summary: "Treat plans as artifacts.".to_owned(),
+            body_markdown: "Implement the artifact flow.".to_owned(),
+            assumptions: vec!["Rust owns interaction".to_owned()],
+            test_plan: vec!["Run cargo test".to_owned()],
+            handoff_markdown: "Carry the Plan into the implementation turn.".to_owned(),
+            source_session_id: "session-1".to_owned(),
+            created_at: "2026-01-01T00:00:00.000Z".to_owned(),
+            updated_at: "2026-01-01T00:00:01.000Z".to_owned(),
+        };
+        let item = TranscriptItem::Plan(artifact.clone());
+
+        let compact = render_item("plan", &item, 80, 0)
+            .iter()
+            .map(VisualRow::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(compact.contains("Plan · Structured planning"));
+        assert!(compact.contains("(r2)"));
+        assert!(compact.contains("## Assumptions"));
+        assert!(compact.contains("## Test plan"));
+        assert!(!compact.contains("submitted"));
+        assert!(!compact.contains("## Handoff"));
+
+        let expanded = render_viewer_item(
+            "viewer",
+            &item,
+            80,
+            TranscriptViewMode::Verbose,
+            true,
+            false,
+        )
+        .iter()
+        .map(VisualRow::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+        assert!(expanded.contains("## Handoff"));
+        assert!(expanded.contains("Carry the Plan into the implementation turn."));
     }
 }

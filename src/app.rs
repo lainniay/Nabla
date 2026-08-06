@@ -25,7 +25,7 @@ pub use crate::state::{
     AuthPromptState, AuthState, CompactionRecord, ConnectionState, ContextCategory,
     ContextCategoryEstimate, ContextConsumer, ContextPolicy, ContextPruneEstimate, ContextSnapshot,
     ContextUsageState, EditorState, IntegrationPromptState, PermissionManagerState, PlanArtifact,
-    PlanExecutionTarget, PlanQuestion, PlanReviewState, PlanStatus, PruneReason, QuestionAnswer,
+    PlanExecutionContext, PlanQuestion, PlanReviewState, PruneReason, QuestionAnswer,
     QuestionFlowState, ResourceSnapshot, RunState, SelectionPanelAction, SelectionPanelKind,
     SelectionPanelOption, SelectionPanelState, SessionBrowserSnapshot, SessionBrowserState,
     SessionHistoryItem, SessionScope, SessionSortMode, SessionSummary, SubagentTranscript,
@@ -141,7 +141,7 @@ pub enum AppEffect {
         request_id: String,
         answers: Vec<QuestionAnswer>,
     },
-    ExecutePlan(PlanExecutionTarget),
+    ExecutePlan(PlanExecutionContext),
     Quit,
     ExitWithError(String),
 }

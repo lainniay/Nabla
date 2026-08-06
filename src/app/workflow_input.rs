@@ -113,69 +113,23 @@ impl App {
     }
 
     pub(super) fn update_plan_review_key(&mut self, key: KeyEvent) -> Vec<AppEffect> {
-        let Some(review) = self.state.plan_review.clone() else {
+        let Some(mut review) = self.state.plan_review else {
             return Vec::new();
         };
-        match review {
-            PlanReviewState::Menu { mut selected } => {
-                match update_choice_navigation(key, &mut selected, &[true, true, true]) {
-                    ChoiceNavAction::Handled => {
-                        self.state.plan_review = Some(PlanReviewState::Menu { selected });
-                    }
-                    ChoiceNavAction::Confirm(selected) => {
-                        return self.choose_plan_review(selected);
-                    }
-                    ChoiceNavAction::Cancel => {
-                        self.state.plan_review = None;
-                    }
-                    ChoiceNavAction::Unhandled => {}
-                }
+        if review.submitting {
+            return Vec::new();
+        }
+        match update_choice_navigation(key, &mut review.selected, &[true, true, true]) {
+            ChoiceNavAction::Handled => {
+                self.state.plan_review = Some(review);
             }
-            PlanReviewState::Confirm {
-                target,
-                mut selected,
-                submitting,
-            } => {
-                if submitting {
-                    return Vec::new();
-                }
-                let plain_character = !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
-                if plain_character && matches!(key.code, KeyCode::Char('n' | 'N')) {
-                    let selected = usize::from(target == PlanExecutionTarget::Fresh);
-                    self.state.plan_review = Some(PlanReviewState::Menu { selected });
-                    return Vec::new();
-                }
-                if !plain_character || !matches!(key.code, KeyCode::Char('y' | 'Y')) {
-                    match update_choice_navigation(key, &mut selected, &[true, true]) {
-                        ChoiceNavAction::Handled => {
-                            self.state.plan_review = Some(PlanReviewState::Confirm {
-                                target,
-                                selected,
-                                submitting: false,
-                            });
-                            return Vec::new();
-                        }
-                        ChoiceNavAction::Cancel | ChoiceNavAction::Confirm(1) => {
-                            let selected = usize::from(target == PlanExecutionTarget::Fresh);
-                            self.state.plan_review = Some(PlanReviewState::Menu { selected });
-                            return Vec::new();
-                        }
-                        ChoiceNavAction::Confirm(0) => {}
-                        ChoiceNavAction::Confirm(_) | ChoiceNavAction::Unhandled => {
-                            return Vec::new();
-                        }
-                    }
-                }
-                self.state.plan_review = Some(PlanReviewState::Confirm {
-                    target,
-                    selected: 0,
-                    submitting: true,
-                });
-                self.state.run_state = RunState::Submitting;
-                return vec![AppEffect::ExecutePlan(target)];
+            ChoiceNavAction::Confirm(selected) => {
+                return self.choose_plan_review(selected);
             }
+            ChoiceNavAction::Cancel => {
+                self.state.plan_review = None;
+            }
+            ChoiceNavAction::Unhandled => {}
         }
         Vec::new()
     }
@@ -185,28 +139,24 @@ impl App {
             return Vec::new();
         }
         match selected {
-            0 => {
-                self.state.plan_review = Some(PlanReviewState::Confirm {
-                    target: PlanExecutionTarget::Current,
-                    selected: 0,
-                    submitting: false,
+            0 | 1 => {
+                let context = if selected == 0 {
+                    PlanExecutionContext::Current
+                } else {
+                    PlanExecutionContext::Fresh
+                };
+                self.state.plan_review = Some(PlanReviewState {
+                    selected,
+                    submitting: true,
                 });
-            }
-            1 => {
-                self.state.plan_review = Some(PlanReviewState::Confirm {
-                    target: PlanExecutionTarget::Fresh,
-                    selected: 0,
-                    submitting: false,
-                });
+                self.state.run_state = RunState::Submitting;
+                vec![AppEffect::ExecutePlan(context)]
             }
             _ => {
                 self.state.plan_review = None;
-                if !self.state.plan_mode_active {
-                    return self.toggle_plan_mode(true);
-                }
+                Vec::new()
             }
         }
-        Vec::new()
     }
 
     pub(super) fn update_approval_key(&mut self, key: KeyEvent) -> Vec<AppEffect> {

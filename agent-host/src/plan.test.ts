@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  LEGACY_PLAN_ENTRY_TYPE,
+  PLAN_ENTRY_TYPE,
   PLAN_MODE_ENTRY_TYPE,
+  type PlanArtifact,
   PlanStore,
-  planExecutionPrompt,
+  planImplementationPrompt,
   restorePlanMode,
 } from "./plan.ts";
 
@@ -15,9 +16,22 @@ const content = {
   bodyMarkdown: "1. Add the host protocol.\n2. Render the review.",
   assumptions: ["Rust owns interaction"],
   testPlan: ["Run both suites"],
+  handoffMarkdown: "Keep the artifact immutable across sessions.",
 };
 
-test("plan revisions keep stable identity and increment revision", () => {
+function artifact(overrides: Partial<PlanArtifact> = {}): PlanArtifact {
+  return {
+    id: "plan-1",
+    revision: 1,
+    ...content,
+    sourceSessionId: "session-1",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+test("plan revisions keep stable identity and increment revision without status", () => {
   let tick = 0;
   const store = new PlanStore({
     createId: () => "plan-1",
@@ -32,60 +46,36 @@ test("plan revisions keep stable identity and increment revision", () => {
   assert.equal(second.id, first.id);
   assert.equal(second.revision, 2);
   assert.equal(second.createdAt, first.createdAt);
-  assert.equal(second.status, "submitted");
+  assert.ok(second.updatedAt > first.updatedAt);
+  assert.equal("status" in second, false);
 });
 
-test("plan lifecycle timestamps stay monotonic when the clock does not advance", () => {
+test("plan artifact timestamps stay monotonic when the clock does not advance", () => {
   const store = new PlanStore({
     createId: () => "plan-monotonic",
     now: () => "2026-01-01T00:00:00.000Z",
   });
 
-  const submitted = store.submit(content, "session-1");
-  const executing = store.markExecuting();
-  const completed = store.markCompleted();
+  const first = store.submit(content, "session-1");
+  const second = store.submit(content, "session-1");
 
-  assert.equal(submitted.updatedAt, "2026-01-01T00:00:00.000Z");
-  assert.equal(executing.updatedAt, "2026-01-01T00:00:00.001Z");
-  assert.equal(completed.updatedAt, "2026-01-01T00:00:00.002Z");
+  assert.equal(first.updatedAt, "2026-01-01T00:00:00.000Z");
+  assert.equal(second.updatedAt, "2026-01-01T00:00:00.001Z");
 });
 
-test("restore migrates legacy executing plans as interrupted and submitted", () => {
-  const store = new PlanStore({ now: () => "2026-02-02T00:00:00.000Z" });
-  const artifact = {
-    schemaVersion: 1 as const,
-    id: "plan-2",
-    revision: 3,
-    status: "executing" as const,
-    ...content,
-    sourceSessionId: "session-2",
-    createdAt: "2026-01-01T00:00:00.000Z",
-    updatedAt: "2026-01-01T00:00:01.000Z",
-  };
-
+test("restore reads only the last valid nabla.plan entry and ignores legacy entries", () => {
+  const store = new PlanStore();
+  const legacyTypes = [1, 2].map((version) => `nabla.plan.v${version}`);
   const restored = store.restore([
     { type: "message", data: { text: "not a plan" } },
-    { type: "custom", customType: LEGACY_PLAN_ENTRY_TYPE, data: artifact },
+    { type: "custom", customType: legacyTypes[0], data: artifact() },
+    { type: "custom", customType: PLAN_ENTRY_TYPE, data: artifact() },
+    { type: "custom", customType: PLAN_ENTRY_TYPE, data: artifact({ revision: 2 }) },
+    { type: "custom", customType: PLAN_ENTRY_TYPE, data: { id: "broken" } },
   ]);
 
-  assert.equal(restored.recovered, true);
-  assert.equal(restored.artifact?.status, "submitted");
-  assert.equal(restored.artifact?.revision, 3);
-  assert.match(restored.artifact?.lastExecutionError ?? "", /interrupted/u);
-});
-
-test("execution prompt identifies the exact artifact revision", () => {
-  const store = new PlanStore({
-    createId: () => "plan-3",
-    now: () => "2026-01-01T00:00:00.000Z",
-  });
-  const artifact = store.submit(content, "session-3");
-
-  const prompt = planExecutionPrompt(artifact);
-
-  assert.match(prompt, /PlanArtifact plan-3 revision 1/);
-  assert.match(prompt, /Add the host protocol/);
-  assert.match(prompt, /Run both suites/);
+  assert.equal(restored?.id, "plan-1");
+  assert.equal(restored?.revision, 2);
 });
 
 test("clearing the store starts an independent Plan identity", () => {
@@ -120,24 +110,51 @@ test("Plan mode restores from the active Pi branch only", () => {
   );
 });
 
-test("Plan lifecycle rejects invalid status jumps and execution-time revision", () => {
-  const store = new PlanStore({
-    createId: () => "plan-state-machine",
-    now: () => "2026-01-01T00:00:00.000Z",
-  });
-  store.submit(content, "session-1");
-  assert.throws(() => store.markCompleted(), /cannot complete/u);
-
-  store.markExecuting();
-  assert.throws(() => store.markExecuting(), /cannot start/u);
+test("handoffMarkdown must be non-empty when submitting", () => {
+  const store = new PlanStore();
   assert.throws(
-    () => store.submit(content, "session-1"),
-    /Cannot revise a Plan while it is executing/u,
+    () => store.submit({ ...content, handoffMarkdown: "  " }, "session-1"),
+    /handoffMarkdown/u,
   );
-  store.markSubmitted("failed");
-  assert.throws(() => store.markSubmitted(), /cannot return to submitted/u);
+});
 
-  store.markExecuting();
-  store.markCompleted();
-  assert.throws(() => store.markCompleted(), /cannot complete/u);
+test("plan content and lists are trimmed and normalized on submit", () => {
+  const store = new PlanStore();
+  const submitted = store.submit(
+    {
+      title: "  Padded title  ",
+      summary: "  Summary  ",
+      bodyMarkdown: "  Body  ",
+      assumptions: ["  first  ", "", "second"],
+      testPlan: ["  cargo test  "],
+      handoffMarkdown: "  Handoff  ",
+    },
+    "session-1",
+  );
+
+  assert.deepEqual(submitted, {
+    id: submitted.id,
+    revision: 1,
+    title: "Padded title",
+    summary: "Summary",
+    bodyMarkdown: "Body",
+    assumptions: ["first", "second"],
+    testPlan: ["cargo test"],
+    handoffMarkdown: "Handoff",
+    sourceSessionId: "session-1",
+    createdAt: submitted.createdAt,
+    updatedAt: submitted.updatedAt,
+  });
+});
+
+test("implementation prompt carries the full artifact and handoff without lifecycle fields", () => {
+  const prompt = planImplementationPrompt(artifact({ revision: 3 }));
+
+  assert.match(prompt, /Plan plan-1 revision 3/);
+  assert.match(prompt, /## Source objective and handoff/);
+  assert.match(prompt, /Keep the artifact immutable across sessions\./);
+  assert.match(prompt, /## Approved plan/);
+  assert.match(prompt, /Add the host protocol/);
+  assert.match(prompt, /Run both suites/);
+  assert.doesNotMatch(prompt, /status|completed|executing/iu);
 });
