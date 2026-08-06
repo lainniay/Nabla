@@ -13,8 +13,6 @@ import {
   SessionManager,
   SettingsManager,
   createAgentSession,
-  type ToolCallEvent,
-  type ToolCallEventResult,
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
@@ -24,7 +22,6 @@ import {
 import { Type } from "typebox";
 
 import { newFileDisplayDiff } from "./tool-diff.ts";
-import { ApprovalQueue, type ApprovalDecision } from "./approval.ts";
 import {
   ContextBudgetManager,
   contextRemaining,
@@ -67,22 +64,6 @@ import {
   type TreeFilterMode,
   type TreeSnapshot,
 } from "./session-navigation.ts";
-import { workspacePathError } from "./workspace.ts";
-import { ShellAdapter } from "./permissions/adapters/shell.ts";
-import { JsonlPermissionAuditLog } from "./permissions/audit-log.ts";
-import { ApprovalBroker as PermissionApprovalBroker } from "./permissions/approvals/broker.ts";
-import { PermissionKernel } from "./permissions/kernel.ts";
-import type { Authorization } from "./permissions/kernel.ts";
-import { ExecutionBroker } from "./permissions/execution/broker.ts";
-import { DirectRunner } from "./permissions/execution/direct-runner.ts";
-import type {
-  ExecutionProfile,
-  PermissionRule,
-  ToolContext,
-} from "./permissions/model.ts";
-import { mutatesManagedWorktree } from "./permissions/managed-worktree.ts";
-import { PolicyStore } from "./permissions/policy-store.ts";
-import { resolveWorkspaceIdentity } from "./permissions/workspace-identity.ts";
 import { parseSubagentOutput } from "./protocol/subagent-output.ts";
 import { CommandRouter } from "./protocol/command-router.ts";
 import { createAgentCommands } from "./protocol/commands/agent-commands.ts";
@@ -130,6 +111,7 @@ import { ModelService } from "./features/models/model-service.ts";
 import { AuthService } from "./features/auth/auth-service.ts";
 import { WorkspaceService } from "./features/workspace/workspace-service.ts";
 import { BootstrapService } from "./features/bootstrap/bootstrap-service.ts";
+import { PermissionService } from "./features/permissions/permission-service.ts";
 import { SessionService } from "./features/sessions/session-service.ts";
 import { SessionBrowserService } from "./features/sessions/session-browser-service.ts";
 import { TreeService } from "./features/sessions/tree-service.ts";
@@ -142,12 +124,6 @@ import type {
 } from "./features/subagents/subagent-types.ts";
 
 
-const EXTERNAL_TOOL_EXECUTION_PROFILE: ExecutionProfile = {
-  backend: "none",
-  filesystem: { read: ["*"], write: ["*"] },
-  network: { allow: [{ host: "*" }] },
-  environment: { inherit: [], set: {} },
-};
 const STANDARD_INSTRUCTIONS = [
   "Follow Pi's normal interactive agent behavior and the user's direct request.",
   "Mutation tools remain subject to the host's fine-grained approval policy.",
@@ -200,25 +176,13 @@ export class HostBridge implements LegacyHostOperations {
   private readonly auth: AuthService;
   private readonly workspace: WorkspaceService;
   private readonly bootstrap: BootstrapService;
+  private readonly permissions: PermissionService;
   private readonly sessionBrowser: SessionBrowserService;
   private readonly sessionService: SessionService;
   private readonly treeService: TreeService;
   private readonly events: HostEventPublisher;
   private readonly diagnostics = new HostDiagnostics();
   private readonly interactions = new InteractionBroker();
-  private readonly permissionPolicies = new PolicyStore();
-  private readonly permissionApprovals = new PermissionApprovalBroker();
-  private readonly permissionKernel = new PermissionKernel(
-    this.permissionPolicies,
-    this.permissionApprovals,
-    new JsonlPermissionAuditLog(),
-  );
-  private readonly externalExecutionBroker = new ExecutionBroker(
-    this.permissionKernel,
-    new DirectRunner(),
-  );
-  private readonly pendingToolAuthorizations = new Map<string, Authorization>();
-  private readonly shellPermissionAdapter = new ShellAdapter();
   private readonly plansService: PlanService;
   private readonly context: ContextService;
   private readonly modelRuntime: ModelRuntime;
@@ -264,6 +228,16 @@ export class HostBridge implements LegacyHostOperations {
       this.runtime,
       this.planMode,
       (event) => this.send(event),
+    );
+    this.permissions = new PermissionService(
+      this.interactions,
+      (event) => this.send(event),
+      this.planMode,
+      () => this.control.hasConnection(),
+      {
+        sessionId: () => this.currentScopeId(),
+        cwd: () => this.runtime.current().session.sessionManager.getCwd(),
+      },
     );
     this.workspace = new WorkspaceService(
       this.runtime,
@@ -327,16 +301,6 @@ export class HostBridge implements LegacyHostOperations {
           this.sessionBrowser.closeAll();
         },
       },
-    );
-    this.permissionPolicies.setBuiltin(
-      ["ask_user", "submit_plan"].map(
-        (tool): PermissionRule => ({
-          id: `builtin-tool-${tool}`,
-          effect: "allow",
-          source: "builtin",
-          matcher: { kind: "tool", tool },
-        }),
-      ),
     );
   }
 
@@ -542,10 +506,13 @@ export class HostBridge implements LegacyHostOperations {
             const target = resolve(context.cwd, expandHomePath(input.path));
             if (!existsSync(target)) newWriteCalls.add(event.toolCallId);
           }
-          return this.authorizeTool(event, context.cwd, context.signal);
+          return this.permissions.authorizeTool(event, {
+            cwd: context.cwd,
+            signal: context.signal,
+          });
         });
         pi.on("tool_result", (event) => {
-          this.finishToolAuthorization(event.toolCallId, !event.isError);
+          this.permissions.finishTool(event.toolCallId, !event.isError);
           if (event.toolName !== "write") return;
           const wasNew = newWriteCalls.delete(event.toolCallId);
           if (!wasNew || event.isError) return;
@@ -1618,17 +1585,22 @@ export class HostBridge implements LegacyHostOperations {
           ].join("\n\n"),
         }));
         pi.on("tool_call", (event, context) =>
-          this.authorizeTool(event, context.cwd, context.signal, {
-            agentId,
-            profile: profileName,
-            model,
-            profileConfig: profile,
-            planReadOnly: this.subagents.get(agentId)?.planReadOnly === true,
-            sessionId: context.sessionManager.getSessionId(),
+          this.permissions.authorizeTool(event, {
+            cwd: context.cwd,
+            signal: context.signal,
+            agent: {
+              agentId,
+              profile: profileName,
+              model,
+              profileConfig: profile,
+              planReadOnly:
+                this.subagents.get(agentId)?.planReadOnly === true,
+              sessionId: context.sessionManager.getSessionId(),
+            },
           }),
         );
         pi.on("tool_result", (event) => {
-          this.finishToolAuthorization(event.toolCallId, !event.isError);
+          this.permissions.finishTool(event.toolCallId, !event.isError);
         });
       },
     };
@@ -1770,24 +1742,15 @@ export class HostBridge implements LegacyHostOperations {
   }
 
   public workspaceApprovalRules(): WorkspaceGrantSnapshot {
-    const identity = resolveWorkspaceIdentity(
-      this.runtime.current().session.sessionManager.getCwd(),
-    );
-    return this.permissionApprovals.workspace.snapshot(identity);
+    return this.permissions.workspaceRules();
   }
 
   public revokeApprovalRule(ruleId: string): WorkspaceGrantSnapshot {
-    const identity = resolveWorkspaceIdentity(
-      this.runtime.current().session.sessionManager.getCwd(),
-    );
-    return this.permissionApprovals.workspace.revoke(identity, ruleId);
+    return this.permissions.revokeWorkspaceRule(ruleId);
   }
 
   public clearApprovalRules(): WorkspaceGrantSnapshot {
-    const identity = resolveWorkspaceIdentity(
-      this.runtime.current().session.sessionManager.getCwd(),
-    );
-    return this.permissionApprovals.workspace.clear(identity);
+    return this.permissions.clearWorkspaceRules();
   }
 
   private sendPlanModeState(): void {
@@ -1887,199 +1850,6 @@ export class HostBridge implements LegacyHostOperations {
   ): Promise<PlanExecutionResult> {
     return this.plansService.execute(context);
   }
-
-  private async authorizeTool(
-    event: ToolCallEvent,
-    cwd: string,
-    signal: AbortSignal | undefined,
-    agent: {
-      agentId?: string;
-      profile?: string;
-      model?: string;
-      profileConfig?: AgentProfile;
-      planReadOnly?: boolean;
-      sessionId?: string;
-    } = {},
-  ): Promise<ToolCallEventResult | undefined> {
-    const toolName = event.toolName;
-    const input = event.input as Record<string, unknown>;
-    const path = typeof input.path === "string" ? input.path : undefined;
-    const command = typeof input.command === "string" ? input.command : undefined;
-    const profile = agent.profileConfig;
-    if (profile && !profile.tools.includes(toolName)) {
-      return {
-        block: true,
-        reason: `Tool ${toolName} is not exposed to profile ${agent.profile}`,
-      };
-    }
-    const profileEffect = profile
-      ? agentPermissionEffect(
-          profile,
-          toolName,
-          agentToolResource(cwd, path, command),
-        )
-      : undefined;
-    const sessionId = agent.sessionId ?? this.tryCurrentScopeId();
-    if (!sessionId) {
-      return { block: true, reason: "Permission scope is unavailable" };
-    }
-    const identity = resolveWorkspaceIdentity(cwd);
-    const permissionContext: ToolContext = {
-      requestId: `request-${event.toolCallId}`,
-      toolCallId: event.toolCallId,
-      sessionId,
-      workspaceId: identity.id,
-      cwd,
-    };
-    const normalize = () =>
-      permissionIntentForTool(
-        permissionContext,
-        toolName,
-        event.input,
-        this.shellPermissionAdapter,
-      );
-    const intent = normalize();
-    const additionalRules: PermissionRule[] = [];
-    const addToolRule = (
-      id: string,
-      effect: "ask" | "deny",
-      source: PermissionRule["source"],
-    ) => {
-      additionalRules.push({
-        id,
-        effect,
-        source,
-        matcher: { kind: "tool", tool: toolName },
-      });
-    };
-    if (profileEffect === "deny") {
-      addToolRule(`profile-${agent.profile}-deny`, "deny", "managed");
-    } else if (profileEffect === "ask") {
-      addToolRule(`profile-${agent.profile}-ask`, "ask", "managed");
-    }
-    if (
-      agent.planReadOnly &&
-      intent.atoms.some(
-        (atom) =>
-          atom.kind === "exec" ||
-          (atom.kind === "file" && atom.operation !== "read" && atom.operation !== "list") ||
-          atom.kind === "opaque_code",
-      )
-    ) {
-      addToolRule("plan-read-only", "deny", "managed");
-    }
-    if (agent.agentId && mutatesManagedWorktree(intent)) {
-      addToolRule("managed-worktree-boundary", "deny", "managed");
-    }
-    if (
-      !agent.agentId &&
-      this.planMode.current() &&
-      intent.atoms.some(
-        (atom) =>
-          atom.kind === "exec" ||
-          (atom.kind === "file" && atom.operation !== "read" && atom.operation !== "list"),
-      )
-    ) {
-      addToolRule("plan-mode-mutation", "deny", "managed");
-    }
-
-    let risk: "normal" | "high" | "credential" | "outside_workspace" =
-      intent.atoms.some((atom) => atom.kind === "opaque_code") ? "high" : "normal";
-    let reason =
-      risk === "high"
-        ? "The request contains code that cannot be statically decomposed"
-        : "Permission is required for every capability in this request";
-    if (path) {
-      const pathError = await workspacePathError(cwd, path);
-      if (isCredentialPath(resolve(cwd, path))) {
-        reason = "Path may contain credentials";
-        risk = "credential";
-      } else if (pathError) {
-        reason = pathError;
-        risk = "outside_workspace";
-      }
-    }
-
-    const authorization = await this.permissionKernel.authorize(
-      permissionContext.requestId,
-      intent,
-      identity,
-      async ({ intent: requestedIntent, proposals }, approvalSignal) => {
-        if (!this.control.hasConnection()) return "deny";
-        const sessionGrant = proposals.find(
-          (proposal) => proposal.scope === "session",
-        );
-        const workspaceGrant = proposals.find(
-          (proposal) => proposal.scope === "workspace",
-        );
-        const availableDecisions: ApprovalDecision[] = ["allow_once"];
-        if (sessionGrant) availableDecisions.push("allow_session");
-        if (workspaceGrant) availableDecisions.push("allow_workspace");
-        availableDecisions.push("deny");
-        return this.interactions.requestApproval(
-          {
-            requestId: permissionContext.requestId,
-            toolCallId: event.toolCallId,
-            sessionId: permissionContext.sessionId,
-            workspaceId: permissionContext.workspaceId,
-            summary: reason,
-            risk,
-            intentDigest: requestedIntent.digest,
-            availableDecisions,
-            ...(sessionGrant ? { sessionGrant } : {}),
-            ...(workspaceGrant ? { workspaceGrant } : {}),
-            toolName,
-            input: event.input,
-            agentId: agent.agentId,
-            agentProfile: agent.profile,
-            model: agent.model,
-            reason,
-          },
-          approvalSignal,
-          (approvalEvent) => this.send(approvalEvent),
-        );
-      },
-      signal,
-      additionalRules,
-      !agent.agentId,
-      risk,
-    );
-    if (
-      authorization.evaluation.effect === "deny" ||
-      authorization.decision === "deny"
-    ) {
-      return {
-        block: true,
-        reason:
-          authorization.evaluation.effect === "deny"
-            ? "Denied by permission policy"
-            : "Denied by user",
-      };
-    }
-    if (
-      !this.externalExecutionBroker.beginExternalTool(
-        authorization,
-        normalize(),
-        EXTERNAL_TOOL_EXECUTION_PROFILE,
-      )
-    ) {
-      return { block: true, reason: "Tool input changed after approval" };
-    }
-    this.pendingToolAuthorizations.set(event.toolCallId, authorization);
-    return undefined;
-  }
-
-  private finishToolAuthorization(toolCallId: string, succeeded: boolean): void {
-    const authorization = this.pendingToolAuthorizations.get(toolCallId);
-    if (!authorization) return;
-    this.pendingToolAuthorizations.delete(toolCallId);
-    this.externalExecutionBroker.finishExternalTool(
-      authorization,
-      EXTERNAL_TOOL_EXECUTION_PROFILE,
-      succeeded,
-    );
-  }
-
 }
 
 function lastAssistantText(messages: unknown[]): string {
