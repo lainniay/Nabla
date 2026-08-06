@@ -55,9 +55,6 @@ import {
   planImplementationPrompt,
 } from "./plan.ts";
 import {
-  executePlan as dispatchPlanExecution,
-} from "./plan-execution.ts";
-import {
   QuestionQueue,
   type PlanQuestion,
   type QuestionAnswer,
@@ -136,6 +133,8 @@ import { BootstrapService } from "./features/bootstrap/bootstrap-service.ts";
 import { SessionService } from "./features/sessions/session-service.ts";
 import { SessionBrowserService } from "./features/sessions/session-browser-service.ts";
 import { TreeService } from "./features/sessions/tree-service.ts";
+import { PlanService } from "./features/plans/plan-service.ts";
+import { ContextService } from "./features/context/context-service.ts";
 import type {
   ActiveSubagent,
   SubagentHandle,
@@ -220,12 +219,12 @@ export class HostBridge implements LegacyHostOperations {
   );
   private readonly pendingToolAuthorizations = new Map<string, Authorization>();
   private readonly shellPermissionAdapter = new ShellAdapter();
-  private readonly plans: PlanStore;
+  private readonly plansService: PlanService;
+  private readonly context: ContextService;
   private readonly modelRuntime: ModelRuntime;
   private readonly models: ModelService;
   private readonly planMode: PlanModeService;
   private readonly runtime: RuntimeSupervisor;
-  private readonly contextBudget: ContextBudgetManager;
   private readonly afterLogin: (providerId: string) => Promise<unknown>;
   private readonly subagents = new Map<string, ActiveSubagent>();
   private readonly completedSubagents = new Map<
@@ -254,8 +253,18 @@ export class HostBridge implements LegacyHostOperations {
     this.models = models;
     this.planMode = planMode;
     this.runtime = runtime;
-    this.plans = plans;
-    this.contextBudget = contextBudget;
+    this.context = new ContextService(
+      contextBudget,
+      (event) => this.send(event),
+      (snapshot) => this.contextSnapshot(snapshot),
+    );
+    this.plansService = new PlanService(
+      plans,
+      this.modelRuntime,
+      this.runtime,
+      this.planMode,
+      (event) => this.send(event),
+    );
     this.workspace = new WorkspaceService(
       this.runtime,
       this.planMode,
@@ -277,11 +286,10 @@ export class HostBridge implements LegacyHostOperations {
     this.treeService = new TreeService(
       this.runtime,
       this.planMode,
-      this.plans,
-      this.contextBudget,
+      plans,
       (event) => this.send(event),
       () => this.sessionActivation(),
-      (snapshot) => this.contextSnapshot(snapshot),
+      () => this.context.publish(this.context.onTreeNavigation()),
     );
     this.afterLogin = afterLogin;
     this.auth = new AuthService(
@@ -404,7 +412,7 @@ export class HostBridge implements LegacyHostOperations {
             if (!this.planMode.current()) {
               throw new Error("submit_plan is only available in Plan mode");
             }
-            const artifact = this.plans.submit(
+            const artifact = this.plansService.submit(
               params as PlanContent,
               context.sessionManager.getSessionId(),
             );
@@ -449,16 +457,10 @@ export class HostBridge implements LegacyHostOperations {
           },
         });
         pi.on("session_start", (_event, context) => {
-          this.contextBudget.onSessionStart(
-            context.sessionManager.getSessionId(),
-          );
-          this.sendContextBudget(
-            this.contextBudget.onModelResponse(context.getContextUsage()),
-          );
-          const restored = this.plans.restore(
+          this.context.onRuntimeSessionStart(context);
+          this.plansService.onSessionActivated(
             context.sessionManager.getBranch(),
           );
-          this.send({ type: "plan_state", artifact: restored ?? null });
         });
         pi.on("agent_start", () => {
           const startedAtMs = Date.now();
@@ -502,7 +504,7 @@ export class HostBridge implements LegacyHostOperations {
             systemPrompt: [
               event.systemPrompt,
               this.planMode.current()
-                ? buildPlanInstructions(this.contextBudget.snapshot())
+                ? buildPlanInstructions(this.context.snapshot())
                 : STANDARD_INSTRUCTIONS,
               FILE_REFERENCE_INSTRUCTIONS,
               WORKSPACE_COMMAND_INSTRUCTIONS,
@@ -513,25 +515,23 @@ export class HostBridge implements LegacyHostOperations {
           };
         });
         pi.on("context", (event, context) => {
-          const result = this.contextBudget.filter(
+          const result = this.context.filter(
             event.messages,
             context.getContextUsage(),
             {
               planMode: this.planMode.current(),
-              plan: this.plans.latest(),
+              plan: this.plansService.snapshot() ?? undefined,
             },
           );
-          this.sendContextBudget(result.snapshot);
+          this.context.publish(result.snapshot);
           return { messages: result.messages };
         });
         pi.on("turn_end", (_event, context) => {
-          this.sendContextBudget(
-            this.contextBudget.onModelResponse(context.getContextUsage()),
-          );
+          this.context.publish(this.context.onModelResponse(context.getContextUsage()));
         });
         pi.on("session_compact", (event) => {
-          this.sendContextBudget(
-            this.contextBudget.onCompaction(
+          this.context.publish(
+            this.context.onCompaction(
               compactionRecordFromEntry(event.reason, event.compactionEntry),
             ),
           );
@@ -585,12 +585,7 @@ export class HostBridge implements LegacyHostOperations {
   }
 
   private sendContextBudget(snapshot: ContextSnapshot): void {
-    const policyWarning = this.contextBudget.takeWarning();
-    this.send({
-      type: "context_budget",
-      snapshot: this.contextSnapshot(snapshot),
-      ...(policyWarning ? { policyWarning } : {}),
-    });
+    this.context.publish(snapshot);
   }
 
   private currentScopeId(): string {
@@ -606,7 +601,7 @@ export class HostBridge implements LegacyHostOperations {
   }
 
   public contextSnapshot(
-    snapshot = this.contextBudget.snapshot(),
+    snapshot = this.context.snapshot(),
   ): ContextSnapshot {
     return { ...snapshot, scopeId: this.currentScopeId() };
   }
@@ -630,7 +625,7 @@ export class HostBridge implements LegacyHostOperations {
         active: this.planMode.current(),
         activeTools: session.getActiveToolNames(),
       },
-      artifact: this.plans.latest() ?? null,
+      artifact: this.plansService.snapshot(),
       resources: this.resourceSnapshot(),
       agents: this.agentsSnapshot(session),
       context: this.contextSnapshot(),
@@ -1770,7 +1765,7 @@ export class HostBridge implements LegacyHostOperations {
   public planState(): { scopeId: string; artifact: PlanArtifact | null } {
     return {
       scopeId: this.currentScopeId(),
-      artifact: this.plans.latest() ?? null,
+      artifact: this.plansService.snapshot(),
     };
   }
 
@@ -1882,7 +1877,7 @@ export class HostBridge implements LegacyHostOperations {
     return sessionActivation(
       this.runtime.current(),
       this.planMode,
-      this.plans,
+      this.plansService.snapshot(),
       () => this.contextSnapshot(),
     );
   }
@@ -1890,23 +1885,7 @@ export class HostBridge implements LegacyHostOperations {
   public async executePlan(
     context: "current" | "fresh",
   ): Promise<PlanExecutionResult> {
-    const result = await dispatchPlanExecution(context, {
-      plans: this.plans,
-      modelRuntime: this.modelRuntime,
-      runtime: () => this.runtime.current(),
-      setPlanMode: (active) => {
-        this.planMode.set(this.runtime.current().session, active);
-      },
-      send: (message) => this.send(message),
-      reportTurnError: (error) => {
-        this.reportHostWarning(
-          `Plan implementation turn failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      },
-    });
-    return result;
+    return this.plansService.execute(context);
   }
 
   private async authorizeTool(

@@ -6,7 +6,6 @@ import test from "node:test";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
-import { ContextBudgetManager } from "../../context-manager.ts";
 import { PlanStore } from "../../plan.ts";
 import type { RuntimeAccess } from "../../runtime/runtime-access.ts";
 import { PlanModeService } from "../../runtime/plan-mode-service.ts";
@@ -42,10 +41,9 @@ test("state, label, and abort delegate to the session", async () => {
       runtime,
       new PlanModeService(),
       new PlanStore(),
-      new ContextBudgetManager(),
       (event) => events.push(event),
       () => ({ activation: true }),
-      (snapshot) => ({ ...snapshot, scopeId: "session-1" }),
+      () => events.push({ type: "context_budget" }),
     );
 
     const state = service.state({
@@ -104,10 +102,9 @@ test("stale generation completion is dropped", async () => {
       runtime,
       new PlanModeService(),
       new PlanStore(),
-      new ContextBudgetManager(),
       () => {},
       () => ({ ok: true }),
-      (snapshot) => snapshot,
+      () => {},
     );
     const navigating = service.navigate({ entryId: "x", summarize: false });
     generation = 2;

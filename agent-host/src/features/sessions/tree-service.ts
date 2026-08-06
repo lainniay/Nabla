@@ -6,10 +6,6 @@ import {
 import type { RuntimeAccess } from "../../runtime/runtime-access.ts";
 import type { PlanModeService } from "../../runtime/plan-mode-service.ts";
 import type { PlanStore } from "../../plan.ts";
-import type {
-  ContextBudgetManager,
-  ContextSnapshot,
-} from "../../context-manager.ts";
 import {
   buildTreeSnapshot,
   copyTextForEntry,
@@ -23,29 +19,24 @@ export class TreeService {
   private readonly runtime: RuntimeAccess;
   private readonly planMode: PlanModeService;
   private readonly plans: PlanStore;
-  private readonly contextBudget: ContextBudgetManager;
   private readonly send: (event: JsonObject) => void;
   private readonly activation: () => JsonObject;
-  private readonly contextSnapshot: (
-    snapshot: ContextSnapshot,
-  ) => ContextSnapshot;
+  private readonly onTreeNavigation: () => void;
 
   constructor(
     runtime: RuntimeAccess,
     planMode: PlanModeService,
     plans: PlanStore,
-    contextBudget: ContextBudgetManager,
     send: (event: JsonObject) => void,
     activation: () => JsonObject,
-    contextSnapshot: (snapshot: ContextSnapshot) => ContextSnapshot,
+    onTreeNavigation: () => void,
   ) {
     this.runtime = runtime;
     this.planMode = planMode;
     this.plans = plans;
-    this.contextBudget = contextBudget;
     this.send = send;
     this.activation = activation;
-    this.contextSnapshot = contextSnapshot;
+    this.onTreeNavigation = onTreeNavigation;
   }
 
   state(input: {
@@ -96,7 +87,7 @@ export class TreeService {
       return { cancelled: true, aborted: result.aborted === true };
     }
     this.restorePlanState(runtime.session.sessionManager);
-    this.sendContextBudget();
+    this.onTreeNavigation();
     return {
       cancelled: false,
       aborted: false,
@@ -127,15 +118,4 @@ export class TreeService {
     });
   }
 
-  private sendContextBudget(): void {
-    const snapshot = this.contextSnapshot(
-      this.contextBudget.onTreeNavigation(),
-    );
-    const policyWarning = this.contextBudget.takeWarning();
-    this.send({
-      type: "context_budget",
-      snapshot,
-      ...(policyWarning ? { policyWarning } : {}),
-    });
-  }
 }

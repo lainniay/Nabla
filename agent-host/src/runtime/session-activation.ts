@@ -1,7 +1,7 @@
 import type { AgentSessionRuntime } from "@earendil-works/pi-coding-agent";
 
 import type { ContextSnapshot } from "../context-manager.ts";
-import type { PlanStore } from "../plan.ts";
+import type { PlanArtifact } from "../plan.ts";
 import { projectSessionHistory } from "../session-navigation.ts";
 import type { JsonObject } from "../protocol/validation.ts";
 import type { PlanModeService } from "./plan-mode-service.ts";
@@ -9,7 +9,7 @@ import type { PlanModeService } from "./plan-mode-service.ts";
 export function sessionActivation(
   runtime: AgentSessionRuntime,
   planMode: PlanModeService,
-  plans: PlanStore,
+  plan: PlanArtifact | null,
   context: () => ContextSnapshot,
 ): JsonObject {
   const session = runtime.session;
@@ -32,7 +32,7 @@ export function sessionActivation(
     cwd: manager.getCwd(),
     planMode: planMode.current(),
     history: projectSessionHistory(manager.buildContextEntries()),
-    plan: plans.latest() ?? null,
+    plan,
     context: context(),
   };
 }

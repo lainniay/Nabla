@@ -283,6 +283,8 @@ test("host command and event inventories are stable", () => {
     "../features/auth/auth-service.ts",
     "../features/workspace/workspace-service.ts",
     "../features/sessions/session-browser-service.ts",
+    "../features/context/context-service.ts",
+    "../features/plans/plan-service.ts",
   ]
     .map((file) =>
       readFileSync(new URL(`./transport/${file}`, import.meta.url), "utf8"),
