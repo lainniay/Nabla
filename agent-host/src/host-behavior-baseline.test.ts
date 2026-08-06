@@ -286,6 +286,7 @@ test("host command and event inventories are stable", () => {
     "../features/plans/plan-service.ts",
     "../features/subagents/subagent-supervisor.ts",
     "../features/subagents/subagent-runner.ts",
+    "../runtime/pi-extension-factory.ts",
   ]
     .map((file) =>
       readFileSync(new URL(`./transport/${file}`, import.meta.url), "utf8"),
@@ -297,7 +298,10 @@ test("host command and event inventories are stable", () => {
         .map((match) => match[1])
         .filter(
           (name) =>
-            name !== "api_key" && name !== "oauth" && name !== "error",
+            name !== "api_key" &&
+            name !== "oauth" &&
+            name !== "error" &&
+            name !== "text",
         ),
     ),
   ];

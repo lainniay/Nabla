@@ -67,7 +67,7 @@ export async function createHostApp(
       resourceLoaderOptions: {
         noThemes: true,
         noContextFiles: false,
-        extensionFactories: [hostBridge.extension()],
+        extensionFactories: [hostBridge.createExtension()],
         extensionsOverride: (base) => ({
           ...base,
           extensions: base.extensions.filter(
