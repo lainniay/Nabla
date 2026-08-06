@@ -7,6 +7,7 @@ import {
   type PlanArtifact,
   type PlanContent,
   type PlanSessionEntry,
+  PLAN_MODE_ENTRY_TYPE,
 } from "../../plan.ts";
 import {
   executePlan as dispatchPlanExecution,
@@ -70,5 +71,26 @@ export class PlanService {
         });
       },
     });
+  }
+
+  setMode(active: boolean): {
+    active: boolean;
+    activeTools: readonly string[];
+  } {
+    const session = this.runtime.current().session;
+    const activeTools = this.planMode.set(session, active);
+    session.sessionManager.appendCustomEntry(PLAN_MODE_ENTRY_TYPE, {
+      active,
+    });
+    const state = { active, activeTools };
+    this.send({ type: "plan_mode_state", ...state });
+    return state;
+  }
+
+  planState(): { scopeId: string; artifact: PlanArtifact | null } {
+    return {
+      scopeId: this.runtime.current().session.sessionId,
+      artifact: this.snapshot(),
+    };
   }
 }

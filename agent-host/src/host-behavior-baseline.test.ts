@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,17 +10,14 @@ import type {
   ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 
-import { ApprovalQueue, type ApprovalRequest } from "./approval.ts";
-import { ContextBudgetManager } from "./context-manager.ts";
-import type { HarnessConfig } from "./harness.ts";
-import { HostBridge } from "./legacy-host-bridge.ts";
-import { PlanStore } from "./plan.ts";
-import { QuestionQueue, type PlanQuestion } from "./questions.ts";
-import { isJsonObject, type JsonObject } from "./protocol/validation.ts";
+import type { ApprovalRequest } from "./approval.ts";
+import type { PlanQuestion } from "./questions.ts";
+import type { JsonObject } from "./protocol/validation.ts";
 import type { InteractionBroker } from "./features/interactions/interaction-broker.ts";
-import { PlanModeService } from "./runtime/plan-mode-service.ts";
+import type { IntegrationService } from "./features/subagents/integration-service.ts";
 import { RuntimeSupervisor } from "./runtime/runtime-supervisor.ts";
-import { ModelService } from "./features/models/model-service.ts";
+import type { HostApp } from "./app/host-app.ts";
+import { createHostApp } from "./app/create-host-app.ts";
 
 const HOST_COMMANDS = [
   "agents_reload",
@@ -84,6 +81,20 @@ const HOST_EVENTS = [
   "workspace_state",
 ].sort();
 
+const EVENT_SOURCES = [
+  "features/auth/auth-service.ts",
+  "features/workspace/workspace-service.ts",
+  "features/sessions/session-browser-service.ts",
+  "features/context/context-service.ts",
+  "features/plans/plan-service.ts",
+  "features/subagents/subagent-supervisor.ts",
+  "features/subagents/subagent-runner.ts",
+  "runtime/pi-extension-factory.ts",
+  "transport/control-connection.ts",
+  "transport/control-server.ts",
+  "protocol/command-router.ts",
+];
+
 class TestClient {
   private buffer = "";
   private readonly socket: Socket;
@@ -137,43 +148,30 @@ function tempSocketPath(): string {
   return join(tmpdir(), `nabla-baseline-${process.pid}-${socketCounter}.sock`);
 }
 
-function createBridge(options: {
+async function createApp(options: {
   modelRuntime?: ModelRuntime;
-  planMode?: PlanModeService;
   runtime?: RuntimeSupervisor;
-} = {}): { bridge: HostBridge; socketPath: string } {
-  const planMode = options.planMode ?? new PlanModeService();
-  const runtime =
-    options.runtime ??
-    new RuntimeSupervisor(
-      async () => {
-        throw new Error("factory should not run");
-      },
-      fakeRuntime(true),
-    );
-  const modelRuntime =
-    options.modelRuntime ?? ({} as ModelRuntime);
-  const models = new ModelService(modelRuntime, runtime);
+  integrations?: IntegrationService;
+} = {}): Promise<{ app: HostApp; socketPath: string; cwd: string }> {
+  const cwd = mkdtempSync(join(tmpdir(), "nabla-baseline-app-"));
   const socketPath = tempSocketPath();
-  const bridge = new HostBridge(
+  const app = await createHostApp({
     socketPath,
-    modelRuntime,
-    models,
-    planMode,
-    runtime,
-    new PlanStore(),
-    new ContextBudgetManager(),
-    {
-      schemaVersion: 2,
-      maxParallel: 2,
-      trustedWorkspaces: [],
-      allowedProjectExtensions: [],
-      profiles: {},
-      diagnostics: [],
-    } satisfies HarnessConfig,
-    async () => undefined,
-  );
-  return { bridge, socketPath };
+    cwd,
+    agentDir: join(cwd, "agents"),
+    env: {},
+    modelRuntime: options.modelRuntime ?? ({} as ModelRuntime),
+    supervisor:
+      options.runtime ??
+      new RuntimeSupervisor(
+        async () => {
+          throw new Error("factory should not run");
+        },
+        fakeRuntime(true),
+      ),
+    integrations: options.integrations,
+  });
+  return { app, socketPath, cwd };
 }
 
 async function openClient(socketPath: string): Promise<TestClient> {
@@ -187,22 +185,20 @@ async function openClient(socketPath: string): Promise<TestClient> {
 async function withBridge(
   options: {
     modelRuntime?: ModelRuntime;
-    planMode?: PlanModeService;
     runtime?: RuntimeSupervisor;
+    integrations?: IntegrationService;
   },
-  run: (bridge: HostBridge, client: TestClient) => Promise<void>,
+  run: (app: HostApp, client: TestClient) => Promise<void>,
 ): Promise<void> {
-  const { bridge, socketPath } = createBridge(options);
-  (bridge as unknown as { integrations: unknown }).integrations = {
-    recover: async () => [],
-  };
-  await bridge.listen();
+  const { app, socketPath, cwd } = await createApp(options);
+  await app.start();
   const client = await openClient(socketPath);
   try {
-    await run(bridge, client);
+    await run(app, client);
   } finally {
     await client.close();
-    await bridge.close();
+    await app.close();
+    rmSync(cwd, { recursive: true, force: true });
   }
 }
 
@@ -229,16 +225,15 @@ function fakeRuntime(
       activeTools = names;
     },
   };
-  return { session } as unknown as AgentSessionRuntime;
+  return {
+    session,
+    dispose: async () => undefined,
+  } as unknown as AgentSessionRuntime;
 }
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 test("host command and event inventories are stable", () => {
-  const source = readFileSync(
-    new URL("./legacy-host-bridge.ts", import.meta.url),
-    "utf8",
-  );
   const commandSource = [
     "auth-commands.ts",
     "bootstrap-commands.ts",
@@ -263,38 +258,12 @@ test("host command and event inventories are stable", () => {
   ].sort();
   assert.deepEqual(commands, HOST_COMMANDS);
 
-  const events = [...new Set(
-    source
-      .split(";")
-      .filter((statement) =>
-        /this\.send|this\.control\.respond/u.test(statement),
-      )
-      .flatMap((statement) =>
-        [...statement.matchAll(/type: "([a-z0-9_]+)"/gu)].map(
-          (match) => match[1],
-        ),
-      ),
-  )].sort();
-  const transportSource = [
-    "control-connection.ts",
-    "control-server.ts",
-    "../protocol/command-router.ts",
-    "../features/auth/auth-service.ts",
-    "../features/workspace/workspace-service.ts",
-    "../features/sessions/session-browser-service.ts",
-    "../features/context/context-service.ts",
-    "../features/plans/plan-service.ts",
-    "../features/subagents/subagent-supervisor.ts",
-    "../features/subagents/subagent-runner.ts",
-    "../runtime/pi-extension-factory.ts",
-  ]
-    .map((file) =>
-      readFileSync(new URL(`./transport/${file}`, import.meta.url), "utf8"),
-    )
-    .join("\n");
-  const transportEvents = [
+  const eventSource = EVENT_SOURCES.map((file) =>
+    readFileSync(new URL(`./${file}`, import.meta.url), "utf8"),
+  ).join("\n");
+  const events = [
     ...new Set(
-      [...transportSource.matchAll(/type: "([a-z0-9_]+)"/gu)]
+      [...eventSource.matchAll(/type: "([a-z0-9_]+)"/gu)]
         .map((match) => match[1])
         .filter(
           (name) =>
@@ -304,11 +273,8 @@ test("host command and event inventories are stable", () => {
             name !== "text",
         ),
     ),
-  ];
-  assert.deepEqual(
-    [...new Set([...events, ...transportEvents])].sort(),
-    HOST_EVENTS,
-  );
+  ].sort();
+  assert.deepEqual(events, HOST_EVENTS);
 
   const approvalSource = readFileSync(
     new URL("./approval.ts", import.meta.url),
@@ -318,7 +284,7 @@ test("host command and event inventories are stable", () => {
 });
 
 test("unknown command returns a failure response instead of crashing", async () => {
-  await withBridge({}, async (_bridge, client) => {
+  await withBridge({}, async (_app, client) => {
     client.write('{"id":"r1","type":"no_such_command"}\n');
     const message = await response(client, "r1");
     assert.equal(message.command, "no_such_command");
@@ -328,7 +294,7 @@ test("unknown command returns a failure response instead of crashing", async () 
 });
 
 test("invalid JSON and non-object JSON return protocol errors", async () => {
-  await withBridge({}, async (_bridge, client) => {
+  await withBridge({}, async (_app, client) => {
     client.write("not json\n");
     const parseError = await client.waitFor(
       (m) => m.type === "host_protocol_error",
@@ -372,7 +338,7 @@ test("connection close cancels the active authentication flow", async () => {
       return new Promise<never>(() => {});
     },
   } as unknown as ModelRuntime;
-  await withBridge({ modelRuntime }, async (_bridge, client) => {
+  await withBridge({ modelRuntime }, async (_app, client) => {
     client.write(
       '{"id":"a1","type":"auth_login","flowId":"flow-1","providerId":"fake","authType":"api_key"}\n',
     );
@@ -386,9 +352,9 @@ test("connection close cancels the active authentication flow", async () => {
 });
 
 test("connection close denies ordinary approvals and cancels questions", async () => {
-  await withBridge({}, async (bridge, client) => {
+  await withBridge({}, async (app, client) => {
     const interactions = (
-      bridge as unknown as { interactions: InteractionBroker }
+      app as unknown as { interactions: InteractionBroker }
     ).interactions;
     const approval = interactions.requestApproval(
       {
@@ -428,10 +394,10 @@ test("connection close denies ordinary approvals and cancels questions", async (
 });
 
 test("connection close does not cancel running subagents", async () => {
-  await withBridge({}, async (bridge, client) => {
+  await withBridge({}, async (app, client) => {
     let hostClosed = 0;
     const subagents = (
-      bridge as unknown as { subagents: { hostClose: () => Promise<void> } }
+      app as unknown as { subagents: { hostClose: () => Promise<void> } }
     ).subagents;
     subagents.hostClose = async () => {
       hostClosed += 1;
@@ -442,14 +408,13 @@ test("connection close does not cancel running subagents", async () => {
 });
 
 test("session new/resume are rejected while the agent is running", async () => {
-  const planMode = new PlanModeService();
   const runtime = new RuntimeSupervisor(
     async () => {
       throw new Error("factory should not run");
     },
     fakeRuntime(false),
   );
-  await withBridge({ planMode, runtime }, async (_bridge, client) => {
+  await withBridge({ runtime }, async (_app, client) => {
     client.write('{"id":"s1","type":"session_new"}\n');
     assert.equal(
       (await response(client, "s1")).error,
@@ -464,7 +429,6 @@ test("session new/resume are rejected while the agent is running", async () => {
 });
 
 test("worktree recovery completes before the control socket listens", async () => {
-  const planMode = new PlanModeService();
   const cwd = join(tmpdir(), "nabla-baseline-recovery");
   const runtime = new RuntimeSupervisor(
     async () => {
@@ -472,38 +436,37 @@ test("worktree recovery completes before the control socket listens", async () =
     },
     fakeRuntime(true, cwd),
   );
-  const { bridge } = createBridge({ planMode, runtime });
   const order: string[] = [];
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
-  (bridge as unknown as { integrations: unknown }).integrations = {
+  const integrations = {
     recover: async () => {
       order.push("recovery");
       await gate;
       order.push("prune");
       return [];
     },
-  };
-  const listening = bridge.listen().then(() => order.push("listen"));
+  } as unknown as IntegrationService;
+  const { app, socketPath } = await createApp({ runtime, integrations });
+  const starting = app.start().then(() => order.push("listen"));
   await tick();
   assert.deepEqual(order, ["recovery"]);
   release();
-  await listening;
+  await starting;
   assert.deepEqual(order, ["recovery", "prune", "listen"]);
-  await bridge.close();
+  await app.close();
 });
 
 test("plan_execute returns a failure response when no plan is submitted", async () => {
-  const planMode = new PlanModeService();
   const runtime = new RuntimeSupervisor(
     async () => {
       throw new Error("factory should not run");
     },
     fakeRuntime(true),
   );
-  await withBridge({ planMode, runtime }, async (_bridge, client) => {
+  await withBridge({ runtime }, async (_app, client) => {
     client.write('{"id":"p1","type":"plan_execute","context":"current"}\n');
     const message = await response(client, "p1");
     assert.equal(message.success, false);

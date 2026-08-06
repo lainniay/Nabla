@@ -1,13 +1,21 @@
-import type { LegacyHostOperations } from "../../legacy-host-operations.ts";
 import {
   type CommandDefinition,
   requestObject,
 } from "../command-definition.ts";
 import { enumField } from "../validation.ts";
+import type { PlanArtifact } from "../../plan.ts";
+import type { PlanExecutionResult } from "../../plan-execution.ts";
 
-export function createPlanCommands(
-  ops: LegacyHostOperations,
-): CommandDefinition<any>[] {
+export interface PlanCommandPort {
+  setMode(active: boolean): {
+    active: boolean;
+    activeTools: readonly string[];
+  };
+  planState(): { scopeId: string; artifact: PlanArtifact | null };
+  execute(mode: "current" | "fresh"): Promise<PlanExecutionResult>;
+}
+
+export function createPlanCommands(ops: PlanCommandPort): CommandDefinition<any>[] {
   return [
     {
       type: "set_plan_mode",
@@ -19,7 +27,7 @@ export function createPlanCommands(
         }
         return { active: request.active };
       },
-      handle: (_context, request) => ops.setPlanMode(request.active),
+      handle: (_context, request) => ops.setMode(request.active),
     },
     {
       type: "get_plan_state",
@@ -36,7 +44,7 @@ export function createPlanCommands(
           context: enumField(request, "context", ["current", "fresh"] as const),
         };
       },
-      handle: (_context, request) => ops.executePlan(request.context),
+      handle: (_context, request) => ops.execute(request.context),
     },
   ];
 }

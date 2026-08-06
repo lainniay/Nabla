@@ -4,8 +4,7 @@ import test from "node:test";
 import { BootstrapService } from "./bootstrap-service.ts";
 
 test("bootstrap aggregates the read-only snapshot shape", () => {
-  const service = new BootstrapService();
-  const snapshot = service.snapshot({
+  const service = new BootstrapService(() => ({
     scopeId: "session-1",
     planMode: { active: true, activeTools: ["read", "ask_user"] },
     artifact: null,
@@ -14,7 +13,8 @@ test("bootstrap aggregates the read-only snapshot shape", () => {
     context: { revision: 1 } as never,
     pendingIntegrations: [],
     warnings: ["w"],
-  });
+  }));
+  const snapshot = service.snapshot();
   assert.equal(snapshot.scopeId, "session-1");
   assert.equal(snapshot.planMode.active, true);
   assert.equal(snapshot.plan.artifact, null);

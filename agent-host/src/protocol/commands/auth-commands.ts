@@ -1,4 +1,3 @@
-import type { LegacyHostOperations } from "../../legacy-host-operations.ts";
 import {
   type CommandDefinition,
   requestObject,
@@ -8,9 +7,27 @@ import {
   stringField,
 } from "../validation.ts";
 
-export function createAuthCommands(
-  ops: LegacyHostOperations,
-): CommandDefinition<any>[] {
+export interface AuthCommandPort {
+  listProviders(): Promise<unknown[]>;
+  startLogin(input: {
+    flowId: string;
+    providerId: string;
+    authType: "oauth" | "api_key";
+  }): Promise<{
+    providerId: string;
+    credentialType: string;
+    selectedModel: unknown;
+  }>;
+  replyToPrompt(input: {
+    flowId: string;
+    promptId: string;
+    value: string;
+  }): void;
+  cancelLogin(): void;
+  logout(providerId: string): Promise<void>;
+}
+
+export function createAuthCommands(ops: AuthCommandPort): CommandDefinition<any>[] {
   return [
     {
       type: "auth_list",

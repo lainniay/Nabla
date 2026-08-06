@@ -5,6 +5,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import {
+  agentPermissionSummary,
   loadHarnessConfig,
   modelReference,
   saveWorkspaceTrust,
@@ -15,7 +16,10 @@ import {
 } from "../../harness.ts";
 import type { RuntimeAccess } from "../../runtime/runtime-access.ts";
 import type { PlanModeService } from "../../runtime/plan-mode-service.ts";
-import type { AgentsSnapshot } from "../../protocol/contracts.ts";
+import type {
+  ActiveAgentSnapshot,
+  AgentsSnapshot,
+} from "../../protocol/contracts.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 
 export class WorkspaceService {
@@ -23,8 +27,14 @@ export class WorkspaceService {
   private readonly planMode: PlanModeService;
   private readonly modelRuntime: ModelRuntime;
   private readonly send: (event: JsonObject) => void;
+  private readonly agents: () => {
+    active: ActiveAgentSnapshot[];
+    pending: ActiveAgentSnapshot[];
+  };
+  private readonly isConnected: () => boolean;
   private config: HarnessConfig;
   private resourceRevision = 1;
+  private agentsRevision = 0;
 
   constructor(
     runtime: RuntimeAccess,
@@ -32,12 +42,16 @@ export class WorkspaceService {
     modelRuntime: ModelRuntime,
     send: (event: JsonObject) => void,
     initialConfig: HarnessConfig,
+    agents: () => { active: ActiveAgentSnapshot[]; pending: ActiveAgentSnapshot[] },
+    isConnected: () => boolean,
   ) {
     this.runtime = runtime;
     this.planMode = planMode;
     this.modelRuntime = modelRuntime;
     this.send = send;
     this.config = initialConfig;
+    this.agents = agents;
+    this.isConnected = isConnected;
   }
 
   configValue(): HarnessConfig {
@@ -48,13 +62,11 @@ export class WorkspaceService {
     this.config = loadHarnessConfig(cwd);
   }
 
-  activate(
-    cwd: string,
-    session: AgentSession,
-    agents: () => AgentsSnapshot,
-  ): void {
+  activate(cwd: string, session: AgentSession): void {
     this.config = loadHarnessConfig(cwd);
-    this.publishWorkspaceState(session, agents());
+    if (this.isConnected()) {
+      this.publishWorkspaceState(session, this.agentsSnapshot(session));
+    }
   }
 
   resourceSnapshot(
@@ -113,9 +125,7 @@ export class WorkspaceService {
     };
   }
 
-  async reloadResources(
-    agents: () => AgentsSnapshot,
-  ): Promise<ResourceSnapshot> {
+  async reloadResources(): Promise<ResourceSnapshot> {
     const runtime = this.runtime.requireIdle("Cannot reload resources");
     this.config = loadHarnessConfig(
       runtime.session.sessionManager.getCwd(),
@@ -125,15 +135,12 @@ export class WorkspaceService {
     this.sendPlanModeState(runtime);
     const { resources } = this.publishWorkspaceState(
       runtime.session,
-      agents(),
+      this.agentsSnapshot(runtime.session),
     );
     return resources;
   }
 
-  async setWorkspaceTrust(
-    trusted: boolean,
-    agents: () => AgentsSnapshot,
-  ): Promise<ResourceSnapshot> {
+  async setWorkspaceTrust(trusted: boolean): Promise<ResourceSnapshot> {
     const runtime = this.runtime.requireIdle("Cannot change workspace trust");
     const cwd = runtime.session.sessionManager.getCwd();
     this.config = saveWorkspaceTrust(cwd, trusted);
@@ -147,9 +154,51 @@ export class WorkspaceService {
     this.sendPlanModeState(runtime);
     const { resources } = this.publishWorkspaceState(
       runtime.session,
-      agents(),
+      this.agentsSnapshot(runtime.session),
     );
     return resources;
+  }
+
+  agentsSnapshot(session = this.runtime.current().session): AgentsSnapshot {
+    return {
+      scopeId: session.sessionId,
+      revision: this.agentsRevision,
+      maxParallel: this.config.maxParallel,
+      profiles: Object.entries(this.config.profiles).map(([name, profile]) => ({
+        unavailableReason:
+          this.profileUnavailableReason(profile, session) ?? null,
+        name,
+        description: profile.description,
+        source: profile.source,
+        model: profile.model ?? null,
+        thinkingLevel: profile.thinkingLevel ?? null,
+        skills: profile.skills,
+        tools: profile.tools,
+        permission: agentPermissionSummary(profile),
+        maxParallel: profile.maxParallel,
+        maxTurns: profile.maxTurns,
+        isolation: profile.isolation,
+        disabled: profile.disabled,
+      })),
+      active: this.agents().active,
+      pending: this.agents().pending,
+      diagnostics: this.config.diagnostics,
+    };
+  }
+
+  publishAgentsState(
+    session = this.runtime.current().session,
+  ): AgentsSnapshot {
+    this.agentsRevision += 1;
+    const snapshot = this.agentsSnapshot(session);
+    this.send({ type: "agents_state", snapshot });
+    return snapshot;
+  }
+
+  async reloadAgents(): Promise<AgentsSnapshot> {
+    const runtime = this.runtime.current();
+    this.reloadConfig(runtime.session.sessionManager.getCwd());
+    return this.publishAgentsState(runtime.session);
   }
 
   profileUnavailableReason(

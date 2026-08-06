@@ -1,12 +1,20 @@
-import type { LegacyHostOperations } from "../../legacy-host-operations.ts";
 import {
   type CommandDefinition,
   requestObject,
 } from "../command-definition.ts";
 import { isJsonObject, stringField } from "../validation.ts";
+import type { QuestionAnswer } from "../../questions.ts";
+
+export interface InteractionCommandPort {
+  replyApproval(
+    requestId: string,
+    decision: "allow_once" | "allow_session" | "allow_workspace" | "deny",
+  ): void;
+  replyQuestion(requestId: string, answers: QuestionAnswer[]): void;
+}
 
 export function createInteractionCommands(
-  ops: LegacyHostOperations,
+  ops: InteractionCommandPort,
 ): CommandDefinition<any>[] {
   return [
     {
@@ -35,7 +43,8 @@ export function createInteractionCommands(
           answers,
         };
       },
-      handle: (_context, request) => ops.replyQuestion(request),
+      handle: (_context, request) =>
+        ops.replyQuestion(request.requestId, request.answers),
     },
     {
       type: "approval_reply",
@@ -56,7 +65,8 @@ export function createInteractionCommands(
           decision,
         };
       },
-      handle: (_context, request) => ops.replyApproval(request),
+      handle: (_context, request) =>
+        ops.replyApproval(request.requestId, request.decision),
     },
   ];
 }

@@ -3,8 +3,12 @@ import test from "node:test";
 
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
 
-import type { HostBridge } from "../legacy-host-bridge.ts";
 import { RuntimeSupervisor } from "../runtime/runtime-supervisor.ts";
+import type { ControlServer } from "../transport/control-server.ts";
+import type { IntegrationService } from "../features/subagents/integration-service.ts";
+import type { SubagentSupervisor } from "../features/subagents/subagent-supervisor.ts";
+import type { AuthService } from "../features/auth/auth-service.ts";
+import type { InteractionBroker } from "../features/interactions/interaction-broker.ts";
 import { HostAppImpl } from "./host-app.ts";
 
 test("HostApp starts the runtime before listening", async () => {
@@ -28,17 +32,28 @@ test("HostApp starts the runtime before listening", async () => {
         diagnostics: [],
       } as never;
     });
-  const bridge = {
+  const control = {
     listen: async () => {
       order.push("listen");
     },
     close: async () => {
-      order.push("bridge-close");
+      order.push("control-close");
     },
-  } as unknown as HostBridge;
+  } as unknown as ControlServer;
   const app = new HostAppImpl(
     supervisor,
-    bridge,
+    control,
+    {
+      recover: async () => [],
+    } as unknown as IntegrationService,
+    {
+      hostClose: async () => {
+        order.push("subagents-close");
+      },
+      restoreRecovered: () => {},
+    } as unknown as SubagentSupervisor,
+    { cancel: () => {} } as unknown as AuthService,
+    { cancelAll: () => {} } as unknown as InteractionBroker,
     {
       getSessionFile: () => undefined,
       getCwd: () => "/workspace",
@@ -49,11 +64,11 @@ test("HostApp starts the runtime before listening", async () => {
   await app.start();
   assert.deepEqual(order, ["runtime", "listen"]);
   await app.close();
-  assert.deepEqual(order, ["runtime", "listen", "bridge-close"]);
+  assert.deepEqual(order, ["runtime", "listen", "subagents-close", "control-close"]);
 });
 
 test("HostApp close is idempotent", async () => {
-  let bridgeCloses = 0;
+  let controlCloses = 0;
   const supervisor = new RuntimeSupervisor(
     async () =>
       ({
@@ -73,15 +88,18 @@ test("HostApp close is idempotent", async () => {
         diagnostics: [],
       }) as never,
   );
-  const bridge = {
-    listen: async () => undefined,
-    close: async () => {
-      bridgeCloses += 1;
-    },
-  } as unknown as HostBridge;
   const app = new HostAppImpl(
     supervisor,
-    bridge,
+    {
+      listen: async () => undefined,
+      close: async () => {
+        controlCloses += 1;
+      },
+    } as unknown as ControlServer,
+    { recover: async () => [] } as unknown as IntegrationService,
+    { hostClose: async () => undefined, restoreRecovered: () => {} } as unknown as SubagentSupervisor,
+    { cancel: () => {} } as unknown as AuthService,
+    { cancelAll: () => {} } as unknown as InteractionBroker,
     {
       getSessionFile: () => undefined,
       getCwd: () => "/workspace",
@@ -91,5 +109,5 @@ test("HostApp close is idempotent", async () => {
   );
   await app.close();
   await app.close();
-  assert.equal(bridgeCloses, 2);
+  assert.equal(controlCloses, 2);
 });

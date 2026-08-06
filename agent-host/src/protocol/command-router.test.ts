@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { OperationContext } from "../app/operation-scope.ts";
-import type { LegacyHostOperations } from "../legacy-host-operations.ts";
 import type { CommandDefinition } from "./command-definition.ts";
 import { CommandRouter } from "./command-router.ts";
 import { createAgentCommands } from "./commands/agent-commands.ts";
@@ -96,29 +95,18 @@ const EXPECTED_LANES: Record<string, string | undefined> = {
   workspace_trust: "configuration",
 };
 
-function stubOps(overrides: Partial<LegacyHostOperations> = {}): LegacyHostOperations {
-  const base = {} as LegacyHostOperations;
-  Object.assign(base, overrides);
-  return new Proxy(base, {
-    get(target, prop) {
-      if (prop in target) return target[prop as keyof LegacyHostOperations];
-      return async () => undefined;
-    },
-  });
-}
-
 function allCommands(): CommandDefinition[] {
-  const ops = stubOps();
+  const port = new Proxy({}, { get: () => async () => undefined });
   return [
-    ...createAuthCommands(ops),
-    ...createBootstrapCommands(ops),
-    ...createConfigurationCommands(ops),
-    ...createInteractionCommands(ops),
-    ...createModelCommands(ops),
-    ...createPermissionCommands(ops),
-    ...createPlanCommands(ops),
-    ...createAgentCommands(ops),
-    ...createSessionCommands(ops),
+    ...createAuthCommands(port as never),
+    ...createBootstrapCommands(port as never),
+    ...createConfigurationCommands(port as never),
+    ...createInteractionCommands(port as never),
+    ...createModelCommands(port as never),
+    ...createPermissionCommands(port as never),
+    ...createPlanCommands(port as never),
+    ...createAgentCommands(port as never),
+    ...createSessionCommands(port as never),
   ];
 }
 

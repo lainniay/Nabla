@@ -74,6 +74,8 @@ test("resource snapshot revision grows monotonically and publishes", () => {
     {} as ModelRuntime,
     (event) => events.push(event),
     config,
+    () => ({ active: [], pending: [] }),
+    () => true,
   );
   const session = fakeSession();
   assert.equal(service.resourceSnapshot(session).revision, 1);
@@ -92,6 +94,8 @@ test("profile catalog reports unavailable profiles and prompt text", () => {
     {} as ModelRuntime,
     () => {},
     config,
+    () => ({ active: [], pending: [] }),
+    () => true,
   );
   const session = fakeSession();
   const unavailable = service.profileUnavailableReason(config.profiles.worker!, session);
@@ -106,6 +110,8 @@ test("reloadConfig replaces the active harness config", () => {
     {} as ModelRuntime,
     () => {},
     config,
+    () => ({ active: [], pending: [] }),
+    () => true,
   );
   service.reloadConfig("/elsewhere");
   assert.notEqual(service.configValue(), config);

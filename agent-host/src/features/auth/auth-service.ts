@@ -153,6 +153,10 @@ export class AuthService {
     this.rejectPrompts(flow, reason);
   }
 
+  cancelLogin(): void {
+    this.cancel("Login cancelled");
+  }
+
   async logout(providerId: string): Promise<void> {
     await this.modelRuntime.logout(providerId);
   }

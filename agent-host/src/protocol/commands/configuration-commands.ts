@@ -1,11 +1,19 @@
-import type { LegacyHostOperations } from "../../legacy-host-operations.ts";
 import {
   type CommandDefinition,
   requestObject,
 } from "../command-definition.ts";
+import type { ResourceSnapshot } from "../../harness.ts";
+import type { AgentsSnapshot } from "../contracts.ts";
+
+export interface ConfigurationCommandPort {
+  resourceSnapshot(): ResourceSnapshot;
+  reloadResources(): Promise<ResourceSnapshot>;
+  setWorkspaceTrust(trusted: boolean): Promise<ResourceSnapshot>;
+  reloadAgents(): Promise<AgentsSnapshot>;
+}
 
 export function createConfigurationCommands(
-  ops: LegacyHostOperations,
+  ops: ConfigurationCommandPort,
 ): CommandDefinition<any>[] {
   return [
     {

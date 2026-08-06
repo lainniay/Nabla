@@ -59,6 +59,10 @@ export class RuntimeSupervisor implements RuntimeAccess {
     return this.generation;
   }
 
+  hasRuntime(): boolean {
+    return this.runtime !== undefined;
+  }
+
   async initialize(options: InitializeOptions): Promise<AgentSessionRuntime> {
     this.runtime = await createAgentSessionRuntime(this.factory, options);
     this.generation += 1;

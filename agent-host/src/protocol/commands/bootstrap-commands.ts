@@ -1,18 +1,18 @@
-import type { LegacyHostOperations } from "../../legacy-host-operations.ts";
 import {
   type CommandDefinition,
   requestObject,
 } from "../command-definition.ts";
+import type { BootstrapState } from "../contracts.ts";
 
-export function createBootstrapCommands(
-  ops: LegacyHostOperations,
-): CommandDefinition<any>[] {
+export function createBootstrapCommands(ops: {
+  snapshot(): BootstrapState;
+}): CommandDefinition<any>[] {
   return [
     {
       type: "bootstrap_state",
       lane: undefined,
       decode: requestObject,
-      handle: () => ops.bootstrapState(),
+      handle: () => ops.snapshot(),
     },
   ];
 }

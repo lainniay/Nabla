@@ -1,19 +1,31 @@
-import type { LegacyHostOperations } from "../../legacy-host-operations.ts";
 import {
   type CommandDefinition,
   requestObject,
 } from "../command-definition.ts";
 import { enumField, stringField } from "../validation.ts";
+import type { ActiveAgentSnapshot, AgentsSnapshot } from "../contracts.ts";
+import type { JsonObject } from "../validation.ts";
 
-export function createAgentCommands(
-  ops: LegacyHostOperations,
-): CommandDefinition<any>[] {
+export interface AgentCommandPort {
+  agentsState(): AgentsSnapshot;
+  startSubagent(input: {
+    profile: string;
+    task: string;
+  }): { accepted: boolean; agent: ActiveAgentSnapshot };
+  cancelSubagent(agentId: string): Promise<void>;
+  integrateSubagent(input: {
+    agentId: string;
+    action: "apply" | "resolve" | "keep" | "discard";
+  }): Promise<JsonObject>;
+}
+
+export function createAgentCommands(ops: AgentCommandPort): CommandDefinition<any>[] {
   return [
     {
       type: "agents_state",
       lane: undefined,
       decode: requestObject,
-      handle: () => ops.agentsSnapshot(),
+      handle: () => ops.agentsState(),
     },
     {
       type: "subagent_start",

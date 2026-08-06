@@ -25,6 +25,10 @@ export class ContextService {
     return this.budget.snapshot();
   }
 
+  scopedSnapshot(): ContextSnapshot {
+    return this.contextSnapshot(this.budget.snapshot());
+  }
+
   onSessionStart(sessionId: string): ContextSnapshot {
     return this.budget.onSessionStart(sessionId);
   }

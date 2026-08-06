@@ -19,7 +19,14 @@ export interface BootstrapInput {
 }
 
 export class BootstrapService {
-  snapshot(input: BootstrapInput): BootstrapState {
+  private readonly read: () => BootstrapInput;
+
+  constructor(read: () => BootstrapInput) {
+    this.read = read;
+  }
+
+  snapshot(): BootstrapState {
+    const input = this.read();
     return {
       scopeId: input.scopeId,
       planMode: input.planMode,

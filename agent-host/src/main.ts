@@ -14,12 +14,12 @@ if (isMain) {
   const socketPath = process.env.NABLA_CONTROL_SOCKET;
   if (!socketPath) throw new Error("NABLA_CONTROL_SOCKET is required");
 
-  const app = await createHostApp(
+  const app = await createHostApp({
     socketPath,
-    process.cwd(),
-    getAgentDir(),
-    process.env,
-  );
+    cwd: process.cwd(),
+    agentDir: getAgentDir(),
+    env: process.env,
+  });
   installHostLifecycle(app);
   await app.start();
   await runRpcMode(app.runtime());

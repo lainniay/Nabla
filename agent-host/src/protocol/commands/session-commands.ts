@@ -1,4 +1,3 @@
-import type { LegacyHostOperations } from "../../legacy-host-operations.ts";
 import {
   type CommandDefinition,
   requestObject,
@@ -11,6 +10,9 @@ import {
   stringField,
 } from "../validation.ts";
 import type { TreeFilterMode } from "../../session-navigation.ts";
+import type { SessionBrowserSnapshot, TreeSnapshot } from "../../session-navigation.ts";
+import type { ContextSnapshot } from "../../context-manager.ts";
+import type { JsonObject } from "../validation.ts";
 
 const FILTER_MODES = [
   "default",
@@ -20,15 +22,46 @@ const FILTER_MODES = [
   "all",
 ] as const;
 
-export function createSessionCommands(
-  ops: LegacyHostOperations,
-): CommandDefinition<any>[] {
+export interface SessionCommandPort {
+  contextState(): ContextSnapshot;
+  clearQueue(): JsonObject;
+  openSessionBrowser(): Promise<SessionBrowserSnapshot>;
+  querySessionBrowser(input: {
+    browserId: string;
+    scope: "current" | "all";
+    sortMode: "threaded" | "recent" | "relevance";
+    query: string;
+    namedOnly: boolean;
+    offset: number;
+  }): Promise<SessionBrowserSnapshot>;
+  closeSessionBrowser(browserId: string): void;
+  newSession(): Promise<{ cancelled: boolean; activation?: JsonObject }>;
+  resumeSession(input: {
+    sessionPath: string;
+    cwdOverride?: string;
+  }): Promise<{ cancelled: boolean; activation?: JsonObject }>;
+  treeState(input: {
+    filterMode: TreeFilterMode;
+    query: string;
+    foldedEntryIds: string[];
+  }): TreeSnapshot;
+  setTreeLabel(input: { entryId: string; label?: string }): void;
+  copyTreeEntry(entryId: string): Promise<void>;
+  navigateTree(input: {
+    entryId: string;
+    summarize: boolean;
+    customInstructions?: string;
+  }): Promise<JsonObject>;
+  abortTreeNavigation(): void;
+}
+
+export function createSessionCommands(ops: SessionCommandPort): CommandDefinition<any>[] {
   return [
     {
       type: "context_state",
       lane: undefined,
       decode: requestObject,
-      handle: () => ops.contextSnapshot(),
+      handle: () => ops.contextState(),
     },
     {
       type: "queue_clear",
