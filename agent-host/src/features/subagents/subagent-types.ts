@@ -49,3 +49,9 @@ export interface SubagentHandle {
   agent: ActiveSubagent;
   completion: Promise<JsonObject>;
 }
+
+export interface CompletedSubagent {
+  agent: ActiveSubagent;
+  result: JsonObject;
+  record: WorktreeRecord;
+}

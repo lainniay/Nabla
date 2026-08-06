@@ -284,6 +284,8 @@ test("host command and event inventories are stable", () => {
     "../features/sessions/session-browser-service.ts",
     "../features/context/context-service.ts",
     "../features/plans/plan-service.ts",
+    "../features/subagents/subagent-supervisor.ts",
+    "../features/subagents/subagent-runner.ts",
   ]
     .map((file) =>
       readFileSync(new URL(`./transport/${file}`, import.meta.url), "utf8"),
@@ -423,16 +425,15 @@ test("connection close denies ordinary approvals and cancels questions", async (
 
 test("connection close does not cancel running subagents", async () => {
   await withBridge({}, async (bridge, client) => {
-    const controller = new AbortController();
+    let hostClosed = 0;
     const subagents = (
-      bridge as unknown as {
-        subagents: Map<string, { controller: AbortController }>;
-      }
+      bridge as unknown as { subagents: { hostClose: () => Promise<void> } }
     ).subagents;
-    subagents.set("agent-1", { controller });
+    subagents.hostClose = async () => {
+      hostClosed += 1;
+    };
     await client.close();
-    assert.equal(controller.signal.aborted, false);
-    assert.equal(subagents.has("agent-1"), true);
+    assert.equal(hostClosed, 0);
   });
 });
 
