@@ -49,7 +49,6 @@ import {
 import {
   MUTATING_TOOL_NAMES,
   READ_ONLY_TOOL_NAMES,
-  THINKING_LEVELS,
 } from "./policy/tool-policy.ts";
 import { workspaceRelativePath } from "./policy/path-boundary.ts";
 import {
@@ -71,6 +70,7 @@ import {
 } from "./questions.ts";
 import {
   SessionCatalog,
+  type SessionBrowserSnapshot,
   buildTreeSnapshot,
   copyTextForEntry,
   createStartupSessionManager,
@@ -78,6 +78,7 @@ import {
   TURN_METRICS_ENTRY_TYPE,
   type TurnMetrics,
   type TreeFilterMode,
+  type TreeSnapshot,
 } from "./session-navigation.ts";
 import { workspacePathError } from "./workspace.ts";
 import { ShellAdapter } from "./permissions/adapters/shell.ts";
@@ -96,16 +97,17 @@ import { mutatesManagedWorktree } from "./permissions/managed-worktree.ts";
 import { PolicyStore } from "./permissions/policy-store.ts";
 import { resolveWorkspaceIdentity } from "./permissions/workspace-identity.ts";
 import { parseSubagentOutput } from "./protocol/subagent-output.ts";
-import { CommandLanes } from "./protocol/command-lanes.ts";
-import {
-  enumField,
-  isJsonObject,
-  optionalNonNegativeIntegerField,
-  optionalStringField,
-  stringArrayField,
-  stringField,
-  type JsonObject,
-} from "./protocol/validation.ts";
+import { CommandRouter } from "./protocol/command-router.ts";
+import { createAgentCommands } from "./protocol/commands/agent-commands.ts";
+import { createAuthCommands } from "./protocol/commands/auth-commands.ts";
+import { createBootstrapCommands } from "./protocol/commands/bootstrap-commands.ts";
+import { createConfigurationCommands } from "./protocol/commands/configuration-commands.ts";
+import { createInteractionCommands } from "./protocol/commands/interaction-commands.ts";
+import { createModelCommands } from "./protocol/commands/model-commands.ts";
+import { createPermissionCommands } from "./protocol/commands/permission-commands.ts";
+import { createPlanCommands } from "./protocol/commands/plan-commands.ts";
+import { createSessionCommands } from "./protocol/commands/session-commands.ts";
+import { isJsonObject, type JsonObject } from "./protocol/validation.ts";
 import type {
   ActiveAgentSnapshot,
   AgentsSnapshot,
@@ -119,7 +121,10 @@ import {
 } from "./protocol/host-event-publisher.ts";
 import { HostDiagnostics } from "./diagnostics/host-diagnostics.ts";
 import { ControlServer } from "./transport/control-server.ts";
-import type { OperationContext } from "./app/operation-scope.ts";
+import type { LegacyHostOperations } from "./legacy-host-operations.ts";
+import type { ThinkingLevel } from "./policy/tool-policy.ts";
+import type { WorkspaceGrantSnapshot } from "./permissions/approvals/workspace-store.ts";
+import type { PlanExecutionResult } from "./plan-execution.ts";
 import {
   WorktreeManager,
   type WorktreeRecoveryState,
@@ -133,7 +138,6 @@ import type {
   SubagentOptions,
 } from "./features/subagents/subagent-types.ts";
 
-type AuthType = Parameters<ModelRuntime["login"]>[1];
 type AuthInteraction = Parameters<ModelRuntime["login"]>[2];
 type AuthPrompt = Parameters<AuthInteraction["prompt"]>[0];
 type AuthEvent = Parameters<AuthInteraction["notify"]>[0];
@@ -264,9 +268,10 @@ export class PlanModeController {
   }
 }
 
-export class HostBridge {
+export class HostBridge implements LegacyHostOperations {
   private activeFlow?: ActiveFlow;
   private readonly control: ControlServer;
+  private readonly router: CommandRouter;
   private readonly events: HostEventPublisher;
   private readonly diagnostics = new HostDiagnostics();
   private readonly approvals = new ApprovalQueue();
@@ -303,7 +308,6 @@ export class HostBridge {
   private agentsRevision = 0;
   private subagentSequence = 0;
   private writeSubagentTail: Promise<unknown> = Promise.resolve();
-  private readonly commandLanes = new CommandLanes();
 
   constructor(
     socketPath: string,
@@ -322,9 +326,23 @@ export class HostBridge {
     this.afterLogin = afterLogin;
     this.events = new HostEventPublisher((event) => this.writeEvent(event));
     this.events.setScopeIdProvider(() => this.tryCurrentScopeId());
+    this.router = new CommandRouter(
+      [
+        ...createAuthCommands(this),
+        ...createBootstrapCommands(this),
+        ...createConfigurationCommands(this),
+        ...createInteractionCommands(this),
+        ...createModelCommands(this),
+        ...createPermissionCommands(this),
+        ...createPlanCommands(this),
+        ...createAgentCommands(this),
+        ...createSessionCommands(this),
+      ],
+      (context) => this.control.isCurrent(context),
+    );
     this.control = new ControlServer(
       socketPath,
-      this,
+      this.router,
       {
         onConnectionReplaced: () => {
           this.cancelActiveFlow("Host control client replaced");
@@ -612,204 +630,6 @@ export class HostBridge {
     });
   }
 
-  private response(
-    id: string | undefined,
-    command: string,
-    success: boolean,
-    data?: unknown,
-    error?: string,
-  ): void {
-    this.control.respond(id, {
-      id,
-      type: "response",
-      command,
-      success,
-      ...(data === undefined ? {} : { data }),
-      ...(error === undefined ? {} : { error }),
-    });
-  }
-
-  async handleRequest(
-    context: OperationContext,
-    request: JsonObject,
-  ): Promise<void> {
-    if (!this.control.isCurrent(context)) return;
-    const lane = commandLane(request);
-    await this.commandLanes.run(lane, async () => {
-      if (!this.control.isCurrent(context)) return;
-      await this.handleRequestInner(request);
-    });
-  }
-
-  private async handleRequestInner(request: JsonObject): Promise<void> {
-    const id = typeof request.id === "string" ? request.id : undefined;
-    const command = typeof request.type === "string" ? request.type : "";
-    try {
-      switch (command) {
-        case "auth_list":
-          this.response(id, command, true, {
-            providers: await this.listProviders(),
-          });
-          break;
-        case "bootstrap_state":
-          this.response(id, command, true, this.bootstrapState());
-          break;
-        case "auth_login":
-          this.startLogin(id, request);
-          break;
-        case "auth_reply":
-          this.replyToPrompt(id, request);
-          break;
-        case "auth_cancel":
-          this.cancelActiveFlow("Login cancelled");
-          this.response(id, command, true);
-          break;
-        case "auth_logout":
-          await this.logout(id, request);
-          break;
-        case "set_plan_mode":
-          this.setPlanMode(id, request);
-          break;
-        case "question_reply":
-          this.replyQuestion(id, request);
-          break;
-        case "get_plan_state":
-          this.response(id, command, true, {
-            scopeId: this.currentScopeId(),
-            artifact: this.plans.latest(),
-          });
-          break;
-        case "context_state":
-          this.response(id, command, true, this.contextSnapshot());
-          break;
-        case "resource_state":
-          this.response(id, command, true, this.resourceSnapshot());
-          break;
-        case "resource_reload":
-          await this.reloadResources(id);
-          break;
-        case "workspace_trust":
-          await this.setWorkspaceTrust(id, request);
-          break;
-        case "approval_rules":
-          {
-            const identity = resolveWorkspaceIdentity(
-              this.planMode.runtimeHandle().session.sessionManager.getCwd(),
-            );
-            this.response(
-              id,
-              command,
-              true,
-              this.permissionApprovals.workspace.snapshot(identity),
-            );
-          }
-          break;
-        case "approval_rule_revoke":
-          {
-            const identity = resolveWorkspaceIdentity(
-              this.planMode.runtimeHandle().session.sessionManager.getCwd(),
-            );
-            this.response(
-              id,
-              command,
-              true,
-              this.permissionApprovals.workspace.revoke(
-                identity,
-                stringField(request, "ruleId"),
-              ),
-            );
-          }
-          break;
-        case "approval_rules_clear":
-          {
-            const identity = resolveWorkspaceIdentity(
-              this.planMode.runtimeHandle().session.sessionManager.getCwd(),
-            );
-            this.response(
-              id,
-              command,
-              true,
-              this.permissionApprovals.workspace.clear(identity),
-            );
-          }
-          break;
-        case "queue_clear":
-          this.clearQueue(id);
-          break;
-        case "model_list":
-          await this.listModels(id);
-          break;
-        case "model_set":
-          await this.setModel(id, request);
-          break;
-        case "thinking_set":
-          this.setThinking(id, request);
-          break;
-        case "agents_state":
-          this.response(id, command, true, this.agentsSnapshot());
-          break;
-        case "agents_reload":
-          await this.reloadAgents(id);
-          break;
-        case "subagent_start":
-          this.startDirectSubagent(id, request);
-          break;
-        case "subagent_cancel":
-          await this.cancelSubagent(id, request);
-          break;
-        case "subagent_integrate":
-          await this.integrateSubagent(id, request);
-          break;
-        case "session_browser_open":
-          await this.openSessionBrowser(id);
-          break;
-        case "session_browser_query":
-          await this.querySessionBrowser(id, request);
-          break;
-        case "session_browser_close":
-          this.closeSessionBrowser(id, request);
-          break;
-        case "session_new":
-          await this.newSession(id);
-          break;
-        case "session_resume":
-          await this.resumeSession(id, request);
-          break;
-        case "tree_state":
-          this.treeState(id, request);
-          break;
-        case "tree_label":
-          this.setTreeLabel(id, request);
-          break;
-        case "tree_copy":
-          await this.copyTreeEntry(id, request);
-          break;
-        case "tree_navigate":
-          await this.navigateTree(id, request);
-          break;
-        case "tree_abort":
-          this.abortTreeNavigation(id);
-          break;
-        case "plan_execute":
-          await this.executePlan(id, request);
-          break;
-        case "approval_reply":
-          this.replyApproval(id, request);
-          break;
-        default:
-          this.response(id, command || "unknown", false, undefined, "Unknown host command");
-      }
-    } catch (error) {
-      this.response(
-        id,
-        command || "unknown",
-        false,
-        undefined,
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-  }
-
   private currentScopeId(): string {
     return this.planMode.runtimeHandle().session.sessionId;
   }
@@ -822,7 +642,7 @@ export class HostBridge {
     }
   }
 
-  private contextSnapshot(
+  public contextSnapshot(
     snapshot = this.contextBudget.snapshot(),
   ): ContextSnapshot {
     return { ...snapshot, scopeId: this.currentScopeId() };
@@ -833,7 +653,7 @@ export class HostBridge {
     this.send({ type: "host_warning", message });
   }
 
-  private resourceSnapshot(
+  public resourceSnapshot(
     session = this.planMode.runtimeHandle().session,
   ): ResourceSnapshot {
     const loader = session.resourceLoader;
@@ -892,7 +712,7 @@ export class HostBridge {
     };
   }
 
-  private bootstrapState(): BootstrapState {
+  public bootstrapState(): BootstrapState {
     const session = this.planMode.runtimeHandle().session;
     return {
       scopeId: session.sessionId,
@@ -930,7 +750,7 @@ export class HostBridge {
     return { resources, agents };
   }
 
-  private async reloadResources(id: string | undefined): Promise<void> {
+  public async reloadResources(): Promise<ResourceSnapshot> {
     const runtime = this.planMode.runtimeHandle();
     if (!runtime.session.isIdle) {
       throw new Error("Cannot reload resources while the agent is running");
@@ -942,7 +762,7 @@ export class HostBridge {
     this.planMode.apply(runtime.session);
     this.sendPlanModeState();
     const { resources } = this.publishWorkspaceState(runtime.session);
-    this.response(id, "resource_reload", true, resources);
+    return resources;
   }
 
   activateWorkspace(cwd: string, session?: AgentSession): void {
@@ -952,15 +772,11 @@ export class HostBridge {
     }
   }
 
-  private async setWorkspaceTrust(
-    id: string | undefined,
-    request: JsonObject,
-  ): Promise<void> {
+  public async setWorkspaceTrust(trusted: boolean): Promise<ResourceSnapshot> {
     const runtime = this.planMode.runtimeHandle();
     if (!runtime.session.isIdle) {
       throw new Error("Cannot change workspace trust while the agent is running");
     }
-    const trusted = request.trusted === true;
     const cwd = runtime.session.sessionManager.getCwd();
     this.config = saveWorkspaceTrust(cwd, trusted);
     this.config = loadHarnessConfig(cwd);
@@ -972,21 +788,30 @@ export class HostBridge {
     this.planMode.apply(runtime.session);
     this.sendPlanModeState();
     const { resources } = this.publishWorkspaceState(runtime.session);
-    this.response(id, "workspace_trust", true, resources);
+    return resources;
   }
 
-  private clearQueue(id: string | undefined): void {
+  public clearQueue(): JsonObject {
     const queue = this.planMode.runtimeHandle().session.clearQueue();
-    this.response(id, "queue_clear", true, {
+    return {
       ...queue,
       restoredText: [...queue.steering, ...queue.followUp].join("\n\n"),
-    });
+    };
   }
 
-  private async listModels(id: string | undefined): Promise<void> {
+  public async listModels(): Promise<{
+    current: { provider: string; id: string } | null;
+    models: Array<{
+      provider: string;
+      id: string;
+      name: string;
+      reasoning: unknown;
+      contextWindow: unknown;
+    }>;
+  }> {
     const runtime = this.planMode.runtimeHandle();
     const models = await this.modelRuntime.getAvailable();
-    this.response(id, "model_list", true, {
+    return {
       current: runtime.session.model
         ? {
             provider: runtime.session.model.provider,
@@ -1000,43 +825,41 @@ export class HostBridge {
         reasoning: model.reasoning,
         contextWindow: model.contextWindow,
       })),
-    });
+    };
   }
 
-  private async setModel(
-    id: string | undefined,
-    request: JsonObject,
-  ): Promise<void> {
+  public async setModel(input: {
+    provider: string;
+    modelId: string;
+  }): Promise<{ provider: string; id: string; name: string }> {
     const runtime = this.planMode.runtimeHandle();
     if (!runtime.session.isIdle) {
       throw new Error("Cannot change model while the agent is running");
     }
-    const provider = stringField(request, "provider");
-    const modelId = stringField(request, "modelId");
+    const { provider, modelId } = input;
     const model = this.modelRuntime.getModel(provider, modelId);
     if (!model) throw new Error(`Unknown model: ${provider}/${modelId}`);
     await runtime.session.setModel(model);
-    this.response(id, "model_set", true, {
+    return {
       provider,
       id: modelId,
       name: model.name,
-    });
+    };
   }
 
-  private setThinking(id: string | undefined, request: JsonObject): void {
+  public setThinking(level: ThinkingLevel): JsonObject {
     const runtime = this.planMode.runtimeHandle();
     if (!runtime.session.isIdle) {
       throw new Error("Cannot change thinking level while the agent is running");
     }
-    const level = enumField(request, "level", THINKING_LEVELS);
     runtime.session.setThinkingLevel(level);
-    this.response(id, "thinking_set", true, {
+    return {
       level: runtime.session.thinkingLevel,
       available: runtime.session.getAvailableThinkingLevels(),
-    });
+    };
   }
 
-  private agentsSnapshot(
+  public agentsSnapshot(
     session = this.planMode.runtimeHandle().session,
   ): AgentsSnapshot {
     return {
@@ -1233,52 +1056,43 @@ export class HostBridge {
         ].join("\n");
   }
 
-  private async reloadAgents(id: string | undefined): Promise<void> {
+  public async reloadAgents(): Promise<AgentsSnapshot> {
     const runtime = this.planMode.runtimeHandle();
     this.config = loadHarnessConfig(
       runtime.session.sessionManager.getCwd(),
     );
     const snapshot = this.publishAgentsState();
-    this.response(id, "agents_reload", true, snapshot);
+    return snapshot;
   }
 
-  private startDirectSubagent(
-    id: string | undefined,
-    request: JsonObject,
-  ): void {
-    const profile = stringField(request, "profile");
-    const task = stringField(request, "task").trim();
-    if (!task) throw new Error("Subagent task must not be empty");
-    const handle = this.startSubagent({ profile, task, direct: true });
-    this.response(id, "subagent_start", true, {
-      accepted: true,
-      agent: this.publicSubagent(handle.agent),
+  public startSubagent(input: {
+    profile: string;
+    task: string;
+  }): { accepted: boolean; agent: ActiveAgentSnapshot } {
+    const handle = this.launchSubagent({
+      profile: input.profile,
+      task: input.task,
+      direct: true,
     });
     void handle.completion.catch(() => undefined);
+    return {
+      accepted: true,
+      agent: this.publicSubagent(handle.agent),
+    };
   }
 
-  private async cancelSubagent(
-    id: string | undefined,
-    request: JsonObject,
-  ): Promise<void> {
-    const agentId = stringField(request, "agentId");
+  public async cancelSubagent(agentId: string): Promise<void> {
     const agent = this.subagents.get(agentId);
     if (!agent) throw new Error(`Subagent is not running: ${agentId}`);
     agent.controller.abort();
     if (agent.session) await agent.session.abort();
-    this.response(id, "subagent_cancel", true);
   }
 
-  private async integrateSubagent(
-    id: string | undefined,
-    request: JsonObject,
-  ): Promise<void> {
-    const agentId = stringField(request, "agentId");
-    const action = enumField(
-      request,
-      "action",
-      ["apply", "resolve", "keep", "discard"] as const,
-    );
+  public async integrateSubagent(input: {
+    agentId: string;
+    action: "apply" | "resolve" | "keep" | "discard";
+  }): Promise<JsonObject> {
+    const { agentId, action } = input;
     const completed = this.completedSubagents.get(agentId);
     if (!completed) {
       throw new Error(`Subagent has no pending worktree result: ${agentId}`);
@@ -1287,14 +1101,13 @@ export class HostBridge {
     let integrationWarning: string | undefined;
     if (action === "resolve") {
       const handle = await this.resolvePendingSubagent(agentId);
-      this.response(id, "subagent_integrate", true, {
-        status: "resolving",
-        resolver: this.publicSubagent(handle.agent),
-      });
       void handle.completion.catch((error) => {
         this.restoreResolutionFailure(agentId, error);
       });
-      return;
+      return {
+        status: "resolving",
+        resolver: this.publicSubagent(handle.agent),
+      };
     }
     if (action === "keep") {
       record = await this.worktrees.keep(record);
@@ -1315,12 +1128,11 @@ export class HostBridge {
           integration: this.worktreeSummary(completed.agent),
           error: result.error,
         });
-        this.response(id, "subagent_integrate", true, {
+        this.publishAgentsState();
+        return {
           status: record.integrationStatus,
           integration: this.worktreeSummary(completed.agent),
-        });
-        this.publishAgentsState();
-        return;
+        };
       }
       integrationWarning = result.error;
       completed.agent.integrationStatus = "applied";
@@ -1335,12 +1147,12 @@ export class HostBridge {
       integration: this.worktreeSummary(completed.agent),
       ...(integrationWarning ? { error: integrationWarning } : {}),
     });
-    this.response(id, "subagent_integrate", true, {
+    this.publishAgentsState();
+    return {
       status: record.integrationStatus,
       integration: this.worktreeSummary(completed.agent),
       ...(integrationWarning ? { warning: integrationWarning } : {}),
-    });
-    this.publishAgentsState();
+    };
   }
 
   private async resolvePendingSubagent(
@@ -1383,7 +1195,7 @@ export class HostBridge {
       .filter(Boolean)
       .join("\n\n");
     try {
-      return this.startSubagent({
+      return this.launchSubagent({
         profile: completed.agent.profile,
         task: conflictContext,
         direct: true,
@@ -1424,10 +1236,10 @@ export class HostBridge {
   }
 
   private runSubagent(options: SubagentOptions): Promise<JsonObject> {
-    return this.startSubagent(options).completion;
+    return this.launchSubagent(options).completion;
   }
 
-  private startSubagent(options: SubagentOptions): SubagentHandle {
+  private launchSubagent(options: SubagentOptions): SubagentHandle {
     const profile = this.config.profiles[options.profile];
     if (!profile) {
       throw new Error(`Unknown agent profile: ${options.profile}`);
@@ -2103,7 +1915,7 @@ export class HostBridge {
     }
   }
 
-  private async listProviders(): Promise<unknown[]> {
+  public async listProviders(): Promise<unknown[]> {
     const providers = await Promise.all(
       this.modelRuntime.getProviders().map(async (provider) => {
         const status = await this.modelRuntime.checkAuth(provider.id);
@@ -2140,16 +1952,18 @@ export class HostBridge {
       .sort((left, right) => left.name.localeCompare(right.name));
   }
 
-  private startLogin(id: string | undefined, request: JsonObject): void {
-    if (!id) throw new Error("auth_login requires an id");
+  public startLogin(input: {
+    flowId: string;
+    providerId: string;
+    authType: "oauth" | "api_key";
+  }): Promise<{
+    providerId: string;
+    credentialType: string;
+    selectedModel: unknown;
+  }> {
     if (this.activeFlow) throw new Error("Another login flow is already active");
 
-    const flowId = stringField(request, "flowId");
-    const providerId = stringField(request, "providerId");
-    const authType = stringField(request, "authType") as AuthType;
-    if (authType !== "oauth" && authType !== "api_key") {
-      throw new Error(`Unsupported authentication type: ${authType}`);
-    }
+    const { flowId, providerId, authType } = input;
     const provider = this.modelRuntime.getProvider(providerId);
     if (!provider) throw new Error(`Unknown provider: ${providerId}`);
     if (authType === "oauth" && !provider.auth.oauth) {
@@ -2167,40 +1981,38 @@ export class HostBridge {
     };
     this.activeFlow = flow;
 
-    void this.modelRuntime
-      .login(providerId, authType, {
-        signal: flow.controller.signal,
-        prompt: (prompt) => this.prompt(flow, prompt),
-        notify: (event) => this.notify(flow, event),
-      })
-      .then(async (credential) => {
-        const selectedModel = await this.afterLogin(providerId);
-        this.send({
-          type: "auth_complete",
-          flowId,
-          providerId,
-          credentialType: credential.type,
-          selectedModel,
+    return new Promise((resolve, reject) => {
+      void this.modelRuntime
+        .login(providerId, authType, {
+          signal: flow.controller.signal,
+          prompt: (prompt) => this.prompt(flow, prompt),
+          notify: (event) => this.notify(flow, event),
+        })
+        .then(async (credential) => {
+          const selectedModel = await this.afterLogin(providerId);
+          this.send({
+            type: "auth_complete",
+            flowId,
+            providerId,
+            credentialType: credential.type,
+            selectedModel,
+          });
+          resolve({
+            providerId,
+            credentialType: credential.type,
+            selectedModel,
+          });
+        })
+        .catch((error) => {
+          reject(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        })
+        .finally(() => {
+          if (this.activeFlow === flow) this.activeFlow = undefined;
+          this.rejectPrompts(flow, "Login flow ended");
         });
-        this.response(id, "auth_login", true, {
-          providerId,
-          credentialType: credential.type,
-          selectedModel,
-        });
-      })
-      .catch((error) => {
-        this.response(
-          id,
-          "auth_login",
-          false,
-          undefined,
-          error instanceof Error ? error.message : String(error),
-        );
-      })
-      .finally(() => {
-        if (this.activeFlow === flow) this.activeFlow = undefined;
-        this.rejectPrompts(flow, "Login flow ended");
-      });
+    });
   }
 
   private prompt(flow: ActiveFlow, prompt: AuthPrompt): Promise<string> {
@@ -2235,38 +2047,69 @@ export class HostBridge {
     });
   }
 
-  private replyToPrompt(id: string | undefined, request: JsonObject): void {
+  public replyToPrompt(input: {
+    flowId: string;
+    promptId: string;
+    value: string;
+  }): void {
     const flow = this.activeFlow;
-    const flowId = stringField(request, "flowId");
-    const promptId = stringField(request, "promptId");
-    if (!flow || flow.id !== flowId) throw new Error("Login flow is no longer active");
-    const value = stringField(request, "value");
-    if (!flow.prompts.reply(promptId, value)) {
+    if (!flow || flow.id !== input.flowId) {
+      throw new Error("Login flow is no longer active");
+    }
+    if (!flow.prompts.reply(input.promptId, input.value)) {
       throw new Error("Authentication prompt is no longer active");
     }
-    this.response(id, "auth_reply", true);
   }
 
-  private async logout(id: string | undefined, request: JsonObject): Promise<void> {
-    const providerId = stringField(request, "providerId");
+  public cancelLogin(): void {
+    this.cancelActiveFlow("Login cancelled");
+  }
+
+  public async logout(providerId: string): Promise<void> {
     await this.modelRuntime.logout(providerId);
-    this.response(id, "auth_logout", true);
   }
 
-  private setPlanMode(id: string | undefined, request: JsonObject): void {
-    const active = request.active;
-    if (typeof active !== "boolean") {
-      throw new Error("set_plan_mode requires a boolean active field");
-    }
+  public setPlanMode(active: boolean): {
+    active: boolean;
+    activeTools: readonly string[];
+  } {
     const activeTools = this.planMode.set(active);
     this.planMode
       .runtimeHandle()
       .session.sessionManager.appendCustomEntry(PLAN_MODE_ENTRY_TYPE, {
         active,
-      });
+    });
     const state = { active, activeTools };
     this.send({ type: "plan_mode_state", ...state });
-    this.response(id, "set_plan_mode", true, state);
+    return state;
+  }
+
+  public planState(): { scopeId: string; artifact: PlanArtifact | null } {
+    return {
+      scopeId: this.currentScopeId(),
+      artifact: this.plans.latest() ?? null,
+    };
+  }
+
+  public workspaceApprovalRules(): WorkspaceGrantSnapshot {
+    const identity = resolveWorkspaceIdentity(
+      this.planMode.runtimeHandle().session.sessionManager.getCwd(),
+    );
+    return this.permissionApprovals.workspace.snapshot(identity);
+  }
+
+  public revokeApprovalRule(ruleId: string): WorkspaceGrantSnapshot {
+    const identity = resolveWorkspaceIdentity(
+      this.planMode.runtimeHandle().session.sessionManager.getCwd(),
+    );
+    return this.permissionApprovals.workspace.revoke(identity, ruleId);
+  }
+
+  public clearApprovalRules(): WorkspaceGrantSnapshot {
+    const identity = resolveWorkspaceIdentity(
+      this.planMode.runtimeHandle().session.sessionManager.getCwd(),
+    );
+    return this.permissionApprovals.workspace.clear(identity);
   }
 
   private sendPlanModeState(): void {
@@ -2279,50 +2122,29 @@ export class HostBridge {
     });
   }
 
-  private replyApproval(id: string | undefined, request: JsonObject): void {
-    const requestId = stringField(request, "requestId");
-    const decision = stringField(request, "decision");
-    if (
-      decision !== "allow_once" &&
-      decision !== "allow_session" &&
-      decision !== "allow_workspace" &&
-      decision !== "deny"
-    ) {
-      throw new Error(`Unsupported approval decision: ${decision}`);
-    }
-    if (!this.approvals.reply(requestId, decision)) {
+  public replyApproval(input: {
+    requestId: string;
+    decision: "allow_once" | "allow_session" | "allow_workspace" | "deny";
+  }): void {
+    if (!this.approvals.reply(input.requestId, input.decision)) {
       throw new Error("Approval request is no longer active");
     }
-    this.response(id, "approval_reply", true);
   }
 
-  private replyQuestion(id: string | undefined, request: JsonObject): void {
-    const requestId = stringField(request, "requestId");
-    const rawAnswers = request.answers;
-    if (!Array.isArray(rawAnswers)) throw new Error("question_reply requires answers");
-    const answers = rawAnswers.map((answer) => {
-      if (!isJsonObject(answer)) throw new Error("Invalid question answer");
-      const optionId =
-        typeof answer.optionId === "string" && answer.optionId.length > 0
-          ? answer.optionId
-          : undefined;
-      return {
-        questionId: stringField(answer, "questionId"),
-        value: stringField(answer, "value"),
-        ...(optionId ? { optionId } : {}),
-      } satisfies QuestionAnswer;
-    });
-    if (!this.questions.reply(requestId, answers)) {
+  public replyQuestion(input: {
+    requestId: string;
+    answers: QuestionAnswer[];
+  }): void {
+    if (!this.questions.reply(input.requestId, input.answers)) {
       throw new Error("Question request is no longer active");
     }
-    this.response(id, "question_reply", true);
   }
 
   private restoreActivePlan(sessionManager: SessionManager) {
     return this.plans.restore(sessionManager.getBranch());
   }
 
-  private async openSessionBrowser(id: string | undefined): Promise<void> {
+  public async openSessionBrowser(): Promise<SessionBrowserSnapshot> {
     const runtime = this.planMode.runtimeHandle();
     if (!runtime.session.isIdle) {
       throw new Error("Cannot browse sessions while the agent is running");
@@ -2340,44 +2162,37 @@ export class HostBridge {
     });
     this.sessionCatalogs.set(catalog.browserId, catalog);
     const snapshot = await catalog.query("current", "", "threaded", false);
-    this.response(id, "session_browser_open", true, snapshot);
+    return snapshot;
   }
 
-  private async querySessionBrowser(
-    id: string | undefined,
-    request: JsonObject,
-  ): Promise<void> {
-    const browserId = stringField(request, "browserId");
-    const catalog = this.sessionCatalogs.get(browserId);
+  public async querySessionBrowser(input: {
+    browserId: string;
+    scope: "current" | "all";
+    sortMode: "threaded" | "recent" | "relevance";
+    query: string;
+    namedOnly: boolean;
+    offset: number;
+  }): Promise<SessionBrowserSnapshot> {
+    const catalog = this.sessionCatalogs.get(input.browserId);
     if (!catalog) throw new Error("Session browser is no longer active");
-    const scope = enumField(request, "scope", ["current", "all"] as const);
-    const sortMode = enumField(
-      request,
-      "sortMode",
-      ["threaded", "recent", "relevance"] as const,
-    );
-    const query = optionalStringField(request, "query") ?? "";
-    const namedOnly = request.namedOnly === true;
-    const offset = optionalNonNegativeIntegerField(request, "offset") ?? 0;
     const snapshot = await catalog.query(
-      scope,
-      query,
-      sortMode,
-      namedOnly,
-      offset,
+      input.scope,
+      input.query,
+      input.sortMode,
+      input.namedOnly,
+      input.offset,
     );
-    this.response(id, "session_browser_query", true, snapshot);
+    return snapshot;
   }
 
-  private closeSessionBrowser(
-    id: string | undefined,
-    request: JsonObject,
-  ): void {
-    this.sessionCatalogs.delete(stringField(request, "browserId"));
-    this.response(id, "session_browser_close", true);
+  public closeSessionBrowser(browserId: string): void {
+    this.sessionCatalogs.delete(browserId);
   }
 
-  private async newSession(id: string | undefined): Promise<void> {
+  public async newSession(): Promise<{
+    cancelled: boolean;
+    activation?: JsonObject;
+  }> {
     const runtime = this.planMode.runtimeHandle();
     if (!runtime.session.isIdle) {
       throw new Error("Cannot create a session while the agent is running");
@@ -2385,108 +2200,86 @@ export class HostBridge {
     if (this.planMode.current()) this.planMode.set(false);
     const result = await runtime.newSession();
     if (result.cancelled) {
-      this.response(id, "session_new", true, { cancelled: true });
-      return;
+      return { cancelled: true };
     }
     this.sessionCatalogs.clear();
-    this.response(id, "session_new", true, {
+    return {
       cancelled: false,
       activation: this.sessionActivation(),
-    });
+    };
   }
 
-  private async resumeSession(
-    id: string | undefined,
-    request: JsonObject,
-  ): Promise<void> {
+  public async resumeSession(input: {
+    sessionPath: string;
+    cwdOverride?: string;
+  }): Promise<{ cancelled: boolean; activation?: JsonObject }> {
     const runtime = this.planMode.runtimeHandle();
     if (!runtime.session.isIdle) {
       throw new Error("Cannot resume a session while the agent is running");
     }
-    const sessionPath = stringField(request, "sessionPath");
-    const cwdOverride = optionalStringField(request, "cwdOverride");
-    const result = await runtime.switchSession(sessionPath, {
-      ...(cwdOverride ? { cwdOverride } : {}),
+    const result = await runtime.switchSession(input.sessionPath, {
+      ...(input.cwdOverride ? { cwdOverride: input.cwdOverride } : {}),
     });
     if (result.cancelled) {
-      this.response(id, "session_resume", true, { cancelled: true });
-      return;
+      return { cancelled: true };
     }
     this.sessionCatalogs.clear();
-    this.response(id, "session_resume", true, {
+    return {
       cancelled: false,
       activation: this.sessionActivation(),
-    });
+    };
   }
 
-  private treeState(id: string | undefined, request: JsonObject): void {
+  public treeState(input: {
+    filterMode: TreeFilterMode;
+    query: string;
+    foldedEntryIds: string[];
+  }): TreeSnapshot {
     const runtime = this.planMode.runtimeHandle();
-    const filterMode = treeFilterField(request);
-    const query = optionalStringField(request, "query") ?? "";
-    const foldedEntryIds = stringArrayField(request, "foldedEntryIds");
-    this.response(
-      id,
-      "tree_state",
-      true,
-      buildTreeSnapshot(
-        runtime.session.sessionManager,
-        filterMode,
-        query,
-        foldedEntryIds,
-      ),
+    return buildTreeSnapshot(
+      runtime.session.sessionManager,
+      input.filterMode,
+      input.query,
+      input.foldedEntryIds,
     );
   }
 
-  private setTreeLabel(id: string | undefined, request: JsonObject): void {
+  public setTreeLabel(input: { entryId: string; label?: string }): void {
     const runtime = this.planMode.runtimeHandle();
     if (!runtime.session.isIdle) {
       throw new Error("Cannot edit tree labels while the agent is running");
     }
-    const entryId = stringField(request, "entryId");
-    const label = optionalStringField(request, "label")?.trim() || undefined;
-    runtime.session.sessionManager.appendLabelChange(entryId, label);
-    this.response(id, "tree_label", true);
+    runtime.session.sessionManager.appendLabelChange(input.entryId, input.label);
   }
 
-  private async copyTreeEntry(
-    id: string | undefined,
-    request: JsonObject,
-  ): Promise<void> {
+  public async copyTreeEntry(entryId: string): Promise<void> {
     const runtime = this.planMode.runtimeHandle();
-    const entryId = stringField(request, "entryId");
     const entry = runtime.session.sessionManager.getEntry(entryId);
     if (!entry) throw new Error(`Tree entry not found: ${entryId}`);
     const text = copyTextForEntry(entry);
     if (!text) throw new Error("Selected tree entry has no text to copy");
     await copyToClipboard(text);
-    this.response(id, "tree_copy", true);
   }
 
-  private async navigateTree(
-    id: string | undefined,
-    request: JsonObject,
-  ): Promise<void> {
+  public async navigateTree(input: {
+    entryId: string;
+    summarize: boolean;
+    customInstructions?: string;
+  }): Promise<JsonObject> {
     const runtime = this.planMode.runtimeHandle();
     if (!runtime.session.isIdle) {
       throw new Error("Cannot navigate the tree while the agent is running");
     }
-    const entryId = stringField(request, "entryId");
-    const summarize = request.summarize === true;
-    const customInstructions = optionalStringField(
-      request,
-      "customInstructions",
-    );
-    const result = await runtime.session.navigateTree(entryId, {
-      summarize,
-      ...(customInstructions ? { customInstructions } : {}),
+    const result = await runtime.session.navigateTree(input.entryId, {
+      summarize: input.summarize,
+      ...(input.customInstructions ? { customInstructions: input.customInstructions } : {}),
       replaceInstructions: false,
     });
     if (result.cancelled) {
-      this.response(id, "tree_navigate", true, {
+      return {
         cancelled: true,
         aborted: result.aborted === true,
-      });
-      return;
+      };
     }
 
     const restored = this.restoreActivePlan(runtime.session.sessionManager);
@@ -2502,17 +2295,16 @@ export class HostBridge {
       artifact: restored ?? null,
     });
     this.sendContextBudget(this.contextBudget.onTreeNavigation());
-    this.response(id, "tree_navigate", true, {
+    return {
       cancelled: false,
       aborted: false,
       editorText: result.editorText,
       activation: this.sessionActivation(),
-    });
+    };
   }
 
-  private abortTreeNavigation(id: string | undefined): void {
+  public abortTreeNavigation(): void {
     this.planMode.runtimeHandle().session.abortBranchSummary();
-    this.response(id, "tree_abort", true);
   }
 
   private sessionActivation(): JsonObject {
@@ -2542,8 +2334,9 @@ export class HostBridge {
     };
   }
 
-  private async executePlan(id: string | undefined, request: JsonObject): Promise<void> {
-    const context = enumField(request, "context", ["current", "fresh"]);
+  public async executePlan(
+    context: "current" | "fresh",
+  ): Promise<PlanExecutionResult> {
     const result = await dispatchPlanExecution(context, {
       plans: this.plans,
       modelRuntime: this.modelRuntime,
@@ -2560,7 +2353,7 @@ export class HostBridge {
         );
       },
     });
-    this.response(id, "plan_execute", true, result);
+    return result;
   }
 
   private async authorizeTool(
@@ -2771,64 +2564,6 @@ function toolsForPlanMode(active: boolean): readonly string[] {
   return active ? PLAN_TOOLS : STANDARD_TOOLS;
 }
 
-function commandLane(request: JsonObject): string | undefined {
-  const command = typeof request.type === "string" ? request.type : "";
-  if (
-    command === "auth_login" ||
-    command === "auth_cancel" ||
-    command === "auth_logout"
-  ) {
-    return "auth";
-  }
-  if (
-    command === "resource_reload" ||
-    command === "workspace_trust" ||
-    command === "agents_reload" ||
-    command === "approval_rules" ||
-    command === "approval_rule_revoke" ||
-    command === "approval_rules_clear"
-  ) {
-    return "configuration";
-  }
-  if (command === "subagent_integrate") {
-    const agentId =
-      typeof request.agentId === "string" ? request.agentId : "unknown";
-    return `integration:${agentId}`;
-  }
-  if (command === "subagent_start" || command === "subagent_cancel") {
-    return "subagents";
-  }
-  if (
-    command === "session_browser_open" ||
-    command === "session_browser_query" ||
-    command === "session_browser_close"
-  ) {
-    return "session-browser";
-  }
-  if (
-    command === "set_plan_mode" ||
-    command === "queue_clear" ||
-    command === "model_set" ||
-    command === "thinking_set" ||
-    command === "session_new" ||
-    command === "session_resume" ||
-    command === "tree_label" ||
-    command === "tree_navigate" ||
-    command === "tree_abort" ||
-    command === "plan_execute"
-  ) {
-    return "session";
-  }
-  return undefined;
-}
-
-function treeFilterField(value: JsonObject): TreeFilterMode {
-  return enumField(
-    value,
-    "filterMode",
-    ["default", "no-tools", "user-only", "labeled-only", "all"] as const,
-  );
-}
 
 function lastAssistantText(messages: unknown[]): string {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -2959,13 +2694,13 @@ if (isMain) {
       restorePlanMode(result.session.sessionManager.getBranch()),
     );
     hostBridge.activateWorkspace(runtimeCwd, result.session);
-    return {
-      ...result,
-      services,
-      diagnostics: services.diagnostics,
-    };
+  return {
+    ...result,
+    services,
+    diagnostics: services.diagnostics,
   };
-  
+};
+
   runtime = await createAgentSessionRuntime(createRuntime, {
     cwd,
     agentDir,
@@ -2973,12 +2708,12 @@ if (isMain) {
   });
   planMode.attach(runtime);
   await hostBridge.listen();
-  
+
   const shutdown = () => {
     void hostBridge.close().finally(() => process.exit(0));
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
-  
+
   await runRpcMode(runtime);
 }

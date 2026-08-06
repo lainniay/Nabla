@@ -220,12 +220,28 @@ const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 test("host command and event inventories are stable", () => {
   const source = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
-  const switchStart = source.indexOf("switch (command) {");
-  const switchEnd = source.indexOf("default:", switchStart);
-  const commandSwitch = source.slice(switchStart, switchEnd);
-  const commands = [...commandSwitch.matchAll(/case "([a-z0-9_]+)":/gu)]
-    .map((match) => match[1])
-    .sort();
+  const commandSource = [
+    "auth-commands.ts",
+    "bootstrap-commands.ts",
+    "configuration-commands.ts",
+    "interaction-commands.ts",
+    "model-commands.ts",
+    "permission-commands.ts",
+    "plan-commands.ts",
+    "agent-commands.ts",
+    "session-commands.ts",
+  ]
+    .map((file) =>
+      readFileSync(new URL(`./protocol/commands/${file}`, import.meta.url), "utf8"),
+    )
+    .join("\n");
+  const commands = [
+    ...new Set(
+      [...commandSource.matchAll(/type: "([a-z0-9_]+)"/gu)].map(
+        (match) => match[1],
+      ),
+    ),
+  ].sort();
   assert.deepEqual(commands, HOST_COMMANDS);
 
   const events = [...new Set(
@@ -243,6 +259,7 @@ test("host command and event inventories are stable", () => {
   const transportSource = [
     "control-connection.ts",
     "control-server.ts",
+    "../protocol/command-router.ts",
   ]
     .map((file) =>
       readFileSync(new URL(`./transport/${file}`, import.meta.url), "utf8"),

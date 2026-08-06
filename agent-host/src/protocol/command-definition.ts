@@ -1,9 +1,20 @@
 import { isJsonObject, type JsonObject } from "./validation.ts";
+import type { OperationContext } from "../app/operation-scope.ts";
 
-export interface CommandDefinition<Input extends JsonObject = JsonObject> {
-  name: string;
-  lane?: string;
-  decode(request: unknown): Input;
+export interface CommandDefinition<
+  TRequest extends JsonObject = JsonObject,
+  TResponse = unknown,
+> {
+  readonly type: string;
+  readonly lane:
+    | string
+    | ((request: JsonObject) => string | undefined)
+    | undefined;
+  decode(value: unknown): TRequest;
+  handle(
+    context: OperationContext,
+    request: TRequest,
+  ): Promise<TResponse> | TResponse;
 }
 
 export function requestObject(value: unknown): JsonObject {

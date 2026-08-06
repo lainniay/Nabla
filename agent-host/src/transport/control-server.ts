@@ -2,15 +2,9 @@ import { chmodSync, rmSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 
 import type { OperationContext } from "../app/operation-scope.ts";
+import type { CommandRouter } from "../protocol/command-router.ts";
 import type { JsonObject } from "../protocol/validation.ts";
 import { ControlConnection } from "./control-connection.ts";
-
-export interface LegacyRequestHandler {
-  handleRequest(
-    context: OperationContext,
-    request: JsonObject,
-  ): Promise<unknown>;
-}
 
 export interface ControlServerLifecycle {
   onConnectionReplaced?(connection: ControlConnection): void;
@@ -19,7 +13,7 @@ export interface ControlServerLifecycle {
 
 export class ControlServer {
   private readonly socketPath: string;
-  private readonly handler: LegacyRequestHandler;
+  private readonly router: CommandRouter;
   private readonly lifecycle: ControlServerLifecycle;
   private readonly server = createServer((socket) => this.accept(socket));
   private readonly requestConnections = new Map<string, ControlConnection>();
@@ -28,11 +22,11 @@ export class ControlServer {
 
   constructor(
     socketPath: string,
-    handler: LegacyRequestHandler,
+    router: CommandRouter,
     lifecycle: ControlServerLifecycle = {},
   ) {
     this.socketPath = socketPath;
-    this.handler = handler;
+    this.router = router;
     this.lifecycle = lifecycle;
   }
 
@@ -113,13 +107,18 @@ export class ControlServer {
       sessionGeneration: 0,
       signal: connection.signal,
     };
-    void this.handler.handleRequest(context, request).catch((error) => {
-      if (id) this.requestConnections.delete(id);
-      connection.send({
-        type: "host_protocol_error",
-        error: error instanceof Error ? error.message : String(error),
+    void this.router
+      .route(context, request)
+      .then((result) => {
+        if (result) this.respond(result.id, result.envelope);
+      })
+      .catch((error) => {
+        if (id) this.requestConnections.delete(id);
+        connection.send({
+          type: "host_protocol_error",
+          error: error instanceof Error ? error.message : String(error),
+        });
       });
-    });
   }
 
   private connectionClosed(connection: ControlConnection): void {
