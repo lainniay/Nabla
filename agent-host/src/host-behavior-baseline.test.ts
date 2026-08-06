@@ -193,9 +193,8 @@ async function withBridge(
   run: (bridge: HostBridge, client: TestClient) => Promise<void>,
 ): Promise<void> {
   const { bridge, socketPath } = createBridge(options);
-  (bridge as unknown as { worktrees: unknown }).worktrees = {
-    listRecoverable: async () => ({ records: [], warnings: [] }),
-    pruneTerminalArtifacts: async () => undefined,
+  (bridge as unknown as { integrations: unknown }).integrations = {
+    recover: async () => [],
   };
   await bridge.listen();
   const client = await openClient(socketPath);
@@ -474,14 +473,12 @@ test("worktree recovery completes before the control socket listens", async () =
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
-  (bridge as unknown as { worktrees: unknown }).worktrees = {
-    listRecoverable: async () => {
+  (bridge as unknown as { integrations: unknown }).integrations = {
+    recover: async () => {
       order.push("recovery");
       await gate;
-      return { records: [], warnings: [] };
-    },
-    pruneTerminalArtifacts: async () => {
       order.push("prune");
+      return [];
     },
   };
   const listening = bridge.listen().then(() => order.push("listen"));

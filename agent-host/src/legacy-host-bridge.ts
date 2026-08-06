@@ -32,7 +32,6 @@ import {
   agentPermissionEffect,
   agentPermissionSummary,
   filterContextFilesByTrust,
-  isCredentialPath,
   modelReference,
   workspaceIsTrusted,
   type AgentProfile,
@@ -42,7 +41,6 @@ import {
 import {
   MUTATING_TOOL_NAMES,
 } from "./policy/tool-policy.ts";
-import { workspaceRelativePath } from "./policy/path-boundary.ts";
 import {
   PLAN_ENTRY_TYPE,
   PLAN_MODE_ENTRY_TYPE,
@@ -93,10 +91,9 @@ import type { LegacyHostOperations } from "./legacy-host-operations.ts";
 import type { ThinkingLevel } from "./policy/tool-policy.ts";
 import type { WorkspaceGrantSnapshot } from "./permissions/approvals/workspace-store.ts";
 import type { PlanExecutionResult } from "./plan-execution.ts";
-import {
-  WorktreeManager,
-  type WorktreeRecoveryState,
-  type WorktreeRecord,
+import type {
+  WorktreeRecoveryState,
+  WorktreeRecord,
 } from "./worktree.ts";
 import { expandHomePath } from "./runtime/path-utils.ts";
 import { PlanModeService } from "./runtime/plan-mode-service.ts";
@@ -117,6 +114,7 @@ import { SessionBrowserService } from "./features/sessions/session-browser-servi
 import { TreeService } from "./features/sessions/tree-service.ts";
 import { PlanService } from "./features/plans/plan-service.ts";
 import { ContextService } from "./features/context/context-service.ts";
+import { IntegrationService } from "./features/subagents/integration-service.ts";
 import type {
   ActiveSubagent,
   SubagentHandle,
@@ -177,6 +175,7 @@ export class HostBridge implements LegacyHostOperations {
   private readonly workspace: WorkspaceService;
   private readonly bootstrap: BootstrapService;
   private readonly permissions: PermissionService;
+  private readonly integrations: IntegrationService;
   private readonly sessionBrowser: SessionBrowserService;
   private readonly sessionService: SessionService;
   private readonly treeService: TreeService;
@@ -195,9 +194,6 @@ export class HostBridge implements LegacyHostOperations {
     string,
     { agent: ActiveSubagent; result: JsonObject; record: WorktreeRecord }
   >();
-  private readonly worktrees = new WorktreeManager({
-    credentialPath: isCredentialPath,
-  });
   private agentsRevision = 0;
   private subagentSequence = 0;
   private writeSubagentTail: Promise<unknown> = Promise.resolve();
@@ -245,6 +241,10 @@ export class HostBridge implements LegacyHostOperations {
       this.modelRuntime,
       (event) => this.send(event),
       config,
+    );
+    this.integrations = new IntegrationService(
+      (message) => this.diagnostics.warn(message),
+      () => this.workspace.configValue(),
     );
     this.bootstrap = new BootstrapService();
     this.sessionBrowser = new SessionBrowserService(
@@ -705,49 +705,8 @@ export class HostBridge implements LegacyHostOperations {
   private async recoverWorktrees(): Promise<void> {
     const runtime = this.runtime.current();
     const cwd = runtime.session.sessionManager.getCwd();
-    const recovery = await this.worktrees.listRecoverable(cwd);
-    for (const warning of recovery.warnings) this.diagnostics.warn(warning);
-    const records = recovery.records;
-    for (let record of records) {
-      const metadata = record.recovery;
-      if (!this.validWorktreeRecovery(metadata)) {
-        this.diagnostics.warn(
-          `Preserved worktree ${record.id}, but its recovery metadata is missing or invalid.`,
-        );
-        continue;
-      }
-      const profile = this.workspace.configValue().profiles[metadata.profile];
-      if (!profile) {
-        this.diagnostics.warn(
-          `Preserved worktree ${record.id}, but subagent profile ${metadata.profile} is unavailable.`,
-        );
-        continue;
-      }
-      try {
-        if (record.integrationStatus === "none") {
-          const captured = await this.worktrees.capture(record);
-          record = captured.record;
-          if (!captured.hasChanges) {
-            await this.worktrees.integrate(record);
-            continue;
-          }
-        }
-        this.validateWorktreePaths(record, profile, record.originWorkspace);
-      } catch (error) {
-        let warning =
-          `Preserved worktree ${record.id}, but recovery validation failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`;
-        try {
-          await this.worktrees.keep(record);
-        } catch (keepError) {
-          warning += `; recording the keep decision also failed: ${
-            keepError instanceof Error ? keepError.message : String(keepError)
-          }`;
-        }
-        this.diagnostics.warn(warning);
-        continue;
-      }
+    const recovered = await this.integrations.recover(cwd);
+    for (const { record, metadata, profile } of recovered) {
       const sequence = /^agent-(\d+)$/u.exec(record.agentId)?.[1];
       if (sequence) {
         this.subagentSequence = Math.max(
@@ -791,28 +750,6 @@ export class HostBridge implements LegacyHostOperations {
         record,
       });
     }
-    await this.worktrees.pruneTerminalArtifacts(cwd).catch((error) => {
-      this.diagnostics.warn(
-        `Unable to prune old terminal worktree artifacts: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    });
-  }
-
-  private validWorktreeRecovery(
-    value: WorktreeRecoveryState | undefined,
-  ): value is WorktreeRecoveryState {
-    return (
-      value !== undefined &&
-      typeof value.profile === "string" &&
-      typeof value.task === "string" &&
-      typeof value.direct === "boolean" &&
-      typeof value.planReadOnly === "boolean" &&
-      typeof value.model === "string" &&
-      typeof value.originSessionId === "string" &&
-      (value.result === undefined || isJsonObject(value.result))
-    );
   }
 
   private profileUnavailableReason(
@@ -878,13 +815,13 @@ export class HostBridge implements LegacyHostOperations {
       };
     }
     if (action === "keep") {
-      record = await this.worktrees.keep(record);
+      record = await this.integrations.keep(record);
       this.completedSubagents.delete(agentId);
     } else if (action === "discard") {
-      record = await this.worktrees.discard(record);
+      record = await this.integrations.discard(record);
       this.completedSubagents.delete(agentId);
     } else {
-      const result = await this.worktrees.integrate(record);
+      const result = await this.integrations.integrate(record);
       record = result.record;
       if (result.status !== "applied") {
         completed.record = record;
@@ -939,7 +876,7 @@ export class HostBridge implements LegacyHostOperations {
     });
     let prepared;
     try {
-      prepared = await this.worktrees.prepareResolution(
+      prepared = await this.integrations.prepareResolution(
         `${agentId}-resolver`,
         completed.record,
       );
@@ -973,7 +910,7 @@ export class HostBridge implements LegacyHostOperations {
       });
     } catch (error) {
       try {
-        await this.worktrees.discard(prepared.isolation.record);
+        await this.integrations.discard(prepared.isolation.record);
       } catch (cleanupError) {
         this.reportHostWarning(
           `Unable to discard failed conflict resolver ${prepared.isolation.record.id}: ${
@@ -1087,7 +1024,7 @@ export class HostBridge implements LegacyHostOperations {
       });
       const prepared =
         options.preparedIsolation ??
-        (await this.worktrees.prepare(
+        (await this.integrations.prepare(
           active.id,
           cwd,
           profile.isolation,
@@ -1097,7 +1034,7 @@ export class HostBridge implements LegacyHostOperations {
       active.isolationWarning = prepared.warning;
       active.worktree = prepared.record;
       if (active.worktree) {
-        active.worktree = await this.worktrees.annotate(
+        active.worktree = await this.integrations.annotate(
           active.worktree,
           this.worktreeRecoveryState(active),
         );
@@ -1272,28 +1209,28 @@ export class HostBridge implements LegacyHostOperations {
       };
       let integrationPending = false;
       if (active.worktree) {
-        const captured = await this.worktrees.capture(
+        const captured = await this.integrations.capture(
           active.worktree,
           controller.signal,
         );
         active.worktree = captured.record;
-        this.validateWorktreePaths(
+        this.integrations.validateWorktreePaths(
           captured.record,
           profile,
           originCwd,
         );
         if (options.resolutionForAgentId) {
-          await this.worktrees.assertResolved(captured.record);
+          await this.integrations.assertResolved(captured.record);
         }
         if (options.discardWorktreeChanges) {
           if (captured.hasChanges) {
-            active.worktree = await this.worktrees.discard(captured.record);
+            active.worktree = await this.integrations.discard(captured.record);
             active.integrationStatus = "discarded";
             throw new Error(
               `Verification modified isolated files: ${captured.record.changedPaths.join(", ")}`,
             );
           }
-          const integration = await this.worktrees.integrate(captured.record);
+          const integration = await this.integrations.integrate(captured.record);
           active.worktree = integration.record;
           active.integrationStatus = integration.record.integrationStatus;
           if (integration.status !== "applied") {
@@ -1309,7 +1246,7 @@ export class HostBridge implements LegacyHostOperations {
             (options.forceAutoIntegrate === true ||
               profile.isolation.integration === "auto"));
         if (autoIntegrate) {
-          const integration = await this.worktrees.integrate(
+          const integration = await this.integrations.integrate(
             captured.record,
             controller.signal,
           );
@@ -1318,7 +1255,7 @@ export class HostBridge implements LegacyHostOperations {
           if (integration.status !== "applied") {
             integrationPending = true;
             active.lifecycle = "awaiting_integration";
-            active.worktree = await this.worktrees.annotate(
+            active.worktree = await this.integrations.annotate(
               integration.record,
               this.worktreeRecoveryState(active, completed),
             );
@@ -1335,7 +1272,7 @@ export class HostBridge implements LegacyHostOperations {
           active.integrationStatus = captured.record.integrationStatus;
           if (integrationPending) {
             active.lifecycle = "awaiting_integration";
-            active.worktree = await this.worktrees.annotate(
+            active.worktree = await this.integrations.annotate(
               captured.record,
               this.worktreeRecoveryState(active, completed),
             );
@@ -1369,7 +1306,7 @@ export class HostBridge implements LegacyHostOperations {
           options.resolutionForAgentId,
         );
         if (source) {
-          source.record = await this.worktrees.resolvedBy(
+          source.record = await this.integrations.resolvedBy(
             source.record,
             active.id,
           );
@@ -1406,12 +1343,12 @@ export class HostBridge implements LegacyHostOperations {
         };
         if (active.worktree && active.integrationStatus === "none") {
           try {
-            const captured = await this.worktrees.capture(active.worktree);
+            const captured = await this.integrations.capture(active.worktree);
             active.worktree = captured.record;
             active.integrationStatus = captured.record.integrationStatus;
             if (captured.hasChanges) {
               active.lifecycle = "awaiting_integration";
-              active.worktree = await this.worktrees.annotate(
+              active.worktree = await this.integrations.annotate(
                 captured.record,
                 this.worktreeRecoveryState(active, limited),
               );
@@ -1428,7 +1365,7 @@ export class HostBridge implements LegacyHostOperations {
                 error: String(limited.summary),
               });
             } else {
-              await this.worktrees.integrate(captured.record);
+              await this.integrations.integrate(captured.record);
             }
           } catch (recoveryError) {
             this.reportHostWarning(
@@ -1449,7 +1386,7 @@ export class HostBridge implements LegacyHostOperations {
       const message = error instanceof Error ? error.message : String(error);
       if (options.resolutionForAgentId && active.worktree) {
         try {
-          await this.worktrees.discard(active.worktree);
+          await this.integrations.discard(active.worktree);
           active.integrationStatus = "discarded";
         } catch (cleanupError) {
           this.reportHostWarning(
@@ -1462,7 +1399,7 @@ export class HostBridge implements LegacyHostOperations {
         }
       } else if (active.worktree && active.integrationStatus === "none") {
         try {
-          const captured = await this.worktrees.capture(active.worktree);
+          const captured = await this.integrations.capture(active.worktree);
           active.worktree = captured.record;
           active.integrationStatus = captured.record.integrationStatus;
           if (captured.hasChanges) {
@@ -1473,7 +1410,7 @@ export class HostBridge implements LegacyHostOperations {
               integration: this.worktreeSummary(active),
             };
             active.lifecycle = "awaiting_integration";
-            active.worktree = await this.worktrees.annotate(
+            active.worktree = await this.integrations.annotate(
               captured.record,
               this.worktreeRecoveryState(active, failedResult),
             );
@@ -1490,7 +1427,7 @@ export class HostBridge implements LegacyHostOperations {
               error: message,
             });
           } else {
-            await this.worktrees.integrate(captured.record);
+            await this.integrations.integrate(captured.record);
           }
         } catch (recoveryError) {
           this.reportHostWarning(
@@ -1650,42 +1587,6 @@ export class HostBridge implements LegacyHostOperations {
       originSessionId: agent.originSessionId,
       ...(result ? { result: structuredClone(result) } : {}),
     };
-  }
-
-  private validateWorktreePaths(
-    record: WorktreeRecord,
-    profile: AgentProfile,
-    originCwd: string,
-  ): void {
-    for (const path of record.changedPaths) {
-      const absolute = resolve(record.repoRoot, path);
-      if (isCredentialPath(absolute)) {
-        throw new Error(
-          `Worktree result changes a credential-like path: ${path}`,
-        );
-      }
-      let workspaceRelative: string;
-      try {
-        workspaceRelative = workspaceRelativePath(originCwd, absolute);
-      } catch {
-        throw new Error(`Worktree result changes outside the workspace: ${path}`);
-      }
-      const pathTools = ["edit", "write"].filter((tool) =>
-        profile.tools.includes(tool),
-      );
-      if (
-        pathTools.length > 0 &&
-        pathTools.every(
-          (tool) =>
-            agentPermissionEffect(profile, tool, workspaceRelative) === "deny",
-        ) &&
-        !profile.tools.includes("bash")
-      ) {
-        throw new Error(
-          `Profile ${profile.description} denies the changed path: ${workspaceRelative}`,
-        );
-      }
-    }
   }
 
   public async listProviders(): Promise<unknown[]> {
