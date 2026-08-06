@@ -281,6 +281,7 @@ test("host command and event inventories are stable", () => {
     "control-server.ts",
     "../protocol/command-router.ts",
     "../features/auth/auth-service.ts",
+    "../features/workspace/workspace-service.ts",
   ]
     .map((file) =>
       readFileSync(new URL(`./transport/${file}`, import.meta.url), "utf8"),
@@ -290,7 +291,10 @@ test("host command and event inventories are stable", () => {
     ...new Set(
       [...transportSource.matchAll(/type: "([a-z0-9_]+)"/gu)]
         .map((match) => match[1])
-        .filter((name) => name !== "api_key" && name !== "oauth"),
+        .filter(
+          (name) =>
+            name !== "api_key" && name !== "oauth" && name !== "error",
+        ),
     ),
   ];
   assert.deepEqual(

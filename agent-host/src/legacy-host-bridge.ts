@@ -37,9 +37,7 @@ import {
   agentPermissionSummary,
   filterContextFilesByTrust,
   isCredentialPath,
-  loadHarnessConfig,
   modelReference,
-  saveWorkspaceTrust,
   workspaceIsTrusted,
   type AgentProfile,
   type HarnessConfig,
@@ -139,6 +137,8 @@ import { agentToolResource, permissionIntentForTool } from "./features/permissio
 import { InteractionBroker } from "./features/interactions/interaction-broker.ts";
 import { ModelService } from "./features/models/model-service.ts";
 import { AuthService } from "./features/auth/auth-service.ts";
+import { WorkspaceService } from "./features/workspace/workspace-service.ts";
+import { BootstrapService } from "./features/bootstrap/bootstrap-service.ts";
 import type {
   ActiveSubagent,
   SubagentHandle,
@@ -202,6 +202,8 @@ export class HostBridge implements LegacyHostOperations {
   private readonly control: ControlServer;
   private readonly router: CommandRouter;
   private readonly auth: AuthService;
+  private readonly workspace: WorkspaceService;
+  private readonly bootstrap: BootstrapService;
   private readonly events: HostEventPublisher;
   private readonly diagnostics = new HostDiagnostics();
   private readonly interactions = new InteractionBroker();
@@ -234,8 +236,6 @@ export class HostBridge implements LegacyHostOperations {
   private readonly worktrees = new WorktreeManager({
     credentialPath: isCredentialPath,
   });
-  private config: HarnessConfig;
-  private resourceRevision = 1;
   private agentsRevision = 0;
   private subagentSequence = 0;
   private writeSubagentTail: Promise<unknown> = Promise.resolve();
@@ -257,7 +257,14 @@ export class HostBridge implements LegacyHostOperations {
     this.runtime = runtime;
     this.plans = plans;
     this.contextBudget = contextBudget;
-    this.config = config;
+    this.workspace = new WorkspaceService(
+      this.runtime,
+      this.planMode,
+      this.modelRuntime,
+      (event) => this.send(event),
+      config,
+    );
+    this.bootstrap = new BootstrapService();
     this.afterLogin = afterLogin;
     this.auth = new AuthService(
       this.modelRuntime,
@@ -593,71 +600,18 @@ export class HostBridge implements LegacyHostOperations {
   public resourceSnapshot(
     session = this.runtime.current().session,
   ): ResourceSnapshot {
-    const loader = session.resourceLoader;
-    const skills = loader.getSkills();
-    const prompts = loader.getPrompts();
-    const extensions = loader.getExtensions();
-    return {
-      scopeId: session.sessionId,
-      trusted: workspaceIsTrusted(
-        session.sessionManager.getCwd(),
-        this.config,
-      ),
-      contextFiles: loader.getAgentsFiles().agentsFiles.map((file) => file.path),
-      skills: skills.skills.map((skill) => ({
-        name: skill.name,
-        path: skill.filePath,
-        description: skill.description,
-      })),
-      prompts: prompts.prompts.map((prompt) => ({
-        name: prompt.name,
-        path: prompt.filePath,
-        description: prompt.description,
-      })),
-      extensions: extensions.extensions.map(
-        (extension) => extension.resolvedPath,
-      ),
-      commands: [
-        ...extensions.extensions.flatMap((extension) =>
-          [...extension.commands.values()].map((command) => ({
-            name: command.name,
-            description: command.description ?? "",
-            source: "extension" as const,
-          })),
-        ),
-        ...prompts.prompts.map((prompt) => ({
-          name: prompt.name,
-          description: prompt.description,
-          source: "prompt" as const,
-        })),
-        ...skills.skills.map((skill) => ({
-          name: `skill:${skill.name}`,
-          description: skill.description,
-          source: "skill" as const,
-        })),
-      ],
-      diagnostics: [
-        ...skills.diagnostics,
-        ...prompts.diagnostics,
-        ...extensions.errors.map((error) => ({
-          type: "error",
-          message: error.error,
-          path: error.path,
-        })),
-      ],
-      revision: this.resourceRevision,
-    };
+    return this.workspace.resourceSnapshot(session);
   }
 
   public bootstrapState(): BootstrapState {
     const session = this.runtime.current().session;
-    return {
+    return this.bootstrap.snapshot({
       scopeId: session.sessionId,
       planMode: {
         active: this.planMode.current(),
         activeTools: session.getActiveToolNames(),
       },
-      plan: { artifact: this.plans.latest() ?? null },
+      artifact: this.plans.latest() ?? null,
       resources: this.resourceSnapshot(),
       agents: this.agentsSnapshot(session),
       context: this.contextSnapshot(),
@@ -668,64 +622,33 @@ export class HostBridge implements LegacyHostOperations {
         }),
       ),
       warnings: [...this.diagnostics.snapshot()],
-    };
+    });
   }
 
   private publishWorkspaceState(
     session = this.runtime.current().session,
   ): { resources: ResourceSnapshot; agents: AgentsSnapshot } {
-    this.resourceRevision += 1;
     this.agentsRevision += 1;
-    const resources = this.resourceSnapshot(session);
-    const agents = this.agentsSnapshot(session);
-    this.send({
-      type: "workspace_state",
-      scopeId: session.sessionId,
-      resources,
-      agents,
-    });
-    return { resources, agents };
+    return this.workspace.publishWorkspaceState(
+      session,
+      this.agentsSnapshot(session),
+    );
   }
 
   public async reloadResources(): Promise<ResourceSnapshot> {
-    const runtime = this.runtime.current();
-    if (!runtime.session.isIdle) {
-      throw new Error("Cannot reload resources while the agent is running");
-    }
-    this.config = loadHarnessConfig(
-      runtime.session.sessionManager.getCwd(),
-    );
-    await runtime.session.reload();
-    this.planMode.apply(runtime.session);
-    this.sendPlanModeState();
-    const { resources } = this.publishWorkspaceState(runtime.session);
-    return resources;
+    return this.workspace.reloadResources(() => this.agentsSnapshot());
   }
 
   activateWorkspace(cwd: string, session?: AgentSession): void {
-    this.config = loadHarnessConfig(cwd);
     if (session && this.control.hasConnection()) {
-      this.publishWorkspaceState(session);
+      this.workspace.activate(cwd, session, () => this.agentsSnapshot(session));
+    } else {
+      this.workspace.reloadConfig(cwd);
     }
   }
 
   public async setWorkspaceTrust(trusted: boolean): Promise<ResourceSnapshot> {
-    const runtime = this.runtime.current();
-    if (!runtime.session.isIdle) {
-      throw new Error("Cannot change workspace trust while the agent is running");
-    }
-    const cwd = runtime.session.sessionManager.getCwd();
-    this.config = saveWorkspaceTrust(cwd, trusted);
-    this.config = loadHarnessConfig(cwd);
-    runtime.services.settingsManager.setProjectTrusted(trusted);
-    await runtime.session.resourceLoader.reload({
-      resolveProjectTrust: async () => trusted,
-    });
-    await runtime.session.reload();
-    this.planMode.apply(runtime.session);
-    this.sendPlanModeState();
-    const { resources } = this.publishWorkspaceState(runtime.session);
-    return resources;
+    return this.workspace.setWorkspaceTrust(trusted, () => this.agentsSnapshot());
   }
 
   public clearQueue(): JsonObject {
@@ -766,8 +689,8 @@ export class HostBridge implements LegacyHostOperations {
     return {
       scopeId: session.sessionId,
       revision: this.agentsRevision,
-      maxParallel: this.config.maxParallel,
-      profiles: Object.entries(this.config.profiles).map(([name, profile]) => ({
+      maxParallel: this.workspace.configValue().maxParallel,
+      profiles: Object.entries(this.workspace.configValue().profiles).map(([name, profile]) => ({
         unavailableReason:
           this.profileUnavailableReason(profile, session) ?? null,
         name,
@@ -789,7 +712,7 @@ export class HostBridge implements LegacyHostOperations {
       pending: [...this.completedSubagents.values()].map(({ agent }) =>
         this.publicSubagent(agent),
       ),
-      diagnostics: this.config.diagnostics,
+      diagnostics: this.workspace.configValue().diagnostics,
     };
   }
 
@@ -816,7 +739,7 @@ export class HostBridge implements LegacyHostOperations {
         );
         continue;
       }
-      const profile = this.config.profiles[metadata.profile];
+      const profile = this.workspace.configValue().profiles[metadata.profile];
       if (!profile) {
         this.diagnostics.warn(
           `Preserved worktree ${record.id}, but subagent profile ${metadata.profile} is unavailable.`,
@@ -919,49 +842,16 @@ export class HostBridge implements LegacyHostOperations {
     profile: AgentProfile,
     session = this.runtime.current().session,
   ): string | undefined {
-    const availableSkills = new Set(
-      session.resourceLoader.getSkills().skills.map((skill) => skill.name),
-    );
-    const missingSkills = profile.skills.filter(
-      (skill) => !availableSkills.has(skill),
-    );
-    if (missingSkills.length > 0) {
-      return `Missing skills: ${missingSkills.join(", ")}`;
-    }
-    const reference = modelReference(profile);
-    if (
-      reference &&
-      !this.modelRuntime.getModel(reference.provider, reference.id)
-    ) {
-      return `Configured model is unavailable: ${reference.provider}/${reference.id}`;
-    }
-    return undefined;
+    return this.workspace.profileUnavailableReason(profile, session);
   }
 
   private subagentCatalogPrompt(): string {
-    const profiles = Object.entries(this.config.profiles)
-      .filter(
-        ([, profile]) =>
-          !profile.disabled && !this.profileUnavailableReason(profile),
-      )
-      .map(
-        ([name, profile]) =>
-          `- ${name}: ${profile.description} (tools: ${profile.tools.join(", ") || "none"})`,
-      );
-    return profiles.length === 0
-      ? "No subagent profiles are currently available."
-      : [
-          "Available subagents for delegate_task:",
-          ...profiles,
-          "Choose a profile only when its description matches the bounded task.",
-        ].join("\n");
+    return this.workspace.subagentCatalogPrompt();
   }
 
   public async reloadAgents(): Promise<AgentsSnapshot> {
     const runtime = this.runtime.current();
-    this.config = loadHarnessConfig(
-      runtime.session.sessionManager.getCwd(),
-    );
+    this.workspace.reloadConfig(runtime.session.sessionManager.getCwd());
     const snapshot = this.publishAgentsState();
     return snapshot;
   }
@@ -1141,7 +1031,7 @@ export class HostBridge implements LegacyHostOperations {
   }
 
   private launchSubagent(options: SubagentOptions): SubagentHandle {
-    const profile = this.config.profiles[options.profile];
+    const profile = this.workspace.configValue().profiles[options.profile];
     if (!profile) {
       throw new Error(`Unknown agent profile: ${options.profile}`);
     }
@@ -1150,9 +1040,9 @@ export class HostBridge implements LegacyHostOperations {
     }
     const unavailable = this.profileUnavailableReason(profile);
     if (unavailable) throw new Error(`Subagent ${options.profile}: ${unavailable}`);
-    if (this.subagents.size >= this.config.maxParallel) {
+    if (this.subagents.size >= this.workspace.configValue().maxParallel) {
       throw new Error(
-        `Subagent concurrency limit reached (${this.config.maxParallel})`,
+        `Subagent concurrency limit reached (${this.workspace.configValue().maxParallel})`,
       );
     }
     const activeForProfile = [...this.subagents.values()].filter(
@@ -1320,7 +1210,7 @@ export class HostBridge implements LegacyHostOperations {
     const controller = active.controller;
     const agentId = active.id;
     const settings = SettingsManager.inMemory();
-    settings.setProjectTrusted(workspaceIsTrusted(originCwd, this.config));
+    settings.setProjectTrusted(workspaceIsTrusted(originCwd, this.workspace.configValue()));
     const loader = new DefaultResourceLoader({
       cwd,
       agentDir: getAgentDir(),
@@ -1331,7 +1221,7 @@ export class HostBridge implements LegacyHostOperations {
         agentsFiles: filterContextFilesByTrust(
           base.agentsFiles,
           getAgentDir(),
-          workspaceIsTrusted(originCwd, this.config),
+          workspaceIsTrusted(originCwd, this.workspace.configValue()),
         ),
       }),
       skillsOverride: (base) => ({
@@ -1346,7 +1236,7 @@ export class HostBridge implements LegacyHostOperations {
     });
     await loader.reload({
       resolveProjectTrust: async () =>
-        workspaceIsTrusted(originCwd, this.config),
+        workspaceIsTrusted(originCwd, this.workspace.configValue()),
     });
     const result = await createAgentSession({
       cwd,
