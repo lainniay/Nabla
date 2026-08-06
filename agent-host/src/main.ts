@@ -112,8 +112,14 @@ import type {
   ActiveAgentSnapshot,
   AgentsSnapshot,
   BootstrapState,
+  HostEvent,
   WorktreeIntegrationSnapshot,
 } from "./protocol/contracts.ts";
+import {
+  HostEventPublisher,
+  type OutboundHostEvent,
+} from "./protocol/host-event-publisher.ts";
+import { HostDiagnostics } from "./diagnostics/host-diagnostics.ts";
 import {
   WorktreeManager,
   type WorktreeRecoveryState,
@@ -261,6 +267,8 @@ export class PlanModeController {
 export class HostBridge {
   private socket?: Socket;
   private activeFlow?: ActiveFlow;
+  private readonly events: HostEventPublisher;
+  private readonly diagnostics = new HostDiagnostics();
   private readonly approvals = new ApprovalQueue();
   private readonly permissionPolicies = new PolicyStore();
   private readonly permissionApprovals = new PermissionApprovalBroker();
@@ -297,7 +305,6 @@ export class HostBridge {
   private agentsRevision = 0;
   private subagentSequence = 0;
   private writeSubagentTail: Promise<unknown> = Promise.resolve();
-  private readonly worktreeRecoveryWarnings: string[] = [];
   private readonly commandLanes = new CommandLanes();
   private readonly requestSockets = new Map<string, Socket>();
   private readonly requestContext = new AsyncLocalStorage<{
@@ -322,6 +329,8 @@ export class HostBridge {
     this.contextBudget = contextBudget;
     this.config = config;
     this.afterLogin = afterLogin;
+    this.events = new HostEventPublisher((event) => this.writeEvent(event));
+    this.events.setScopeIdProvider(() => this.tryCurrentScopeId());
     this.permissionPolicies.setBuiltin(
       ["ask_user", "submit_plan"].map(
         (tool): PermissionRule => ({
@@ -626,13 +635,12 @@ export class HostBridge {
   }
 
   private send(message: JsonObject): void {
+    this.events.publish(message as HostEvent);
+  }
+
+  private writeEvent(event: OutboundHostEvent): void {
     if (!this.socket || this.socket.destroyed) return;
-    const scopeId = this.tryCurrentScopeId();
-    const scoped =
-      scopeId && typeof message.scopeId !== "string"
-        ? { ...message, scopeId }
-        : message;
-    this.socket.write(`${JSON.stringify(scoped)}\n`);
+    this.socket.write(`${JSON.stringify(event)}\n`);
   }
 
   private sendTo(socket: Socket, message: JsonObject): void {
@@ -903,9 +911,7 @@ export class HostBridge {
   }
 
   private reportHostWarning(message: string): void {
-    if (!this.worktreeRecoveryWarnings.includes(message)) {
-      this.worktreeRecoveryWarnings.push(message);
-    }
+    this.diagnostics.warn(message);
     this.send({ type: "host_warning", message });
   }
 
@@ -986,7 +992,7 @@ export class HostBridge {
           integration: this.worktreeSummary(agent),
         }),
       ),
-      warnings: [...this.worktreeRecoveryWarnings],
+      warnings: [...this.diagnostics.snapshot()],
     };
   }
 
@@ -1158,19 +1164,19 @@ export class HostBridge {
     const runtime = this.planMode.runtimeHandle();
     const cwd = runtime.session.sessionManager.getCwd();
     const recovery = await this.worktrees.listRecoverable(cwd);
-    this.worktreeRecoveryWarnings.push(...recovery.warnings);
+    for (const warning of recovery.warnings) this.diagnostics.warn(warning);
     const records = recovery.records;
     for (let record of records) {
       const metadata = record.recovery;
       if (!this.validWorktreeRecovery(metadata)) {
-        this.worktreeRecoveryWarnings.push(
+        this.diagnostics.warn(
           `Preserved worktree ${record.id}, but its recovery metadata is missing or invalid.`,
         );
         continue;
       }
       const profile = this.config.profiles[metadata.profile];
       if (!profile) {
-        this.worktreeRecoveryWarnings.push(
+        this.diagnostics.warn(
           `Preserved worktree ${record.id}, but subagent profile ${metadata.profile} is unavailable.`,
         );
         continue;
@@ -1197,7 +1203,7 @@ export class HostBridge {
             keepError instanceof Error ? keepError.message : String(keepError)
           }`;
         }
-        this.worktreeRecoveryWarnings.push(warning);
+        this.diagnostics.warn(warning);
         continue;
       }
       const sequence = /^agent-(\d+)$/u.exec(record.agentId)?.[1];
@@ -1244,7 +1250,7 @@ export class HostBridge {
       });
     }
     await this.worktrees.pruneTerminalArtifacts(cwd).catch((error) => {
-      this.worktreeRecoveryWarnings.push(
+      this.diagnostics.warn(
         `Unable to prune old terminal worktree artifacts: ${
           error instanceof Error ? error.message : String(error)
         }`,
