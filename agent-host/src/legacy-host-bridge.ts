@@ -26,7 +26,6 @@ import { Type } from "typebox";
 
 import { newFileDisplayDiff } from "./tool-diff.ts";
 import { ApprovalQueue, type ApprovalDecision } from "./approval.ts";
-import { AuthPromptQueue } from "./auth-prompts.ts";
 import {
   ContextBudgetManager,
   contextRemaining,
@@ -137,15 +136,15 @@ import {
 } from "./runtime/runtime-supervisor.ts";
 import { sessionActivation } from "./runtime/session-activation.ts";
 import { agentToolResource, permissionIntentForTool } from "./features/permissions/tool-intent.ts";
+import { InteractionBroker } from "./features/interactions/interaction-broker.ts";
+import { ModelService } from "./features/models/model-service.ts";
+import { AuthService } from "./features/auth/auth-service.ts";
 import type {
   ActiveSubagent,
   SubagentHandle,
   SubagentOptions,
 } from "./features/subagents/subagent-types.ts";
 
-type AuthInteraction = Parameters<ModelRuntime["login"]>[2];
-type AuthPrompt = Parameters<AuthInteraction["prompt"]>[0];
-type AuthEvent = Parameters<AuthInteraction["notify"]>[0];
 
 const EXTERNAL_TOOL_EXECUTION_PROFILE: ExecutionProfile = {
   backend: "none",
@@ -199,20 +198,13 @@ function buildPlanInstructions(snapshot: ContextSnapshot): string {
   ].join("\n");
 }
 
-interface ActiveFlow {
-  id: string;
-  controller: AbortController;
-  prompts: AuthPromptQueue;
-  nextPromptId: number;
-}
-
 export class HostBridge implements LegacyHostOperations {
-  private activeFlow?: ActiveFlow;
   private readonly control: ControlServer;
   private readonly router: CommandRouter;
+  private readonly auth: AuthService;
   private readonly events: HostEventPublisher;
   private readonly diagnostics = new HostDiagnostics();
-  private readonly approvals = new ApprovalQueue();
+  private readonly interactions = new InteractionBroker();
   private readonly permissionPolicies = new PolicyStore();
   private readonly permissionApprovals = new PermissionApprovalBroker();
   private readonly permissionKernel = new PermissionKernel(
@@ -226,9 +218,9 @@ export class HostBridge implements LegacyHostOperations {
   );
   private readonly pendingToolAuthorizations = new Map<string, Authorization>();
   private readonly shellPermissionAdapter = new ShellAdapter();
-  private readonly questions = new QuestionQueue();
   private readonly plans: PlanStore;
   private readonly modelRuntime: ModelRuntime;
+  private readonly models: ModelService;
   private readonly planMode: PlanModeService;
   private readonly runtime: RuntimeSupervisor;
   private readonly contextBudget: ContextBudgetManager;
@@ -251,6 +243,7 @@ export class HostBridge implements LegacyHostOperations {
   constructor(
     socketPath: string,
     modelRuntime: ModelRuntime,
+    models: ModelService,
     planMode: PlanModeService,
     runtime: RuntimeSupervisor,
     plans: PlanStore,
@@ -259,12 +252,18 @@ export class HostBridge implements LegacyHostOperations {
     afterLogin: (providerId: string) => Promise<unknown>,
   ) {
     this.modelRuntime = modelRuntime;
+    this.models = models;
     this.planMode = planMode;
     this.runtime = runtime;
     this.plans = plans;
     this.contextBudget = contextBudget;
     this.config = config;
     this.afterLogin = afterLogin;
+    this.auth = new AuthService(
+      this.modelRuntime,
+      this.afterLogin,
+      (event) => this.send(event),
+    );
     this.events = new HostEventPublisher((event) => this.writeEvent(event));
     this.events.setScopeIdProvider(() => this.tryCurrentScopeId());
     this.router = new CommandRouter(
@@ -286,14 +285,12 @@ export class HostBridge implements LegacyHostOperations {
       this.router,
       {
         onConnectionReplaced: () => {
-          this.cancelActiveFlow("Host control client replaced");
-          this.approvals.denyAll();
-          this.questions.cancelAll("Host control client replaced");
+          this.auth.cancel("Host control client replaced");
+          this.interactions.cancelAll("Host control client replaced");
         },
         onConnectionClosed: () => {
-          this.cancelActiveFlow("Authentication client disconnected");
-          this.approvals.denyAll();
-          this.questions.cancelAll("Host control client disconnected");
+          this.auth.cancel("Authentication client disconnected");
+          this.interactions.cancelAll("Host control client disconnected");
         },
       },
     );
@@ -346,7 +343,7 @@ export class HostBridge implements LegacyHostOperations {
           }),
           execute: async (_toolCallId, params, signal) => {
             const questions = params.questions as PlanQuestion[];
-            const answers = await this.questions.request(
+            const answers = await this.interactions.requestQuestions(
               questions,
               signal,
               (requestId, requestedQuestions) =>
@@ -541,9 +538,8 @@ export class HostBridge implements LegacyHostOperations {
   }
 
   async close(): Promise<void> {
-    this.cancelActiveFlow("Authentication host stopped");
-    this.approvals.denyAll();
-    this.questions.cancelAll();
+    this.auth.cancel("Authentication host stopped");
+    this.interactions.cancelAll();
     const activeSubagents = [...this.subagents.values()];
     for (const subagent of activeSubagents) subagent.controller.abort();
     await Promise.allSettled(
@@ -750,54 +746,18 @@ export class HostBridge implements LegacyHostOperations {
       contextWindow: unknown;
     }>;
   }> {
-    const runtime = this.runtime.current();
-    const models = await this.modelRuntime.getAvailable();
-    return {
-      current: runtime.session.model
-        ? {
-            provider: runtime.session.model.provider,
-            id: runtime.session.model.id,
-          }
-        : null,
-      models: models.map((model) => ({
-        provider: model.provider,
-        id: model.id,
-        name: model.name,
-        reasoning: model.reasoning,
-        contextWindow: model.contextWindow,
-      })),
-    };
+    return this.models.list();
   }
 
   public async setModel(input: {
     provider: string;
     modelId: string;
   }): Promise<{ provider: string; id: string; name: string }> {
-    const runtime = this.runtime.current();
-    if (!runtime.session.isIdle) {
-      throw new Error("Cannot change model while the agent is running");
-    }
-    const { provider, modelId } = input;
-    const model = this.modelRuntime.getModel(provider, modelId);
-    if (!model) throw new Error(`Unknown model: ${provider}/${modelId}`);
-    await runtime.session.setModel(model);
-    return {
-      provider,
-      id: modelId,
-      name: model.name,
-    };
+    return this.models.set(input);
   }
 
   public setThinking(level: ThinkingLevel): JsonObject {
-    const runtime = this.runtime.current();
-    if (!runtime.session.isIdle) {
-      throw new Error("Cannot change thinking level while the agent is running");
-    }
-    runtime.session.setThinkingLevel(level);
-    return {
-      level: runtime.session.thinkingLevel,
-      available: runtime.session.getAvailableThinkingLevels(),
-    };
+    return this.models.setThinking(level);
   }
 
   public agentsSnapshot(
@@ -1857,40 +1817,7 @@ export class HostBridge implements LegacyHostOperations {
   }
 
   public async listProviders(): Promise<unknown[]> {
-    const providers = await Promise.all(
-      this.modelRuntime.getProviders().map(async (provider) => {
-        const status = await this.modelRuntime.checkAuth(provider.id);
-        const methods: JsonObject[] = [];
-        if (provider.auth.oauth) {
-          methods.push({
-            type: "oauth",
-            label:
-              provider.auth.oauth.loginLabel ??
-              provider.auth.oauth.name ??
-              "Sign in with an account",
-            available: true,
-          });
-        }
-        if (provider.auth.apiKey) {
-          methods.push({
-            type: "api_key",
-            label: provider.auth.apiKey.name ?? "API key",
-            available: typeof provider.auth.apiKey.login === "function",
-          });
-        }
-        return {
-          id: provider.id,
-          name: provider.name,
-          configured: status !== undefined,
-          configuredType: status?.type,
-          configuredSource: status?.source,
-          methods,
-        };
-      }),
-    );
-    return providers
-      .filter((provider) => provider.methods.some((method) => method.available))
-      .sort((left, right) => left.name.localeCompare(right.name));
+    return this.auth.listProviders();
   }
 
   public startLogin(input: {
@@ -1902,90 +1829,7 @@ export class HostBridge implements LegacyHostOperations {
     credentialType: string;
     selectedModel: unknown;
   }> {
-    if (this.activeFlow) throw new Error("Another login flow is already active");
-
-    const { flowId, providerId, authType } = input;
-    const provider = this.modelRuntime.getProvider(providerId);
-    if (!provider) throw new Error(`Unknown provider: ${providerId}`);
-    if (authType === "oauth" && !provider.auth.oauth) {
-      throw new Error(`${provider.name} does not support OAuth login`);
-    }
-    if (authType === "api_key" && !provider.auth.apiKey?.login) {
-      throw new Error(`${provider.name} does not support in-app API key login`);
-    }
-
-    const flow: ActiveFlow = {
-      id: flowId,
-      controller: new AbortController(),
-      prompts: new AuthPromptQueue(),
-      nextPromptId: 1,
-    };
-    this.activeFlow = flow;
-
-    return new Promise((resolve, reject) => {
-      void this.modelRuntime
-        .login(providerId, authType, {
-          signal: flow.controller.signal,
-          prompt: (prompt) => this.prompt(flow, prompt),
-          notify: (event) => this.notify(flow, event),
-        })
-        .then(async (credential) => {
-          const selectedModel = await this.afterLogin(providerId);
-          this.send({
-            type: "auth_complete",
-            flowId,
-            providerId,
-            credentialType: credential.type,
-            selectedModel,
-          });
-          resolve({
-            providerId,
-            credentialType: credential.type,
-            selectedModel,
-          });
-        })
-        .catch((error) => {
-          reject(
-            error instanceof Error ? error : new Error(String(error)),
-          );
-        })
-        .finally(() => {
-          if (this.activeFlow === flow) this.activeFlow = undefined;
-          this.rejectPrompts(flow, "Login flow ended");
-        });
-    });
-  }
-
-  private prompt(flow: ActiveFlow, prompt: AuthPrompt): Promise<string> {
-    const promptId = String(flow.nextPromptId++);
-    return flow.prompts.request(
-      promptId,
-      [prompt.signal, flow.controller.signal],
-      () =>
-        this.send({
-          type: "auth_prompt",
-          flowId: flow.id,
-          promptId,
-          promptType: prompt.type,
-          message: prompt.message,
-          placeholder: "placeholder" in prompt ? prompt.placeholder : undefined,
-          options: prompt.type === "select" ? prompt.options : undefined,
-        }),
-      () =>
-        this.send({
-          type: "auth_prompt_cancelled",
-          flowId: flow.id,
-          promptId,
-        }),
-    );
-  }
-
-  private notify(flow: ActiveFlow, event: AuthEvent): void {
-    this.send({
-      type: "auth_notify",
-      flowId: flow.id,
-      event,
-    });
+    return this.auth.startLogin(input);
   }
 
   public replyToPrompt(input: {
@@ -1993,21 +1837,15 @@ export class HostBridge implements LegacyHostOperations {
     promptId: string;
     value: string;
   }): void {
-    const flow = this.activeFlow;
-    if (!flow || flow.id !== input.flowId) {
-      throw new Error("Login flow is no longer active");
-    }
-    if (!flow.prompts.reply(input.promptId, input.value)) {
-      throw new Error("Authentication prompt is no longer active");
-    }
+    this.auth.replyToPrompt(input);
   }
 
   public cancelLogin(): void {
-    this.cancelActiveFlow("Login cancelled");
+    this.auth.cancel("Login cancelled");
   }
 
   public async logout(providerId: string): Promise<void> {
-    await this.modelRuntime.logout(providerId);
+    await this.auth.logout(providerId);
   }
 
   public setPlanMode(active: boolean): {
@@ -2064,18 +1902,14 @@ export class HostBridge implements LegacyHostOperations {
     requestId: string;
     decision: "allow_once" | "allow_session" | "allow_workspace" | "deny";
   }): void {
-    if (!this.approvals.reply(input.requestId, input.decision)) {
-      throw new Error("Approval request is no longer active");
-    }
+    this.interactions.replyApproval(input.requestId, input.decision);
   }
 
   public replyQuestion(input: {
     requestId: string;
     answers: QuestionAnswer[];
   }): void {
-    if (!this.questions.reply(input.requestId, input.answers)) {
-      throw new Error("Question request is no longer active");
-    }
+    this.interactions.replyQuestion(input.requestId, input.answers);
   }
 
   private restoreActivePlan(sessionManager: SessionManager) {
@@ -2406,7 +2240,7 @@ export class HostBridge implements LegacyHostOperations {
         if (sessionGrant) availableDecisions.push("allow_session");
         if (workspaceGrant) availableDecisions.push("allow_workspace");
         availableDecisions.push("deny");
-        return this.approvals.request(
+        return this.interactions.requestApproval(
           {
             requestId: permissionContext.requestId,
             toolCallId: event.toolCallId,
@@ -2470,16 +2304,6 @@ export class HostBridge implements LegacyHostOperations {
     );
   }
 
-  private cancelActiveFlow(reason: string): void {
-    const flow = this.activeFlow;
-    if (!flow) return;
-    flow.controller.abort();
-    this.rejectPrompts(flow, reason);
-  }
-
-  private rejectPrompts(flow: ActiveFlow, reason: string): void {
-    flow.prompts.cancelAll(reason);
-  }
 }
 
 function lastAssistantText(messages: unknown[]): string {

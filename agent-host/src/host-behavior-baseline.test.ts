@@ -17,8 +17,10 @@ import { HostBridge } from "./legacy-host-bridge.ts";
 import { PlanStore } from "./plan.ts";
 import { QuestionQueue, type PlanQuestion } from "./questions.ts";
 import { isJsonObject, type JsonObject } from "./protocol/validation.ts";
+import type { InteractionBroker } from "./features/interactions/interaction-broker.ts";
 import { PlanModeService } from "./runtime/plan-mode-service.ts";
 import { RuntimeSupervisor } from "./runtime/runtime-supervisor.ts";
+import { ModelService } from "./features/models/model-service.ts";
 
 const HOST_COMMANDS = [
   "agents_reload",
@@ -149,10 +151,14 @@ function createBridge(options: {
       },
       fakeRuntime(true),
     );
+  const modelRuntime =
+    options.modelRuntime ?? ({} as ModelRuntime);
+  const models = new ModelService(modelRuntime, runtime);
   const socketPath = tempSocketPath();
   const bridge = new HostBridge(
     socketPath,
-    options.modelRuntime ?? ({} as ModelRuntime),
+    modelRuntime,
+    models,
     planMode,
     runtime,
     new PlanStore(),
@@ -274,6 +280,7 @@ test("host command and event inventories are stable", () => {
     "control-connection.ts",
     "control-server.ts",
     "../protocol/command-router.ts",
+    "../features/auth/auth-service.ts",
   ]
     .map((file) =>
       readFileSync(new URL(`./transport/${file}`, import.meta.url), "utf8"),
@@ -281,9 +288,9 @@ test("host command and event inventories are stable", () => {
     .join("\n");
   const transportEvents = [
     ...new Set(
-      [...transportSource.matchAll(/type: "([a-z0-9_]+)"/gu)].map(
-        (match) => match[1],
-      ),
+      [...transportSource.matchAll(/type: "([a-z0-9_]+)"/gu)]
+        .map((match) => match[1])
+        .filter((name) => name !== "api_key" && name !== "oauth"),
     ),
   ];
   assert.deepEqual(
@@ -368,11 +375,10 @@ test("connection close cancels the active authentication flow", async () => {
 
 test("connection close denies ordinary approvals and cancels questions", async () => {
   await withBridge({}, async (bridge, client) => {
-    const queues = bridge as unknown as {
-      approvals: ApprovalQueue;
-      questions: QuestionQueue;
-    };
-    const approval = queues.approvals.request(
+    const interactions = (
+      bridge as unknown as { interactions: InteractionBroker }
+    ).interactions;
+    const approval = interactions.requestApproval(
       {
         requestId: "request-1",
         toolCallId: "tool-1",
@@ -388,7 +394,7 @@ test("connection close denies ordinary approvals and cancels questions", async (
       undefined,
       () => {},
     );
-    const question = queues.questions.request(
+    const question = interactions.requestQuestions(
       [
         {
           id: "q1",

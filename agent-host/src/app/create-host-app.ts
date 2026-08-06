@@ -18,6 +18,7 @@ import {
   HostBridge,
 } from "../legacy-host-bridge.ts";
 import { PlanStore, restorePlanMode } from "../plan.ts";
+import { ModelService } from "../features/models/model-service.ts";
 import { expandHomePath } from "../runtime/path-utils.ts";
 import { PlanModeService } from "../runtime/plan-mode-service.ts";
 import { RuntimeSupervisor } from "../runtime/runtime-supervisor.ts";
@@ -106,32 +107,17 @@ export async function createHostApp(
   };
 
   const supervisor = new RuntimeSupervisor(createRuntime);
+  const models = new ModelService(modelRuntime, supervisor);
   hostBridge = new HostBridge(
     socketPath,
     modelRuntime,
+    models,
     planMode,
     supervisor,
     plans,
     contextBudget,
     startupConfig,
-    async (providerId) => {
-      const currentRuntime = supervisor.current();
-      try {
-        if (currentRuntime.session.model) return currentRuntime.session.model;
-        const available = await modelRuntime.getAvailable(providerId);
-        if (available.length === 0) return undefined;
-        const settings = currentRuntime.services.settingsManager;
-        const defaultModel =
-          settings.getDefaultProvider() === providerId
-            ? available.find((model) => model.id === settings.getDefaultModel())
-            : undefined;
-        const selectedModel = defaultModel ?? available[0];
-        await currentRuntime.session.setModel(selectedModel);
-        return selectedModel;
-      } catch {
-        return undefined;
-      }
-    },
+    (providerId) => models.selectDefaultModel(providerId),
   );
 
   return new HostAppImpl(
