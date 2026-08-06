@@ -7,6 +7,7 @@ import {
   type PlanArtifact,
   PlanStore,
   planImplementationPrompt,
+  planRevisionMarker,
   restorePlanMode,
 } from "./plan.ts";
 
@@ -151,10 +152,19 @@ test("implementation prompt carries the full artifact and handoff without lifecy
   const prompt = planImplementationPrompt(artifact({ revision: 3 }));
 
   assert.match(prompt, /Plan plan-1 revision 3/);
+  assert.match(prompt, /nabla-plan-artifact:plan-1:3/);
   assert.match(prompt, /## Source objective and handoff/);
   assert.match(prompt, /Keep the artifact immutable across sessions\./);
   assert.match(prompt, /## Approved plan/);
   assert.match(prompt, /Add the host protocol/);
   assert.match(prompt, /Run both suites/);
   assert.doesNotMatch(prompt, /status|completed|executing/iu);
+});
+
+test("plan revision marker changes with the revision", () => {
+  assert.notEqual(
+    planRevisionMarker("plan-1", 3),
+    planRevisionMarker("plan-1", 4),
+  );
+  assert.equal(planRevisionMarker("plan-1", 3), "nabla-plan-artifact:plan-1:3");
 });

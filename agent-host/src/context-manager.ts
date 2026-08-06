@@ -3,7 +3,11 @@ import type {
   ContextUsage,
 } from "@earendil-works/pi-coding-agent";
 
-import { PLAN_ENTRY_TYPE, type PlanArtifact } from "./plan.ts";
+import {
+  PLAN_ENTRY_TYPE,
+  type PlanArtifact,
+  planRevisionMarker,
+} from "./plan.ts";
 import { MUTATING_TOOL_NAMES } from "./policy/tool-policy.ts";
 import { isJsonObject as isObject } from "./protocol/validation.ts";
 import {
@@ -680,10 +684,10 @@ function containsPlanRevision(
     }
   }
   const text = messageContentText(message.content);
-  return (
-    text.includes(`Plan ${plan.id} revision ${plan.revision}`) &&
-    text.includes("## Source objective and handoff")
-  );
+  // ponytail: exact-token dedup treats a message that copies the marker without
+  // the Plan body as "present"; acceptable because the token is namespaced and
+  // only the implementation prompt emits it.
+  return text.includes(planRevisionMarker(plan.id, plan.revision));
 }
 
 function isPlanEntry(message: AgentMessage): boolean {

@@ -8,7 +8,11 @@ import {
   type ContextActiveState,
   type ContextPolicy,
 } from "./context-manager.ts";
-import { PLAN_ENTRY_TYPE, type PlanArtifact } from "./plan.ts";
+import {
+  PLAN_ENTRY_TYPE,
+  type PlanArtifact,
+  planRevisionMarker,
+} from "./plan.ts";
 
 type Messages = Parameters<ContextBudgetManager["filter"]>[0];
 
@@ -526,6 +530,61 @@ test("checkpoint markers are not treated as the full Plan", () => {
   ] as Messages;
 
   const result = manager.filter(markerOnly, undefined, {
+    planMode: false,
+    plan: artifact,
+  });
+  const checkpoint = (result.messages[1] as unknown as { content: string })
+    .content;
+  assert.match(checkpoint, /bodyMarkdown/);
+  assert.doesNotMatch(checkpoint, /planAlreadyPresent/);
+});
+
+test("post-compaction messages containing the revision marker deduplicate the Plan", () => {
+  const manager = new ContextBudgetManager({ policy: policy() });
+  const artifact = plan();
+  const marker = planRevisionMarker(artifact.id, artifact.revision);
+  const messages = [
+    {
+      role: "compactionSummary",
+      summary: "Earlier work.",
+      tokensBefore: 100_000,
+      timestamp: 1,
+    },
+    {
+      role: "user",
+      content: `Execute Nabla Plan ${artifact.id} revision ${artifact.revision} as a normal agent turn.\n${marker}\n## Source objective and handoff\n${artifact.handoffMarkdown}\n## Approved plan\n${artifact.bodyMarkdown}`,
+      timestamp: 2,
+    },
+  ] as Messages;
+
+  const result = manager.filter(messages, undefined, {
+    planMode: false,
+    plan: artifact,
+  });
+  const checkpoint = (result.messages[1] as unknown as { content: string })
+    .content;
+  assert.match(checkpoint, /planAlreadyPresent/);
+  assert.doesNotMatch(checkpoint, /bodyMarkdown/);
+});
+
+test("natural-language plan references without the marker still inject the Plan", () => {
+  const manager = new ContextBudgetManager({ policy: policy() });
+  const artifact = plan();
+  const messages = [
+    {
+      role: "compactionSummary",
+      summary: "Earlier work.",
+      tokensBefore: 100_000,
+      timestamp: 1,
+    },
+    {
+      role: "user",
+      content: `Plan ${artifact.id} revision ${artifact.revision}\n## Source objective and handoff`,
+      timestamp: 2,
+    },
+  ] as Messages;
+
+  const result = manager.filter(messages, undefined, {
     planMode: false,
     plan: artifact,
   });

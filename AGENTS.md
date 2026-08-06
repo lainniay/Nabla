@@ -41,4 +41,4 @@ Keep Plan as its own workflow. Pi remains the source of truth for sessions and c
 
 ## Commit & Pull Request Guidelines
 
-This repository currently has no Git history, so no established convention can be inferred. Use short imperative subjects, optionally scoped, for example `worktree: make integration idempotent`. Pull requests should describe behavior and state-transition risks, list verification commands, link relevant issues, and call out protocol or fixture updates.
+Use short imperative subjects, optionally scoped, for example `worktree: make integration idempotent`. Pull requests should describe behavior and state-transition risks, list verification commands, link relevant issues, and call out protocol or fixture updates.

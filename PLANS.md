@@ -1,1259 +1,1167 @@
-# Nabla Goal 硬删除实施计划
+# Nabla `Plan as Artifact` 最终执行计划
 
-> 目标对象：Coding Agent
->
-> 基线：`https://github.com/lainniay/Nabla` 当前 `main` 分支
->
-> 变更性质：破坏性删除；不保留兼容层
->
-> 唯一目标：从 Nabla Core 中移除所有 Goal 相关实现、协议、状态、UI、持久化和测试，并同步修复测试体系
+> 面向对象：Coding Agent  
+> 目标仓库：`https://github.com/lainniay/Nabla`  
+> 目标改动：`refactor: make plan an artifact`  
+> 兼容策略：**不兼容旧 Plan schema、旧 session entry 或旧协议字段，直接删除**
 
 ---
 
-## 1. 任务定义
+## 1. 目标
 
-本任务只做一件事：**彻底移除 Nabla 中所有 Goal runtime 能力和 Goal 专用抽象。**
-
-删除完成后，Nabla Core 不得再理解或持有以下概念：
-
-- Goal；
-- Goals 列表；
-- GoalSpec；
-- GoalTask；
-- GoalStore；
-- Goal 生命周期；
-- Goal 审批；
-- Goal 自动调度；
-- Goal planner、worker、verifier、reviewer 固定流水线；
-- Goal repair loop；
-- Goal capability lease；
-- Goal 专用 permission 上下文；
-- Goal 专用 worktree 恢复关联；
-- Goal RPC command；
-- Goal Host event；
-- Goal Rust state；
-- Goal TUI modal、卡片和命令；
-- Goal 持久化与迁移；
-- Goal protocol fixture；
-- Goal 测试。
-
-将来如需提供类似 Goal 的行为，只允许通过 Skill 或 Prompt 表达。**本次变更不创建任何 Goal Skill、Prompt 或替代实现。**
-
----
-
-## 2. 强制范围约束
-
-### 2.1 本次必须完成
-
-1. 删除 TypeScript Host 中的全部 Goal 类型、存储和编排逻辑。
-2. 删除 Goal 对普通子代理的字段和行为污染。
-3. 删除 Goal 对 permission 的 lease、grant、approval 上下文和判定分支。
-4. 删除 Goal 对 worktree metadata、恢复、集成和冲突流程的关联。
-5. 删除 Host 协议中的 Goal commands、events 和 payload 字段。
-6. 删除 Rust 中的 Goal model、AppState、AppEffect、CommandEvent、HostEvent 和 UI。
-7. 删除 `/goal`、`/goals` 本地命令。
-8. 删除 Goal transcript item 和渲染代码。
-9. 删除 Goal 持久化、迁移和旧格式恢复代码。
-10. 同步删除 Goal-only 测试并更新所有受影响的非 Goal 测试。
-11. 保证现有 coding-agent 核心路径继续通过测试：普通会话、Plan、子代理、permission、worktree、集成和恢复。
-12. 最终执行全仓 Goal 符号扫描，确认 Core 中归零。
-
-### 2.2 本次明确禁止
-
-Coding Agent 不得在本任务中做以下工作：
-
-- 不实现 Goal-lite；
-- 不实现 session completion condition；
-- 不新增 `/goal` Skill；
-- 不新增 Goal Prompt；
-- 不把 Goal 改名为 `WorkflowRun`、`ManagedRun`、`Automation`、`Campaign` 或其他名称；
-- 不引入统一 Task Runtime；
-- 不持久化 child session；
-- 不实现 `yield_task`；
-- 不重构 Plan；
-- 不修改 Plan 生命周期；
-- 不重构 HostBridge 的整体架构；
-- 不重写 TUI；
-- 不统一 modal 系统；
-- 不实现 event sourcing；
-- 不实现新的 sandbox；
-- 不改变 permission 的一般行为；
-- 不改变 worktree 的一般行为；
-- 不添加新的 agent profile；
-- 不删除仍可独立使用的通用 agent profile；
-- 不做与 Goal 删除无关的格式化、重命名、文件移动或代码清理；
-- 不增加 Goal 兼容字段；
-- 不保留 `goal: null`；
-- 不保留 deprecated Goal command；
-- 不增加 Goal 数据迁移器；
-- 不在启动时自动删除用户旧状态文件。
-
-### 2.3 允许的最小伴随修改
-
-仅允许为完成 Goal 删除而进行以下伴随修改：
-
-- 将被错误放在 Goal 文件中的非 Goal 类型移动到正确模块；
-- 删除 Goal 字段后修正构造函数、序列化结构和测试 fixture；
-- 删除 Goal 分支后清理 unused imports、unused helper 和 dead code；
-- 为消除 Goal 命名而对仍需保留的通用 helper 做最小重命名；
-- 更新测试断言，使其验证删除后的协议与行为；
-- 修复编译器、Clippy 和 TypeScript 报告的直接关联错误。
-
----
-
-## 3. 完成后的目标边界
-
-Goal 删除后，Core 只保留已有通用能力：
+将当前 Plan 从带有运行生命周期的对象：
 
 ```text
-Pi Session
-├── Plan
-├── Tool Calls
-├── Generic Subagents
-├── Permission Approval
-└── Worktree Integration
+submitted -> executing -> completed / submitted(error)
 ```
 
-Core 不应出现如下关系：
+收敛为一个静态、可版本化、可跨 session 传递的实施 artifact：
 
 ```text
-Plan → Goal → GoalTask → Subagent
+Plan mode
+  -> submit_plan
+  -> PlanArtifact
+  -> 用户选择 Execute / Fresh execute / Close
+  -> 普通 Agent Turn
 ```
 
-普通子代理不得再包含以下 Goal 来源字段：
+本次改造后必须满足：
+
+1. Plan 不再拥有 `submitted`、`executing`、`completed` 状态。
+2. Agent turn 成功、失败、取消、compaction 均不修改 Plan artifact。
+3. `/plan` 只负责进入 Plan mode，以及可选地提交一段规划请求。
+4. `submit_plan` 只负责提交最终 Plan artifact，不自动执行，不选择执行上下文。
+5. Plan review 只保留三个选项：
+   1. `Execute`
+   2. `Fresh execute`
+   3. `Close`
+6. `Execute` 在当前 session 中启动普通实施 turn。
+7. `Fresh execute` 创建新 session，并通过完整 Plan artifact 和 handoff 内容启动普通实施 turn。
+8. Plan 在低剩余上下文、compaction 后、fresh session 和不同模型 context window 下都必须能够可靠传递。
+
+---
+
+## 2. 非目标
+
+本次不要同时进行以下工作：
+
+- 不实现 Goal 或 WorkflowRun。
+- 不实现通用 Artifact framework。
+- 不重构子代理 Task Runtime。
+- 不拆分整个 `HostBridge`。
+- 不重写 TUI modal 系统。
+- 不实现 Plan 自动完成判断。
+- 不增加 reviewer/verifier 固定流程。
+- 不实现旧 Plan schema migration。
+- 不保留 deprecated command、event 或字段。
+
+如果 coding agent 在实际 checkout 中发现 Goal 残留，只处理会阻塞本次 Plan 改造的直接编译依赖，不扩大本 PR 范围。
+
+---
+
+## 3. 最终用户交互
+
+### 3.1 `/plan`
+
+唯一入口：
 
 ```text
-goalId
-goal_id
-taskId      # 当前实现中用于 GoalTask 关联的字段
-task_id     # 当前实现中用于 GoalTask 关联的字段
+/plan [optional planning prompt]
 ```
 
-注意：这里删除的是当前 Goal 专用 `taskId/task_id`。本次不得将其重命名为新的通用运行 ID。未来如需通用 Task ID，应由独立设计任务重新引入。
+行为：
+
+#### `/plan`
+
+- 当前不在 Plan mode：进入 Plan mode。
+- 当前已经在 Plan mode，且存在最新 Plan artifact：重新打开 Plan review。
+- 当前已经在 Plan mode，但没有 Plan artifact：显示简短提示，不做 toggle。
+
+#### `/plan <prompt>`
+
+- 当前不在 Plan mode：先切换到 Plan mode，切换成功后再提交 prompt。
+- 当前已经在 Plan mode：直接作为普通规划 prompt 提交。
+
+删除以下语法：
+
+```text
+/plan exit
+/plan status
+/plan run
+/plan run current
+/plan run fresh
+```
+
+这些字符串不再特殊处理；输入 `/plan exit`、`/plan status`、`/plan run` 等时，`exit`/`status`/`run` 与其它参数一样作为普通规划 prompt 文本提交，不报错、不提示。
+
+`/plan <prompt>` 始终提交规划 prompt；只有无参数 `/plan` 重新打开已有 Review。
+
+退出 Plan mode 继续使用已有的统一 mode switching 交互，不新增 Plan 专用退出方式。Plan mode 状态应由状态栏和 composer 样式展示，不通过 `/plan status` 查询。
 
 ---
 
-## 4. 总体执行原则
+### 3.2 `submit_plan`
 
-### 4.1 采用纵向切除
+`submit_plan` 是 Plan mode 的终止工具：
 
-Goal 已穿透 TypeScript、Rust、协议、权限、worktree、UI 和测试。不得只删除 `GoalStore` 后依靠注释、空对象或兼容分支维持编译。
+```text
+模型调查仓库
+  -> 必要时 ask_user
+  -> submit_plan
+  -> 当前规划 turn 结束
+  -> TUI 打开 Plan review
+```
 
-正确顺序：
+工具本身不包含：
 
-1. 记录基线；
-2. 解除 Goal 对共享模型的耦合；
-3. 删除 TypeScript Goal Core；
-4. 删除 Host 调度和权限/worktree Goal 分支；
-5. 删除协议面；
-6. 删除 Rust 状态和 TUI；
-7. 同步测试；
-8. 全仓归零扫描；
-9. 执行完整回归。
+- `execute`
+- `fresh`
+- `executionContext`
+- `status`
+- `completed`
+- `autoRun`
 
-### 4.2 不保留双协议期
-
-Rust TUI 与 TypeScript Host 在同一仓库同步修改，因此本任务不需要：
-
-- 同时接受新旧 bootstrap；
-- 同时接受带 Goal 和不带 Goal 的 agent snapshot；
-- 返回 deprecated warning；
-- 返回空 Goal payload；
-- 协议版本分支。
-
-更新后，旧 Goal command 应自然落入现有 unknown/unsupported command 处理。
-
-### 4.3 测试与实现同一提交链完成
-
-禁止通过以下方式临时过关：
-
-- `skip`；
-- `ignore`；
-- 注释失败测试；
-- 删除整个混合测试文件；
-- 降低 assertion；
-- 只运行局部测试而不运行全量测试。
-
-Goal-only 测试应删除。非 Goal 测试因类型或 fixture 变化受到影响时，应同步更新并继续验证原有行为。
+执行方式由用户在 Plan review 中选择。
 
 ---
 
-## 5. 阶段 0：建立基线和删除清单
+### 3.3 Plan review
 
-### 5.1 更新工作树
+固定三个选项，顺序不可变化：
 
-执行：
-
-```bash
-git status --short
-git fetch origin
-git switch main
-git pull --ff-only
-git switch -c refactor/remove-goal
+```text
+1. Execute
+2. Fresh execute
+3. Close
 ```
 
-若工作树已有用户修改，不得覆盖、stash、reset 或清理。停止并报告冲突文件。
+Plan review 是模态 overlay：打开期间键盘由 review 捕获（`UiModalKind::PlanReview`），只能选择 `Execute` / `Fresh execute` / `Close`；用户先 `Close` 后再提交修订 prompt。本 PR 不改造 modal 系统。
 
-### 5.2 记录基线测试
+#### Execute
 
-在修改前执行：
+- 关闭 Plan review。
+- 退出 Plan mode。
+- 在当前 session 中提交普通实施 prompt。
+- 不修改 Plan artifact。
+- 不创建 Plan execution state。
 
-```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
+#### Fresh execute
 
-cd agent-host
-npm run typecheck
-npm test
-cd ..
-```
+- 关闭 Plan review。
+- 创建一个新 session，并保留与原 session 的 parent/branch 关系。
+- 在新 session 中写入同一个 Plan artifact。
+- 在新 session 中写入 `planMode.active = false`。
+- 切换到新 session。
+- 使用 self-contained handoff prompt 启动普通实施 turn。
+- 不复制完整 planning transcript。
+- 不修改原 Plan artifact。
 
-记录：
+#### Close
 
-- 哪些测试在基线已失败；
-- Node、npm、Rust、Cargo 版本；
-- 当前分支与 commit；
-- 测试命令退出码。
+- 仅关闭 Plan review。
+- 不执行。
+- 不删除 Plan artifact。
+- 保持 Plan mode active，使用户可以继续规划或修订。
+- 用户再次执行 `/plan` 时可以重新打开 review。
 
-不要为修复与 Goal 无关的基线失败扩大本任务范围。
+### 3.4 不保留二次确认页
 
-### 5.3 生成 Goal 引用清单
+删除当前 `Menu -> Confirm` 两阶段 UI。
 
-执行以下扫描，将结果保存到临时文件供删除时核对：
-
-```bash
-rg -n --hidden \
-  -g '!target/**' \
-  -g '!agent-host/node_modules/**' \
-  -g '!.git/**' \
-  'GoalStore|GoalRecord|GoalSnapshot|GoalsSnapshot|GoalTask|GoalSpec|GoalApproval|goalId|goal_id|goal_state|goals_state|goal_start|goal_action|goal_approve|goal_spec_ready|goal_review|goal_error|goal_lease|goalWorkerPermissions' \
-  . > /tmp/nabla-goal-symbols-before.txt || true
-
-rg -ni --hidden \
-  -g '!target/**' \
-  -g '!agent-host/node_modules/**' \
-  -g '!.git/**' \
-  '\bgoals?\b' \
-  agent-host/src src protocol-fixtures AGENTS.md SUBAGENTS.md TRANSCRIPT_SURFACE.md test.md \
-  > /tmp/nabla-goal-words-before.txt || true
-```
-
-再执行：
-
-```bash
-wc -l /tmp/nabla-goal-symbols-before.txt
-wc -l /tmp/nabla-goal-words-before.txt
-```
-
-这两个文件只用于本地核对，不提交到仓库。
-
-### 5.4 阶段完成条件
-
-- 基线测试结果已记录；
-- Goal 引用清单已生成；
-- 未修改任何源文件；
-- 已确认没有用户未处理的工作树冲突。
+用户在 Plan review 中选择 `Execute` 或 `Fresh execute` 后直接 dispatch。为防止重复提交，review state 只需要 `submitting` 标记；提交期间禁用所有选项。
 
 ---
 
-## 6. 阶段 1：解除共享模型中的 Goal 耦合
+## 4. 最终 Plan 数据模型
 
-本阶段只删除 Goal 专用字段和语义，不删除整个 GoalStore。目的在于先把普通子代理、permission 和 worktree 从 Goal 生命周期中分离，避免后续误删通用能力。
+保留 artifact identity 和 revision，因为它们用于：
 
-### 6.1 `agent-host/src/main.ts`：清理普通子代理结构
+- 区分不同 Plan revision。
+- 在 current/fresh session 之间引用同一个 artifact。
+- 在 context checkpoint 中判断 Plan 是否已经存在。
+- 避免 compaction 后重复注入相同 revision。
 
-定位 `ActiveSubagent`、公开 agent snapshot、subagent options 和 `delegate_task` schema。
+它们不是运行生命周期。
 
-删除：
+### 4.1 TypeScript
 
 ```ts
-taskId?: string;
-goalId?: string;
+export const PLAN_ENTRY_TYPE = "nabla.plan";
+export const PLAN_MODE_ENTRY_TYPE = "nabla.plan-mode.v1";
+
+export interface PlanContent {
+  title: string;
+  summary: string;
+  bodyMarkdown: string;
+  assumptions: string[];
+  testPlan: string[];
+
+  /**
+   * Fresh session 所需的最小上下文交接。
+   * 必须包含正文中未充分体现、但实施阶段不可丢失的决策、约束、
+   * 关键文件和未解决风险。不得复制完整 planning transcript。
+   */
+  handoffMarkdown: string;
+}
+
+export interface PlanArtifact extends PlanContent {
+  id: string;
+  revision: number;
+  sourceSessionId: string;
+  createdAt: string;
+  updatedAt: string;
+}
 ```
 
-从以下路径同步删除：
-
-- `ActiveSubagent`；
-- `PublicSubagent` 或 agents snapshot payload；
-- `SubagentOptions`；
-- `delegate_task` tool parameter schema；
-- tool 参数解析；
-- subagent 创建；
-- subagent state/event payload；
-- completed subagent record；
-- integration prompt payload；
-- recovery record；
--日志和 diagnostics。
-
-删除逻辑：
-
-```text
-当 delegate_task 接收到 taskId 时查 GoalTask
-由 taskId 推导 goalId
-根据 GoalTask 覆盖 profile 或 prompt
-```
-
-不得用 `runId`、`workItemId` 或其他字段替换。
-
-### 6.2 删除 `goal_spec` 输出分支
-
-在子代理运行与最终结果解析中删除：
-
-```text
-outputKind: "goal_spec"
-goalSpecFromToolParams(...)
-normalizeGoalSpec(...)
-Goal planner 专用 system instruction
-Goal planner 最终 JSON 解析
-```
-
-处理 `outputKind`：
-
-1. 使用 `rg` 查找所有非 Goal 调用点；
-2. 若删除 `goal_spec` 后 `outputKind` 仍有非 Goal 用途，保留该字段及非 Goal 分支；
-3. 若 `outputKind` 仅剩固定单值且无行为价值，删除字段；
-4. 若 `review` 输出分支只被 Goal reviewer 使用，则随 Goal 一并删除；
-5. 不得为了保留结构而制造新的通用 output kind。
-
-### 6.3 `agent-host/src/harness.ts`：中和通用 profile 文案
-
-保留仍可通过普通 `/agent` 或 delegation 使用的通用 profiles，例如：
-
-- planner；
-- worker；
-- verifier；
-- reviewer。
-
-只删除 Goal 专用文案：
-
-- “goal”；
-- “goal task”；
-- “capability lease”；
-- “goal plan”；
-- 固定 Goal 阶段说明。
-
-例如：
-
-```text
-旧：Work within its capability lease...
-新：Work only within the configured tools and permissions...
-```
-
-```text
-旧：Review independently against the goal, plan...
-新：Review the assigned task, supplied evidence, and resulting changes...
-```
-
-若 helper 名为：
+直接删除：
 
 ```ts
-goalWorkerPermissions()
+schemaVersion
+PlanStatus
+status
+lastExecutionError
+LEGACY_PLAN_ENTRY_TYPE
+PLAN_EXECUTION_MESSAGE_TYPE
+RestoreResult.recovered
 ```
 
-且 worker profile 仍使用该 helper，则做最小重命名：
+### 4.2 Rust
 
-```ts
-writeAgentPermissions()
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanArtifact {
+    pub id: String,
+    pub revision: u64,
+    pub title: String,
+    pub summary: String,
+    pub body_markdown: String,
+    pub assumptions: Vec<String>,
+    pub test_plan: Vec<String>,
+    pub handoff_markdown: String,
+    pub source_session_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
 ```
 
-不得改变权限内容。
+直接删除：
 
-### 6.4 `agent-host/src/approval.ts`：删除 Goal approval 上下文
-
-搜索并删除：
-
-```ts
-goalId?: string;
+```rust
+PlanStatus
+schema_version
+status
+last_execution_error
 ```
-
-同步更新：
-
-- approval request 构造；
-- approval queue；
-- approval 序列化；
-- approval diagnostics；
-- approval tests/fixtures；
-- Rust 对应 payload。
-
-保留一般字段：
-
-```text
-approvalId
-toolCallId
-sessionId
-workspaceId
-intent
-proposedScope
-```
-
-### 6.5 Permission：删除 Goal lease 和 Goal task grants
-
-在 `agent-host/src/permissions/**`、`agent-host/src/main.ts` 和相关配置解析中删除所有 Goal 专用权限路径：
-
-- Goal capability lease；
-- Goal task grants；
-- `goalId` 匹配；
-- `taskId` 匹配；
-- active Goal lookup；
-- Goal path boundary；
-- Goal repair grants；
-- Goal-specific deny/ask reason；
-- `goal_lease` 配置值或 proposal scope；
-- 子代理根据 GoalTask grants 授权。
-
-普通子代理授权应只依赖现有一般机制：
-
-```text
-profile policy
-normalized permission intent
-session/workspace grant
-user approval
-```
-
-删除 Goal 后不得改变一般 permission evaluator、digest binding、once/session/workspace grant、audit 或 TOCTOU 检查。
-
-### 6.6 `agent-host/src/worktree.ts`：删除 Goal 恢复关联
-
-在 `WorktreeRecoveryState` 删除：
-
-```ts
-taskId?: string;
-goalId?: string;
-```
-
-同步删除：
-
-- recovery metadata 写入；
-- recovery metadata 读取后的 Goal 恢复行为；
-- patch capture 中的 Goal 关联；
-- integration/discard 中的 Goal task 更新；
-- conflict 中的 Goal 状态更新；
-- resolver 中传播 Goal ID；
-- Goal path grant validation。
-
-保留 worktree 的所有一般能力：
-
-- prepare；
-- shared workspace fallback；
-- dirty baseline；
-- capture；
-- changed paths；
-- patch hash；
-- apply；
-- discard；
-- conflict；
-- recovery；
-- prune；
-- credential-like path protection。
-
-旧 JSON metadata 中可能残留 `goalId`、`taskId`。不得新增 Goal 迁移器。只依赖现有宽容 JSON/结构解析忽略未知字段；若当前 parser 因未知字段失败，只允许做一般性的未知字段容忍，不得写 Goal 专用 fallback。
-
-### 6.7 阶段测试
-
-执行：
-
-```bash
-cd agent-host
-npm run typecheck
-npm test -- --test-name-pattern='permission|approval|worktree|subagent|agent'
-cd ..
-```
-
-若 npm script 不支持附加参数，直接执行：
-
-```bash
-cd agent-host
-npm run typecheck
-npm test
-cd ..
-```
-
-### 6.8 阶段完成条件
-
-- 普通 subagent model 不再含 `goalId/taskId`；
-- approval payload 不再含 `goalId`；
-- worktree recovery state 不再含 `goalId/taskId`；
-- permission 不再读取 GoalStore 或 GoalTask grants；
-- `goal_spec` 输出分支已删除；
-- 普通子代理、permission、worktree 测试仍可运行；
-- 未引入替代运行抽象。
 
 ---
 
-## 7. 阶段 2：删除 TypeScript Goal 类型、存储与持久化
+## 5. PlanStore 收敛
 
-### 7.1 `agent-host/src/harness.ts`：删除 Goal 数据模型
+`PlanStore` 可以继续作为当前 active session 的轻量 projection，但不再是状态机。
 
-删除 Goal 专用类型。包括但不限于：
+最终只保留：
 
-```text
-GoalStage
-TaskStatus                 # 仅 GoalTask 使用时
-ReviewVerdict              # 仅 Goal reviewer 使用时
-GoalTask
-GoalSpec
-GoalSpecInput
-GoalRecord
-GoalSnapshot
-GoalsSnapshot
-GoalSourcePlan
-GoalReview
-GoalVerification
-CapabilityLease            # 仅 GoalStore 使用时
+```ts
+class PlanStore {
+  latest(): PlanArtifact | undefined;
+  clear(): void;
+  restore(entries: readonly PlanSessionEntry[]): PlanArtifact | undefined;
+  submit(content: PlanContent, sourceSessionId: string): PlanArtifact;
+  adopt(artifact: PlanArtifact): void;
+}
 ```
 
-对下列类型执行引用确认：
-
-```text
-TaskResult
-VerificationEvidence
-ReviewFinding
-CapabilityGrantSet
-```
+### 5.1 `submit`
 
 规则：
 
-1. 使用 `rg` 确认是否有非 Goal 调用方；
-2. 只有 Goal 使用时直接删除；
-3. 有普通子代理、permission 或 profile 使用时保留在原位置或最小移动到已有合适模块；
-4. 不创建新的 domain layer；
-5. 不为了保存 Goal 结构而重命名成 Workflow 类型。
+- 没有现有 artifact：创建新 `id`，`revision = 1`。
+- 已有 artifact：保留 `id`，`revision += 1`。
+- 保留第一次提交的 `createdAt`。
+- 更新 `updatedAt`。
+- 不检查执行状态。
+- `handoffMarkdown` 必须非空（trim 后仍有内容），否则 `submit_plan` 报错。
+- 任意时刻只要当前 session idle 且处于 Plan mode，即可提交新 revision。
 
-### 7.2 删除 Goal 状态迁移
+### 5.2 `restore`
+
+- 只识别 `customType === "nabla.plan"`。
+- 只读取当前 branch 最后一个合法 Plan entry。
+- 不识别 `nabla.plan.v1`、`nabla.plan.v2`。
+- 不做 schema migration。
+- 不产生 interrupted warning。
+- 不向 session 回写迁移后的 entry。
+
+### 5.3 删除方法
+
+```ts
+markExecuting()
+markSubmitted()
+markCompleted()
+normalizeStoredPlan() 的旧 schema 分支
+```
+
+`nextTimestamp()` 保留（`submit` 仍用于 revision 时间单调性），改名为 `nextArtifactTimestamp()`。
+
+---
+
+## 6. Context window 与跨 session 传递设计
+
+这是本次改造的必要部分，不是后续增强。
+
+### 6.1 Plan mode system prompt 必须包含动态上下文余量
+
+当前静态 `PLAN_INSTRUCTIONS` 改为函数：
+
+```ts
+function buildPlanInstructions(snapshot: ContextSnapshot): string
+```
+
+提示中至少包含：
+
+```text
+Context window status
+- Usage source: actual | estimated | recalculating（不可用时 UI 显示 unknown）
+- Context window: N tokens
+- Used: N tokens / N%
+- Remaining: N tokens / N%
+```
+
+计算规则：
+
+```ts
+usedTokens = snapshot.actualTokens ?? snapshot.estimatedNextRequestTokens;
+usedPercent = snapshot.actualPercent
+  ?? (snapshot.contextWindow
+      ? usedTokens / snapshot.contextWindow * 100
+      : null);
+remainingTokens = contextWindow === null
+  ? null
+  : Math.max(0, contextWindow - usedTokens);
+remainingPercent = usedPercent === null
+  ? null
+  : Math.max(0, 100 - usedPercent);
+```
+
+`unknown` 仅是展示层 fallback（usageState / contextWindow 不可用时显示）；`ContextUsageState` 枚举保持 `"actual" | "estimated" | "recalculating"`，不新增值。
+
+提示必须明确告诉模型：
+
+```text
+The submitted plan must be self-contained.
+Fresh execute receives the Plan artifact and handoff only, not the full planning transcript.
+Do not rely on phrases such as "as discussed above" or references that require the original transcript.
+Include critical decisions, relevant files, constraints, and unresolved risks in the artifact.
+Keep handoffMarkdown concise and implementation-oriented.
+```
+
+不要把 `remainingTokens` 或 `remainingPercent` 写入 Plan artifact，因为它们在稍后执行时会失效。
+
+### 6.2 `handoffMarkdown`
+
+`handoffMarkdown` 必须覆盖：
+
+- 用户原始目标的精简复述。
+- 规划期间作出的关键技术决定。
+- 必须保留的用户约束。
+- 关键文件、模块和接口。
+- 已确认不做的事项。
+- 未解决问题或实施风险。
+- 对 fresh session 有用、但未自然写入 `bodyMarkdown` 的信息。
+
+禁止：
+
+- 完整复制 transcript。
+- 复制大段工具输出。
+- 使用“见上文”“如前所述”等依赖源 session 的表达。
+- 写入当前 context 使用百分比。
+
+### 6.3 Current execution 在低剩余上下文下
+
+`Execute` 仍然允许在低余量 session 中启动，因为：
+
+- 用户明确选择了 current context。
+- 当前 conversation 可能包含高价值隐式信息。
+- 后续 compaction 应由现有 context manager 处理。
+
+必须保证 compaction 后 Plan 不丢失：
+
+- `ContextActiveState.plan` 使用新的 `PlanArtifact`。
+- `PLAN_ENTRY_TYPE` entry 不参与首次普通模型上下文投影，仅用于持久化、TUI、restore 与 compaction 数据源；首次 implementation prompt 是唯一完整 Plan 副本。
+- 发生 compaction 时 checkpoint 重新注入完整 Plan；`{id, revision}` marker 不视为完整 Plan。
+- `containsPlanRevision()` 只识别完整 Plan 文本（`id + revision`），marker 不视为完整 Plan。
+- 删除对 `status`、`schemaVersion`、`lastExecutionError` 的任何依赖。
+
+### 6.4 Fresh execution
+
+Fresh session 只接收：
+
+1. 正常 system prompt、资源、skills 和 workspace context。
+2. Plan artifact entry。
+3. `planMode.active = false` entry。
+4. 一条实施 handoff prompt。
+
+不接收完整源 transcript。
+
+Plan artifact entry 用于持久化、TUI、restore 与 compaction 数据源，不投影进首次模型上下文；完整 Plan 只出现在 implementation prompt 中，compaction 后由 checkpoint 重新注入。
+
+实施 prompt 固定格式：
+
+```text
+You are implementing an approved Nabla plan in a fresh session.
+The planning transcript is not available in this session.
+Re-check repository state before editing because files may have changed.
+Treat the plan as implementation guidance, not an immutable workflow.
+Report material deviations from the plan.
+
+## Source objective and handoff
+{artifact.handoffMarkdown}
+
+## Approved plan
+# {artifact.title}
+
+{artifact.summary}
+
+{artifact.bodyMarkdown}
+
+## Assumptions
+- ...
+
+## Test plan
+- ...
+```
+
+### 6.5 不允许静默截断
+
+transfer budget 只在 `Fresh execute` 时强制执行，用继承模型的 `contextWindow` 校验（§9 第 3 步确定的模型）。`Execute` 不校验：低余量由现有 context manager / compaction 处理。
+
+```ts
+const PLAN_TRANSFER_MAX_ABSOLUTE_TOKENS = 24_000;
+const PLAN_TRANSFER_MAX_CONTEXT_FRACTION = 0.25;
+
+allowed = Math.min(
+  PLAN_TRANSFER_MAX_ABSOLUTE_TOKENS,
+  Math.floor(contextWindow * PLAN_TRANSFER_MAX_CONTEXT_FRACTION),
+);
+```
+
+contextWindow 为 null 时 `allowed = PLAN_TRANSFER_MAX_ABSOLUTE_TOKENS`（24k 绝对上限兜底），不产生 NaN。
+
+对最终 implementation prompt 的实际完整文本（含 handoff 模板与完整 Plan）使用现有 `estimateTextTokens`（`ceil(length / 4)`）估算。
+
+行为：
+
+- 仅 `Fresh execute` 时校验，超限返回清晰错误，要求返回 Plan mode 缩短 Plan。
+- 不裁剪 `bodyMarkdown`、不裁剪 `handoffMarkdown`。
+- 不自动省略 test plan 或 assumptions。
+
+`estimateTextTokens` 已存在于 `agent-host/src/context-manager.ts`（本地函数，未导出），且 context-manager 对 `plan.ts` 只是 `import type`，没有运行时环依赖。直接 `export` 现有函数，供 `plan.ts` / `plan-execution.ts` 引用；不新增 `token-estimate.ts`，不复制实现。
+
+---
+
+## 7. Host 执行协议
+
+### 7.1 单一 RPC command
+
+将：
+
+```text
+execute_plan_current
+execute_plan_fresh
+```
+
+合并为：
+
+```text
+plan_execute
+```
+
+请求：
+
+```json
+{
+  "context": "current" | "fresh"
+}
+```
+
+响应：
+
+```json
+{
+  "sessionId": "...",
+  "context": "current" | "fresh"
+}
+```
+
+响应中不再返回 artifact，因为执行不会修改 artifact。
+
+删除事件：
+
+```text
+plan_executing
+plan_completed
+plan_execution_error
+```
+
+保留事件：
+
+```text
+plan_ready
+plan_state
+plan_mode_state
+```
+
+### 7.2 普通 Agent Turn
 
 删除：
 
 ```text
-GOAL_TRANSITIONS
-TASK_TRANSITIONS
-Goal stage validation
-Goal task transition validation
-Goal dependency graph validation
-Goal completion aggregation
-repair cycle counting
-review verdict handling
+PLAN_EXECUTION_MESSAGE_TYPE
+nabla.plan.execution.v1
+completePlanExecution()
+executionFailed()
+agent_settled -> completePlanExecution
 ```
 
-### 7.3 删除 `GoalStore`
+执行使用固定依赖 `@earendil-works/pi-coding-agent@0.83.0` 已确认存在的普通用户 prompt API（`AgentSession.prompt(text, options?): Promise<void>`）：
 
-完整删除：
+```ts
+void session.prompt(planImplementationPrompt(artifact)).catch((error) => {
+  // 按普通 turn 错误处理，与 Plan artifact 无关
+});
+```
+
+必须 fire-and-forget（`void` + `.catch`），不要 `await`：`prompt()` 要等实施 turn 结束才 resolve，await 会让 `plan_execute` RPC 阻塞到整个实施结束，违背 §8 第 11 步。
+
+验收条件是仓库中不再存在：
 
 ```text
-GoalStoreOptions
-GoalStore
+PLAN_EXECUTION_MESSAGE_TYPE
+nabla.plan.execution
 ```
 
-连同所有方法：
+不要通过换名为 `nabla.plan.execution.v2` 保留特殊 lifecycle transport。
 
-- create；
-- create from Plan；
-- attach session；
-- restore；
-- persist；
-- migrate；
-- list；
-- snapshot；
-- transition Goal；
-- transition task；
-- approve；
-- pause；
-- resume；
-- cancel；
-- block；
-- complete；
-- set verification；
-- set review；
-- append repair cycle；
-- legacy normalization。
+---
 
-删除 Goal 状态文件路径构造、workspace hash、session state lookup 等仅服务 GoalStore 的 helper。
+## 8. Current execute 具体流程
 
-### 7.4 删除 Goal persistence 与 migration
+新增：
 
-删除所有对 Goal state 路径的：
+```text
+agent-host/src/plan-execution.ts
+agent-host/src/plan-execution.test.ts
+```
 
-- read；
-- write；
-- atomic replace；
-- directory listing；
-- legacy migration；
-- attach/re-key；
-- restart recovery。
+接口示意：
 
-不得：
+```ts
+export type PlanExecutionContext = "current" | "fresh";
 
-- 删除磁盘上的旧文件；
-- 在启动时扫描旧文件；
-- 提示用户迁移；
-- 写 tombstone；
-- 保留 deprecated reader。
+export interface PlanExecutionResult {
+  sessionId: string;
+  context: PlanExecutionContext;
+}
+```
 
-旧文件在新版本中应完全无人读取。
+Current 流程：
 
-### 7.5 清理 exports/imports
+1. 获取 `plans.latest()`；不存在则失败。
+2. 检查当前 session `isIdle`。
+3. 构造实施 prompt。
+4. 不执行 transfer budget 校验（Current 不强制，低余量由现有 compaction 处理）。
+5. 将 Plan mode 切换为 false。
+6. 将 `{ active: false }` 追加为 `PLAN_MODE_ENTRY_TYPE`。
+7. 通过 `void session.prompt(planImplementationPrompt(artifact)).catch(...)` 在当前 session fire-and-forget 启动实施 turn。
+8. 返回 `{ sessionId, context: "current" }`。
+9. 不修改 PlanStore。
+10. 不 append 新 Plan entry。
+11. 不等待整个实施 turn 完成。
 
-删除 `harness.ts` 对外暴露的 Goal exports，并根据 TypeScript compiler 清理：
+失败规则：
 
-- unused imports；
-- unused JSON helper；
-- unused timestamp helper；
-- unused path helper；
-- Goal-only migration constants；
-- Goal-only error classes。
+- 调用 `session.prompt()` 之前的失败（session busy、无 Plan、prompt 构造失败、fresh 创建失败、budget 超限）：RPC 返回错误，TUI review 保持打开。
+- `session.prompt()` 返回的 Promise 异步 reject：RPC 已成功返回，按普通 turn error 展示，不重新打开 review、不修改 Plan artifact。
 
-只删除因 Goal 消失而无引用的代码。
+---
 
-### 7.6 阶段测试
+## 9. Fresh execute 具体流程
 
-执行：
+1. 获取 `plans.latest()`；不存在则失败。
+2. 检查当前 session `isIdle`。
+3. 确定继承目标：源 session 当前 model 与 thinking level；若该 model 无法在新 session 使用（provider/权限不可用），直接失败，不静默回退其他模型。
+4. 构造 fresh handoff prompt。
+5. 预算预检：用继承模型的 context window 计算 allowed；contextWindow 未知时退化为 24k 绝对上限。超限直接失败，不创建新 session。
+6. 保存源 session 和 parent session 文件信息。
+7. 通过 `newSession({ parentSession, setup })` 创建新 session（0.83.0 中 `session_start` 先于 setup 执行）。
+8. 在新 session setup 中追加（仅用于持久化与 restore，不投影进首次模型上下文）：
+   - `PLAN_ENTRY_TYPE` + 同一个 artifact。
+   - `PLAN_MODE_ENTRY_TYPE` + `{ active: false }`。
+9. 激活新 session。
+10. `newSession()` resolve 后应用继承的 model 与 thinking level（`setModel` + `setThinkingLevel`），然后 `plans.adopt(artifact)` 并 `send({ type: "plan_state", artifact })`（替代旧 `replacementPlan` 桥接）。
+11. 通过 `void session.prompt(planImplementationPrompt(artifact)).catch(...)` fire-and-forget 启动实施 turn。
+12. 返回 `{ sessionId, context: "fresh" }`。
+
+步骤 1-6 的任何失败都发生在 session 切换之前：不创建新 session、不留半完成状态，无需回滚。`session_start` 的普通 restore 路径会对空 branch 发 `plan_state: null`，随后第 10 步再发 artifact；接受这个顺序，TUI 幂等覆盖，不新增临时标志。
+
+### 9.1 `replacementPlan` 删除方案
+
+`AgentSessionRuntime.newSession()`（0.83.0）的执行顺序是 `session_start` 事件先于 `options.setup()`，所以 setup 写入的 Plan entry 在 `session_start` 时不可见——现有 `replacementPlan` 桥接正是为此存在。
+
+删除：
+
+- `private replacementPlan?: PlanArtifact` 字段。
+- `session_start` handler 中 `replacementPlan && !entries.some(...)` 的桥接分支；handler 只保留普通 restore 路径（fresh 新 session 无 Plan entry，返回 null）。
+
+fresh 流程在 `newSession()` resolve 后确定性补上状态（§9 第 10 步），不依赖事件顺序、不写入协议、无临时字段。
+
+---
+
+## 10. Rust TUI 状态模型
+
+### 10.1 执行上下文
+
+保留 current/fresh 选择，但改名以避免生命周期语义：
+
+```rust
+pub enum PlanExecutionContext {
+    Current,
+    Fresh,
+}
+```
+
+### 10.2 Review state
+
+将当前 enum：
+
+```rust
+PlanReviewState::Menu
+PlanReviewState::Confirm
+```
+
+替换为：
+
+```rust
+pub struct PlanReviewState {
+    pub selected: usize,
+    pub submitting: bool,
+}
+```
+
+固定索引：
+
+```text
+0 = Execute
+1 = Fresh execute
+2 = Close
+```
+
+### 10.3 键盘行为
+
+- `Up` / `BackTab`：上一项。
+- `Down` / `Tab`：下一项。
+- `Enter`：执行当前选择。
+- `Esc`：等价于 Close。
+- submitting 时忽略所有键。
+
+删除：
+
+- `Y/N` 二次确认。
+- Confirm 页面。
+- `target.label()` confirmation 文案。
+
+### 10.4 Close 行为
+
+```rust
+self.state.plan_review = None;
+```
+
+不要自动退出 Plan mode。
+
+### 10.5 Execute/Fresh execute 行为
+
+- 设置 `submitting = true`。
+- 设置 `run_state = RunState::Submitting`。
+- 返回 `AppEffect::ExecutePlan(context)`。
+
+RPC 失败：
+
+- `submitting = false`。
+- review 保持打开。
+- `run_state = Idle`。
+- 展示错误。
+
+RPC 成功：
+
+- review 关闭。
+- `plan_mode_active = false`。
+- `pending_plan_mode = None`。
+- fresh 时更新 session id，并重置 session-local UI 缓存。
+- Plan artifact 保持原值。
+
+---
+
+## 11. 需要修改的模块和文件
+
+实施前必须在本地 checkout 执行全文检索，以下是当前仓库结构下的预期修改范围。
+
+### 11.1 TypeScript Host
+
+#### `agent-host/src/plan.ts`
+
+- 将 `PLAN_ENTRY_TYPE` 改为 `nabla.plan`。
+- 删除 legacy entry type。
+- 删除 execution message type。
+- 删除 `PlanStatus`。
+- 将 `PlanArtifactV2` 改为 `PlanArtifact`。
+- 增加 `handoffMarkdown`。
+- 删除 schemaVersion、status、lastExecutionError。
+- 删除 lifecycle transition methods。
+- 简化 restore。
+- 更新 validation。
+- 只导出 implementation prompt 构建函数，不组装 fresh 完整 prompt。
+
+#### `agent-host/src/main.ts`
+
+- 修改 `submit_plan` TypeBox schema，增加 `handoffMarkdown`。
+- `submit_plan` 只 append artifact 并发送 `plan_ready`。
+- 动态构造 Plan instructions，注入 context remaining。
+- 删除 `agent_settled` Plan completion handler。
+- 删除两个旧 execute command 分支。
+- 添加统一 `plan_execute` 分支。
+- 删除 lifecycle events。
+- 删除 `completePlanExecution()`。
+- 删除 `executionFailed()`。
+- 删除 `PLAN_EXECUTION_MESSAGE_TYPE` 使用。
+- 调用新的 plan execution helper。
+- 删除 `replacementPlan` 字段与 `session_start` 桥接分支；fresh 成功后 `adopt` + 发送 `plan_state`。
+
+#### `agent-host/src/context-manager.ts`
+
+- 更新 Plan type import。
+- 更新 context checkpoint 中的 Plan shape。
+- 过滤 `PLAN_ENTRY_TYPE`，使其不进入首次普通模型上下文投影。
+- checkpoint 仅在 compaction 后注入完整 Plan；`{id, revision}` marker 不视为完整 Plan。
+- 完整 Plan 已出现在 post-compaction 消息中时不重复注入。
+- 删除 lifecycle 字段依赖。
+- 直接导出 `estimateTextTokens`，供 plan.ts / plan-execution.ts 引用（不新增文件）。
+
+#### `agent-host/src/plan-execution.ts`（新增）
+
+- 封装 current/fresh dispatch。
+- 组装 fresh 完整 prompt（含 handoff 模板），调用 plan.ts 导出的构建函数。
+- 执行 transfer budget 检查。
+- 不保存运行状态。
+
+#### `agent-host/src/protocol/contracts.ts`
+
+- 将 `PlanArtifactV2` 改为 `PlanArtifact`。
+- 更新 bootstrap Plan validation。
+- 删除 schemaVersion/status/lastExecutionError 验证。
+- 增加 handoffMarkdown 验证。
+
+#### `agent-host/src/plan.test.ts`
+
+- 删除 migration/lifecycle tests。
+- 重写 artifact/revision/restore tests。
+
+#### `agent-host/src/session.test.ts`
+
+- 重写 fresh-session 测试（当前使用 legacy schema + `PLAN_EXECUTION_MESSAGE_TYPE`，改造后必挂）。
+- 断言 fresh setup 含新 PlanArtifact 与 `{ active: false }` mode entry，且不含 execution message。
+
+#### `agent-host/src/plan-execution.test.ts`（新增）
+
+- 测试 current/fresh dispatch 和 context transfer。
+
+#### `agent-host/src/context-manager.test.ts`
+
+- 更新 Plan fixture。
+- 测试 compaction checkpoint 保留 Plan。
+- 测试不重复注入相同 revision。
+
+#### `agent-host/src/protocol-contract.test.ts`
+
+- 更新共享 fixture 断言。
+
+#### `agent-host/package.json`
+
+通常无需修改；确认新增测试仍被 `node --test src/*.test.ts` 自动发现。
+
+---
+
+### 11.2 Rust Host 协议
+
+#### `src/host.rs`
+
+- 删除 `PlanExecutionData.artifact` 和 `fresh: bool` 旧结构。
+- 改为：
+
+```rust
+pub struct PlanExecutionData {
+    pub session_id: String,
+    pub context: PlanExecutionContext,
+}
+```
+
+- 将两个 command 合并为 `plan_execute`，传 context 参数。
+- 更新 serde tests。
+
+#### `src/event.rs`
+
+保留一个 command completion：
+
+```rust
+PlanExecutionFinished {
+    context: PlanExecutionContext,
+    result: Result<Box<PlanExecutionData>, String>,
+}
+```
+
+不增加 completion/failed Plan event。
+
+#### `src/runtime.rs`
+
+- 修改 `AppEffect::ExecutePlan(context)` dispatch。
+- 调用统一 `host.execute_plan(context)`。
+
+#### `src/app.rs`
+
+- 更新 `AppEffect` 的 Plan 类型 import。
+- 不添加 Plan lifecycle effect。
+
+---
+
+### 11.3 Rust Domain State
+
+#### `src/state/planning.rs`
+
+- 删除 `PlanStatus`。
+- 修改 `PlanArtifact`。
+- `PlanExecutionTarget` 改名为 `PlanExecutionContext`。
+- 将 `PlanReviewState` 收敛为 struct。
+
+#### `src/state/app_state.rs`
+
+- 检查 `plan`、`plan_review`、`plan_mode_active` 初始化。
+- 新增 `pending_plan_prompt: Option<String>` 字段并处理初始化/清空。
+- 不新增 Plan runtime 状态。
+- review 可以直接读取现有 `ContextSnapshot` 展示余量。
+
+#### `src/state/transcript.rs`
+
+- `TranscriptItem::Plan` 保留。
+- 确保类型使用新的 PlanArtifact。
+
+---
+
+### 11.4 Rust Command 与 Reducer
+
+#### `src/command.rs`
+
+- `/plan` description 改为“Enter Plan mode and optionally submit a planning prompt”。
+- 保留 `LocalCommand::Plan(Option<String>)`。
+- 不解析 Plan 子命令。
+
+#### `src/app/actions.rs`
+
+- 删除 `exit/status/run/run current/run fresh` 分支。
+- 删除 `PlanStatus::Submitted` gate。
+- 实现 `/plan [prompt]` 行为。
+- 新增 `pending_plan_prompt: Option<String>`：未处于 Plan mode 时 `/plan <prompt>` 先 `SetPlanMode(true)` 并缓冲 prompt；`SetPlanModeFinished` 成功后清 `pending_plan_mode` 并调用 `prepare_delivery(prompt, PromptDelivery::Prompt)`。
+- 任意 `<prompt>`（含 `exit`/`status`/`run` 等字符串）作为普通规划 prompt 提交，不报错、不提示。
+- `receive_plan()` 对任意新 revision 打开 review，不检查 status。
+
+#### `src/app/workflow_input.rs`
+
+- 删除 Menu/Confirm 两阶段逻辑。
+- 固定三项选择。
+- 删除 Y/N 快捷确认。
+- Close 保持 Plan mode。
+
+#### `src/app/command_events.rs`
+
+- 成功响应不覆盖 `state.plan`。
+- 删除“Executing plan …”生命周期文案。
+- 改为“Started plan rN in current/fresh context”。
+- 失败时保持 review。
+
+#### `src/app/host_events.rs`
+
+- `plan_ready` 继续调用 `receive_plan(artifact, true)`。
+- 删除 `plan_executing`、`plan_completed`、`plan_execution_error` handlers。
+- `plan_state` 仅恢复静态 artifact；fresh 场景接受先 `null` 后 artifact 的顺序，幂等覆盖，不新增标志。
+
+#### `src/app/session_flow.rs`
+
+- 恢复 session 时恢复 Plan artifact。
+- 不根据 status 自动打开 Plan review。
+- fresh session 激活时正常显示 artifact，但执行由 Host 已提交的普通 turn 驱动。
+
+#### `src/app/tests.rs`
+
+- 删除 lifecycle tests。
+- 增加最终交互与 current/fresh 测试。
+
+---
+
+### 11.5 Rust UI
+
+#### `src/ui/scene.rs`
+
+Plan review 只渲染：
+
+```text
+Execute
+Fresh execute
+Close
+```
+
+固定描述：
+
+```text
+Execute       Continue in this conversation
+Fresh execute Start a new session with the Plan and handoff
+Close         Keep the Plan without executing
+```
+
+Panel 顶部可显示现有 context snapshot：
+
+```text
+Current context remaining: 28% (estimated)
+```
+
+删除 Confirm panel。
+
+#### `src/ui/transcript.rs`
+
+- Plan renderer 删除 status badge。
+- 删除 last execution error。
+- 保留 title、summary、revision、body、assumptions、test plan。
+- handoffMarkdown 默认不在主 transcript 全量展示；在 expanded view 中展示，避免噪音。
+
+---
+
+### 11.6 Shared Protocol Fixture
+
+#### `protocol-fixtures/bootstrap-state.json`
+
+Plan 改为：
+
+```json
+{
+  "artifact": {
+    "id": "plan-contract",
+    "revision": 3,
+    "title": "Contract plan",
+    "summary": "Exercise every Plan field",
+    "bodyMarkdown": "# Contract plan\n\nImplement it.",
+    "assumptions": ["The fixture is intentional"],
+    "testPlan": ["Round-trip both protocol implementations"],
+    "handoffMarkdown": "Preserve the protocol contract and update both Rust and TypeScript.",
+    "sourceSessionId": "session-contract",
+    "createdAt": "2026-07-31T00:00:00.000Z",
+    "updatedAt": "2026-07-31T00:01:00.000Z"
+  }
+}
+```
+
+删除：
+
+```text
+schemaVersion
+status
+lastExecutionError
+```
+
+---
+
+## 12. 测试计划
+
+### 12.1 TypeScript：`plan.test.ts`
+
+删除以下旧测试：
+
+- legacy schema migration。
+- interrupted execution recovery。
+- lifecycle timestamp transition。
+- invalid status jump。
+- executing 时禁止 revision。
+- completed 状态。
+
+新增或保留：
+
+1. 首次 submit 创建 `revision = 1`。
+2. 再次 submit 保持 id 并增加 revision。
+3. revision 更新不依赖任何 status。
+4. `createdAt` 保持，`updatedAt` 更新。
+5. `clear()` 后创建新 id 和 revision 1。
+6. restore 只读取最后一个合法 `nabla.plan` entry。
+7. 旧 `nabla.plan.v1/v2` entry 被忽略。
+8. malformed Plan entry 被忽略。
+9. Plan mode 从当前 branch 最后一条 mode entry 恢复。
+10. `handoffMarkdown` 必须非空。
+11. Plan 正文、assumptions 和 test plan 正常规范化。
+12. implementation prompt 包含完整 artifact 和 handoff。
+13. implementation prompt 不包含 status/completed/executing。
+
+### 12.2 TypeScript：`plan-execution.test.ts`
+
+Current：
+
+1. 不创建新 session。
+2. 退出 Plan mode。
+3. 追加 mode inactive entry。
+4. 只调用一次普通 prompt API。
+5. Plan artifact deep-equal，不发生 mutation。
+6. 不 append 新 Plan entry。
+7. 不发送 lifecycle event。
+8. session busy 时在任何 mutation 前失败。
+9. 没有 Plan artifact 时在任何 mutation 前失败。
+10. 调用 `session.prompt()` 前的失败（busy、无 Plan、构造失败）RPC 返回错误；Promise 异步 reject 按普通 turn error 处理，不重新打开 review。
+11. 不等待实施 turn 完成：`prompt()` fire-and-forget，RPC 响应在 dispatch 后立即返回。
+
+Fresh：
+
+1. 创建新 session。
+2. 保留 parent session 关系。
+3. setup 中写入相同 Plan artifact。
+4. setup 中写入 mode inactive。
+5. 切换到新 session。
+6. fresh prompt 包含 handoff 和完整 Plan。
+7. 不复制完整源 transcript。
+8. Plan id/revision 不变。
+9. 原 session Plan 不变化。
+10. 新 session 创建失败时不提交 prompt。
+11. 继承源 session 当前 model 与 thinking level：`newSession()` resolve 后 `setModel` + `setThinkingLevel`。
+12. 源 model 无法在新 session 使用时，在创建 session 前返回错误，不静默回退其他模型。
+13. 不依赖 `replacementPlan`：`newSession()` resolve 后 adopt 并发送 `plan_state`；session_start 先发的 `null` 由 TUI 幂等覆盖。
+14. 预算预检发生在 `newSession()` 之前：已知 contextWindow 按继承模型窗口计算，未知按 24k 绝对上限兜底；只有估算超限才失败，失败不创建新 session、源 session 不变。
+15. 超限时不静默截断，返回可读错误。
+16. transfer budget 在 32k context 下拒绝过大 Plan。
+17. transfer budget 在 64k/128k context 下允许合理 Plan。
+18. contextWindow 为 null 时按 24k 绝对上限校验：超过 24k 拒绝、以下放行，不产生 NaN。
+19. fresh session 包含相同 Plan artifact 与 `{ active: false }` mode entry，且不含 execution message（session.test.ts 场景）。
+
+### 12.3 TypeScript：`context-manager.test.ts`
+
+1. 新 PlanArtifact 可进入 active state。
+2. `PLAN_ENTRY_TYPE` entry 不进入首次普通模型上下文投影（仅持久化/TUI/restore/compaction 数据源）。
+3. 首次请求不注入完整 Plan（implementation prompt 已含完整 Plan）。
+4. compaction 后 checkpoint 注入完整 Plan。
+5. 仅存在 `{id, revision}` marker 时仍注入完整 Plan（marker 不视为完整 Plan）。
+6. 完整 Plan 已出现在 post-compaction 消息中时不重复注入。
+7. 新 revision 会更新 checkpoint key。
+8. checkpoint 不包含 status 或 lastExecutionError。
+9. context snapshot remaining 计算在 actual usage 下正确。
+10. actual usage 不可用时使用 estimatedNextRequestTokens。
+11. context window 不可用时 prompt 显示 unknown，不产生 NaN。
+
+### 12.4 TypeScript：protocol contract
+
+1. bootstrap fixture 通过解析。
+2. Plan 包含 `handoffMarkdown`。
+3. Plan 不包含 schemaVersion/status/lastExecutionError。
+4. `plan_execute` current response 解析正确。
+5. `plan_execute` fresh response 解析正确。
+
+### 12.5 Rust：`src/host.rs` tests
+
+1. 解析新的 PlanArtifact。
+2. 缺 lifecycle 字段正常解析。
+3. 共享 bootstrap fixture round-trip。
+4. `PlanExecutionContext::Current` 序列化为 `current`。
+5. `PlanExecutionContext::Fresh` 序列化为 `fresh`。
+6. `plan_execute` 请求参数正确。
+7. response 不含 artifact。
+
+### 12.6 Rust：`src/app/tests.rs`
+
+#### `/plan`
+
+1. `/plan` 从 normal 进入 Plan mode。
+2. `/plan <prompt>` 先进入 Plan mode，再提交 prompt。
+3. 已在 Plan mode 时 `/plan <prompt>` 直接提交。
+4. 已在 Plan mode且存在 artifact 时 `/plan` 重新打开 review。
+5. 不再识别 `exit/status/run` 为特殊 Plan 子命令；它们与其它参数一样作为普通规划 prompt 提交，不报错、不提示。
+
+#### Plan ready
+
+1. `plan_ready` 保存 Plan artifact。
+2. `plan_ready` 打开 review。
+3. 更高 revision 替换当前 artifact。
+4. 相同或更低 revision 被去重。
+5. 不检查 status。
+
+#### Review
+
+1. review 恰好三项。
+2. 默认选择 Execute。
+3. Execute 返回 current effect。
+4. Fresh execute 返回 fresh effect。
+5. Close 关闭 review并保持 Plan mode。
+6. Esc 等价 Close。
+7. submitting 时忽略输入。
+8. 不存在 Confirm state。
+9. review 打开时键盘输入被 modal 捕获，无法提交新 prompt；Close 后可继续规划。
+
+#### Execution result
+
+1. current 成功关闭 review。
+2. current 成功退出 Plan mode。
+3. current 成功不修改 artifact。
+4. fresh 成功更新 session id。
+5. fresh 成功清理必要的 session-local UI 缓存。
+6. 失败时 review 保持打开。
+7. 失败时 submitting 恢复 false。
+8. Agent turn 后续失败不修改 artifact。
+
+#### Session/compaction
+
+1. session restore 恢复 artifact但不自动打开 review。
+2. fresh session 包含 artifact。
+3. compaction 后 Plan 仍能进入下一次模型 context。
+4. 低 context current execute 能正常启动。
+
+### 12.7 Rust UI tests
+
+1. Panel 只显示 Execute、Fresh execute、Close。
+2. Panel 不显示 Confirm 子页。
+3. Panel 显示当前 context remaining，若未知则显示 unknown。
+4. Plan transcript 不显示 status。
+5. Plan transcript expanded view 能查看 handoff。
+
+---
+
+## 13. 测试命令
+
+### 13.1 TypeScript Host
 
 ```bash
 cd agent-host
 npm run typecheck
 npm test
-cd ..
 ```
 
-此时 `main.ts` 可能仍有 GoalStore 引用而无法编译。如果阶段 2 和阶段 3 必须连续完成，可将二者作为一个本地提交前工作段；不得提交无法编译的中间状态。
-
-### 7.7 阶段完成条件
-
-- `harness.ts` 不再导出任何 Goal 类型或 GoalStore；
-- Goal persistence 与 migration 完全删除；
-- 无空壳 Goal class；
-- 无 Goal alias；
-- 无兼容 reader。
-
----
-
-## 8. 阶段 3：删除 TypeScript Host 中的 Goal 编排
-
-主要文件：`agent-host/src/main.ts`。
-
-### 8.1 删除 imports
-
-删除所有 Goal imports，例如：
+当前 package scripts 预期为：
 
 ```text
-GoalStore
-GoalRecord
-GoalSnapshot
-GoalsSnapshot
-GoalTask
-GoalSpec
-GoalReview
-GoalVerification
-goalSpecFromToolParams
-normalizeGoalSpec
+typecheck = tsc --noEmit
+test      = node --test src/*.test.ts
 ```
 
-### 8.2 删除 `HostBridge` Goal 字段
-
-删除：
-
-```text
-goals
-goalOperationGeneration
-goalPreparationRunning
-goalAutomationRunning
-```
-
-以及任何：
-
-- Goal timer；
-- Goal waiter；
-- Goal queue；
-- Goal generation counter；
-- Goal automation lock；
-- Goal cancellation token。
-
-更新 constructor 参数和所有创建调用。
-
-### 8.3 删除 GoalStore bootstrap
-
-删除：
-
-```text
-new GoalStore(...)
-GoalStore options
-Goal state directory setup
-Goal restoration during startup
-Goal attachment during session activation
-```
-
-不得用空 implementation 替换。
-
-### 8.4 删除 Goal host commands
-
-从 command dispatcher 删除：
-
-```text
-goal_state
-goals_state
-goal_start
-goal_action
-goal_approve
-```
-
-删除对应 request payload 类型、validation、response payload 和 error mapping。
-
-删除 command lane 中 Goal 专用 lane，例如：
-
-```text
-"goal"
-```
-
-若 `command-lanes.test.ts` 只是把字符串 `goal` 当作任意示例 lane，改成无业务含义的 `mutation`，只为保证最终 Goal 词扫描归零；不得改变 command lane 行为。
-
-### 8.5 删除 Goal query/action handlers
-
-删除所有 Goal handler，包括但不限于：
-
-```text
-goalSnapshot()
-hasMutableGoalTask()
-sendGoalState()
-startGoal()
-goalAction()
-approveGoal()
-prepareGoal()
-validateGoalSpecProfiles()
-cancelGoalSubagents()
-runGoalExecution()
-```
-
-以及所有命名或语义上的：
-
-```text
-pumpGoal*
-runGoal*
-scheduleGoal*
-verifyGoal*
-reviewGoal*
-repairGoal*
-completeGoal*
-failGoal*
-```
-
-不得留下 TODO、空函数或 always-null handler。
-
-### 8.6 删除 Goal fixed pipeline
-
-完整删除：
-
-```text
-preparing
-awaiting_approval
-executing
-verifying
-reviewing
-repairing/completing
-```
-
-对应的：
-
-- planner 子代理启动；
-- GoalSpec 生成；
-- 用户 GoalSpec 审批；
-- dependency task scheduling；
-- worker 并行调度；
-- verifier 自动启动；
-- reviewer 自动启动；
-- repair cycle；
-- targeted repair；
-- review verdict aggregation；
-- Goal completion determination。
-
-保留普通用户或主代理显式启动的 subagent 能力。
-
-### 8.7 删除 Goal host events
-
-停止发送并删除 payload 构造：
-
-```text
-goal_state
-goal_spec_ready
-goal_review
-goal_error
-```
-
-删除 Goal revision、Goal generation 和 stale event 处理所需数据。
-
-### 8.8 清理 session 生命周期
-
-从以下流程删除 Goal 行为：
-
-- host bootstrap；
-- session new；
-- session resume；
-- session switch；
-- session close；
-- socket disconnect；
-- host shutdown；
-- context compaction；
-- catalog refresh。
-
-不得在这些流程中返回 `goal: null`。
-
-### 8.9 清理 subagent completion
-
-从子代理：
-
-- start；
-- running；
-- completion；
-- failure；
-- cancellation；
-- recovery；
-- integration waiting；
-- integration applied；
-- integration discarded；
-- conflict；
-- resolver completion
-
-删除所有 GoalTask 更新、Goal stage 更新和 Goal pump 触发。
-
-普通 subagent 完成后仍按现有非 Goal 路径返回结果、更新 agents snapshot 和处理 worktree integration。
-
-### 8.10 清理 permission authorization call site
-
-删除：
-
-```text
-this.goals.active(...)
-lookup GoalTask grants
-Goal-specific approval context
-Goal-specific permission reason
-```
-
-确认 permission 调用仍能接收普通 session、workspace、tool call 和 profile 上下文。
-
-### 8.11 清理 integration path
-
-删除 integration apply/discard/keep/conflict 中：
-
-- Goal task transition；
-- Goal blocked/paused/failed；
-- Goal completion pump；
-- Goal repair trigger；
-- Goal review trigger。
-
-保留一般 integration status、patch apply、discard 和 conflict handling。
-
-### 8.12 阶段测试
-
-执行：
+针对性运行：
 
 ```bash
 cd agent-host
-npm run typecheck
-npm test
-cd ..
+node --test src/plan.test.ts
+node --test src/plan-execution.test.ts
+node --test src/context-manager.test.ts
+node --test src/protocol-contract.test.ts
 ```
 
-### 8.13 阶段完成条件
-
-- HostBridge 不再拥有 GoalStore；
-- Host 不再接受或发送 Goal protocol message；
-- 无 Goal automation；
-- 无 Goal fixed pipeline；
-- 普通 subagent、permission、worktree 仍可通过 TypeScript 测试；
-- TypeScript 编译通过。
-
----
-
-## 9. 阶段 4：删除共享协议和 fixture 中的 Goal
-
-### 9.1 `protocol-fixtures/bootstrap-state.json`
-
-删除顶层完整字段：
-
-```json
-"goal": { ... }
-```
-
-不是改为：
-
-```json
-"goal": null
-```
-
-从所有 agent、pending agent、completed agent、pending integration agent 或 recovery object 删除：
-
-```json
-"goalId": "..."
-"taskId": "..."
-```
-
-保留所有非 Goal fixture 数据。
-
-### 9.2 TypeScript protocol type
-
-在 Host bootstrap/session activation 类型中删除：
-
-```text
-goal
-goals
-```
-
-从 agents snapshot type 删除 Goal 专用 IDs。
-
-从 approval、integration、worktree recovery payload 删除 Goal 字段。
-
-### 9.3 Rust protocol type
-
-在 `src/host.rs` 删除：
-
-```rust
-BootstrapStateData.goal
-SessionActivationData.goal
-```
-
-同步删除 imports：
-
-```rust
-GoalSnapshot
-GoalsSnapshot
-```
-
-删除 Host client methods：
-
-```rust
-get_goal()
-get_goals()
-start_goal(...)
-goal_action(...)
-approve_goal(...)
-```
-
-### 9.4 不增加兼容解析
-
-Rust `serde` 和 TypeScript parser 对旧 JSON 的未知字段若已经宽容，则保持现状。不得增加：
-
-- `legacyGoal`；
-- optional deprecated Goal field；
-- custom Goal migration；
-- protocol version branch。
-
-### 9.5 更新协议契约测试
-
-修改 `agent-host/src/protocol-contract.test.ts`：
-
-- 删除所有 `parsed.goal...` 断言；
-- 保留对 bootstrap 其他字段的断言；
-- 增加明确的负面断言：fixture 顶层没有 `goal`；
-- 增加 agent entries 不含 `goalId` 和当前 Goal 专用 `taskId` 的断言；
-- 保证 fixture 可由当前 Host parser 读取。
-
-修改 Rust `src/host.rs` 内的 fixture/serde 测试：
-
-- 删除测试 JSON 中的 Goal block；
-- 删除 Goal assertion；
-- 保留对 session、plan、resources、agents、context 和 integrations 的断言；
-- 增加序列化/反序列化结果无 Goal 字段的断言（若现有测试框架适合）。
-
-### 9.6 阶段测试
-
-执行：
-
-```bash
-cd agent-host
-npm run typecheck
-npm test
-cd ..
-
-cargo test --all-targets host
-```
-
-若 Cargo 不支持按上述方式筛选，执行：
-
-```bash
-cargo test --all-targets
-```
-
-### 9.7 阶段完成条件
-
-- bootstrap JSON 不含 Goal；
-- session activation 不含 Goal；
-- agents snapshot 不含 Goal ID/GoalTask ID；
-- approval/worktree/integration payload 不含 Goal；
-- TypeScript 与 Rust 契约测试同步通过；
-- 无新旧协议兼容层。
-
----
-
-## 10. 阶段 5：删除 Rust Goal model 与 App 状态
-
-### 10.1 处理 `src/state/goals.rs`
-
-该文件除 Goal 类型外还包含非 Goal 的 `AgentProfileSnapshot`。执行顺序：
-
-1. 将 `AgentProfileSnapshot` 原样移动到 `src/state/agents.rs`；
-2. 更新 imports；
-3. 不改变该类型字段、serde 行为或测试；
-4. 删除 `src/state/goals.rs` 整个文件。
-
-不得将 Goal 类型一起移动。
-
-### 10.2 `src/state.rs`
-
-删除：
-
-```rust
-mod goals;
-pub use goals::*;
-```
-
-确认 `AgentProfileSnapshot` 通过 agents 模块继续导出。
-
-### 10.3 `src/state/agents.rs`
-
-从 `ActiveAgentSnapshot` 删除：
-
-```rust
-task_id: Option<String>,
-goal_id: Option<String>,
-```
-
-同步更新 Default、serde fixture、构造和渲染引用。
-
-不得新增替代字段。
-
-### 10.4 `src/state/app_state.rs`
-
-删除字段：
-
-```rust
-goal: Option<GoalSnapshot>,
-goal_approval: Option<GoalApprovalState>,
-```
-
-删除初始化、reset、session activation、bootstrap assignment 和 modal priority 分支。
-
-删除：
-
-```rust
-UiModalKind::GoalApproval
-```
-
-对应的 active modal 判断。
-
-### 10.5 `src/state/planning.rs`
-
-删除：
-
-```rust
-GoalApprovalState
-```
-
-只删除 Goal 类型，不修改 Plan review 状态。
-
-### 10.6 `src/state/transcript.rs`
-
-从 `TranscriptItem` 删除：
-
-```rust
-Goal(Box<GoalSnapshot>),
-Goals(GoalsSnapshot),
-```
-
-删除所有 match arms、stable key、measurement、serialization 或 equality 辅助。
-
-### 10.7 阶段测试
-
-执行：
-
-```bash
-cargo fmt --check
-cargo check --all-targets
-```
-
-此时 Rust app 层可能仍引用已删除类型。阶段 5 与阶段 6 可以连续完成后再提交；不得提交无法构建的中间状态。
-
-### 10.8 阶段完成条件
-
-- `src/state/goals.rs` 已删除；
-- 非 Goal 的 `AgentProfileSnapshot` 已保留；
-- AppState 不含 Goal；
-- TranscriptItem 不含 Goal；
-- Rust agent snapshot 不含 Goal IDs。
-
----
-
-## 11. 阶段 6：删除 Rust command、effect、event 和 TUI
-
-### 11.1 `src/command.rs`
-
-删除本地命令定义：
-
-```text
-/goal
-/goals
-```
-
-删除：
-
-```rust
-LocalCommandKind::Goal
-LocalCommandKind::Goals
-LocalCommand::Goal(...)
-LocalCommand::Goals
-```
-
-删除 parser arms、usage、description、completion 和 routing。
-
-不增加 deprecated 提示。未来动态 Skill/Prompt 是否使用 `/goal` 不属于本任务。
-
-### 11.2 `src/app.rs`
-
-从 `AppEffect` 删除：
-
-```rust
-GetGoal,
-GetGoals,
-StartGoal { ... },
-GoalAction(...),
-ApproveGoal,
-```
-
-从 `LocalCommandCompletion` 删除所有 Goal variants。
-
-删除 bootstrap/session activation 对 `state.goal` 的赋值。
-
-### 11.3 `src/event.rs`
-
-删除 Goal imports。
-
-从 `CommandEvent` 删除：
-
-```text
-GoalStateFinished
-GoalsFinished
-GoalStarted
-GoalActionFinished
-GoalApproved
-```
-
-删除对应 result payload 类型。
-
-### 11.4 `src/runtime.rs`
-
-删除 `AppEffect` dispatch arms：
-
-```text
-GetGoal
-GetGoals
-StartGoal
-GoalAction
-ApproveGoal
-```
-
-删除 Host client 调用和异步 completion 映射。
-
-### 11.5 `src/app/actions.rs`
-
-删除：
-
-- `LocalCommand::Goal` route；
-- `LocalCommand::Goals` route；
-- `receive_goal()`；
-- Goal revision/stale filtering；
-- Goal spec approval modal 创建；
-- Goal transcript item 插入；
-- Goal AppEffect 构造；
-- Goal local command completion mapping。
-
-不得修改 Plan 命令路径。
-
-### 11.6 `src/app/command_events.rs`
-
-删除所有 Goal command completion handlers：
-
-```text
-GoalStateFinished
-GoalsFinished
-GoalStarted
-GoalActionFinished
-GoalApproved
-```
-
-删除成功/失败 notice 和 state update。
-
-### 11.7 `src/app/host_events.rs`
-
-删除 HostEvent 处理：
-
-```text
-goal_state
-goal_spec_ready
-goal_review
-goal_error
-```
-
-删除 Goal stale revision、approval、transcript 和 notice 分支。
-
-不得将 Goal event 映射成 generic Notice。
-
-### 11.8 Goal approval 输入路径
-
-使用：
-
-```bash
-rg -n 'GoalApproval|goal_approval|update_goal_approval' src
-```
-
-删除所有：
-
-- modal enum variant；
-- key handler；
-- input route；
-- accept/reject effect；
-- scene builder branch；
-- focus target；
-- test fixture。
-
-只删除 Goal modal，不重构其他 modal。
-
-### 11.9 `src/ui/scene.rs`
-
-删除 Goal approval modal 渲染。
-
-保留 Plan review、permission approval、question、integration 等其他 UI。
-
-### 11.10 `src/ui/transcript.rs`
-
-删除：
-
-```rust
-TranscriptItem::Goal(...)
-TranscriptItem::Goals(...)
-```
-
-对应的：
-
-- card renderer；
-- list renderer；
-- summary；
-- status style；
-- action hint；
-- tests/snapshots。
-
-### 11.11 其他 Rust 文件
-
-执行：
-
-```bash
-rg -n 'Goal|goal_|goalId|goal_id|/goal|/goals' src
-```
-
-逐条判断并删除所有 runtime/UI/test Goal 引用。
-
-不允许把 Goal 名字改成无意义名称以绕过扫描。
-
-### 11.12 阶段测试
-
-执行：
+### 13.2 Rust
 
 ```bash
 cargo fmt --check
@@ -1261,852 +1169,228 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-### 11.13 阶段完成条件
+针对性运行：
 
-- Rust 无 Goal model；
-- Rust 无 Goal command；
-- Rust 无 Goal effect/event；
-- Rust 无 Goal Host client；
-- Rust 无 Goal modal/transcript renderer；
-- Cargo 全量构建和测试通过。
+```bash
+cargo test plan
+cargo test host
+cargo test command
+cargo test scene
+```
 
 ---
 
-## 12. 阶段 7：同步删除和更新测试
+## 14. 静态清理检查
 
-本阶段不是“测试清理”，而是 Goal 删除的组成部分。测试改动必须与生产代码同步。
+完成后以下检索必须为空：
 
-### 12.1 TypeScript：`agent-host/src/harness.test.ts`
-
-该文件混合了 GoalStore 与非 Goal harness 测试，不得删除整个文件。
-
-删除所有 Goal-only 测试块，包括：
-
-- GoalStore create；
-- Goal transition；
-- GoalTask transition；
-- Goal dependency graph；
-- Plan source to Goal；
-- Goal approval；
-- Goal review；
-- Goal verification；
-- Goal repair cycle；
-- Goal persistence；
-- Goal restart recovery；
-- Goal session attach；
-- Goal listing；
-- legacy Goal migration；
-- invalid Goal spec；
-- Goal profile validation；
-- Goal path grants。
-
-删除对应 fixture builders、imports、temporary state directories 和 helper。
-
-保留并修复非 Goal 测试，例如：
-
-- harness config；
-- profile parsing；
-- resources；
-- trust/path helpers；
-- permission policy；
-- generic subagent-related helpers。
-
-### 12.2 TypeScript：`agent-host/src/protocol-contract.test.ts`
-
-更新为删除后的 bootstrap contract：
-
-必须继续验证：
-
-- scope/session；
-- plan；
-- resources；
-- agents；
-- context；
-- integrations；
-- warnings。
-
-新增负面断言：
-
-```ts
-assert.equal("goal" in parsed, false);
+```bash
+rg -n \
+  'PlanStatus|lastExecutionError|last_execution_error|markExecuting|markSubmitted|markCompleted|PLAN_EXECUTION_MESSAGE_TYPE|plan_executing|plan_completed|plan_execution_error|completePlanExecution|executionFailed' \
+  agent-host/src src protocol-fixtures
 ```
 
-对 fixture 中所有 agent entries 验证：
-
-```ts
-assert.equal("goalId" in agent, false);
-assert.equal("taskId" in agent, false);
+```bash
+rg -n \
+  'execute_plan_current|execute_plan_fresh|nabla\.plan\.execution' \
+  agent-host/src src protocol-fixtures
 ```
 
-这里只检查当前被删除的 GoalTask 关联字段。
+```bash
+rg -n \
+  'nabla\.plan\.v1|nabla\.plan\.v2|LEGACY_PLAN_ENTRY_TYPE|schemaVersion' \
+  agent-host/src/plan.ts agent-host/src/plan.test.ts src/state/planning.rs protocol-fixtures/bootstrap-state.json
+```
 
-### 12.3 TypeScript：`agent-host/src/command-lanes.test.ts`
-
-若测试只是用字符串 `goal` 作为任意 lane 名称，将其改为：
+以下结果允许存在：
 
 ```text
-mutation
+PlanExecutionContext
+AppEffect::ExecutePlan
+plan_execute
+id
+revision
 ```
 
-不改变测试行为或 lane implementation。
-
-### 12.4 TypeScript：permission/approval tests
-
-更新所有含 `goalId` 的 approval fixture。
-
-删除 Goal lease/grant tests。
-
-保留并确认：
-
-- deny > ask > allow；
-- once grant；
-- session grant；
-- workspace grant；
-- digest binding；
-- tool/session/workspace binding；
-- subagent cannot escalate；
-- audit；
-- shell planner；
-- file adapter。
-
-不得减少一般 permission 覆盖。
-
-### 12.5 TypeScript：worktree tests
-
-只在类型变化需要时更新 fixture：
-
-- 删除 `goalId`；
-- 删除 Goal 专用 `taskId`；
-- 删除 Goal state update assertion。
-
-必须保留并通过：
-
-- normal repo prepare；
-- dirty repo baseline；
-- unborn repo；
-- staged/untracked；
-- parallel patches；
-- binary patch；
-- apply；
-- idempotent integration；
-- discard；
-- conflict；
-- crash recovery；
-- corrupt metadata；
-- non-Git fallback；
-- credential-like path exclusion。
-
-### 12.6 TypeScript：subagent/host tests
-
-删除 Goal orchestration tests。
-
-保留或补齐因 Goal 删除受影响的普通 coding-agent 路径：
-
-1. 直接启动普通 subagent；
-2. 主代理调用 `delegate_task`；
-3. subagent 正常完成；
-4. subagent 失败；
-5. subagent 取消；
-6. 并发上限；
-7. worktree subagent 完成后等待 integration；
-8. apply/discard；
-9. conflict/recovery；
-10. permission request/approve/deny。
-
-只补充因删除 Goal 分支而失去覆盖的现有行为，不设计新 Task Runtime。
-
-### 12.7 Rust：`src/app/tests.rs`
-
-删除所有 Goal-only 测试，包括：
-
-- Goal lifecycle event；
-- stale Goal revision；
-- cross-Goal event；
-- Goal spec approval；
-- Goal action；
-- Goal bootstrap；
-- Goal session activation；
-- Goal review；
-- Goal error；
-- Goal transcript；
-- Goal modal/input；
-- `/goal` 与 `/goals` command。
-
-同步更新测试 helpers 和 imports。
-
-保留并验证：
-
--普通输入和 streaming；
-- tool call/result；
-- session bootstrap；
-- session resume/switch；
-- Plan mode/review；
-- permission modal；
-- question modal；
-- integration prompt；
-- agent picker；
-- transcript；
-- Unicode/paste/file references。
-
-### 12.8 Rust：`src/host.rs` tests
-
-删除 JSON fixture 中 Goal block和 Goal assertion。
-
-测试必须继续覆盖删除后的 bootstrap/session activation 反序列化。
-
-建议增加精确的序列化负面检查：
-
-```rust
-assert!(json.get("goal").is_none());
-```
-
-若现有测试只做反序列化，不要为了该断言大规模重写测试；可在已有 serialization 测试中加入。
-
-### 12.9 Rust：UI tests
-
-删除 Goal card、Goal list、Goal approval modal 的 snapshot/scene tests。
-
-不要重录与 Goal 无关的全部快照。只更新受到布局 item 删除直接影响的测试。
-
-### 12.10 测试删除规则
-
-对每个被删除测试，必须能回答：
-
-```text
-它验证的行为是否完全属于 Goal？
-```
-
-- 是：删除。
-- 否：保留非 Goal 部分并改写 fixture。
-- 不确定：通过调用链确认，不得直接删除。
-
-### 12.11 阶段完成条件
-
-- 无 skip/ignore；
-- 无空测试文件；
-- 无 Goal fixture；
-- 非 Goal coding-agent 回归覆盖未被削弱；
-- TypeScript 和 Rust 全量测试均通过。
+因为它们表达用户选择和 artifact identity，而不是 lifecycle。
 
 ---
 
-## 13. 阶段 8：文档和注释清理
-
-### 13.1 扫描范围
-
-扫描：
-
-```text
-AGENTS.md
-SUBAGENTS.md
-TRANSCRIPT_SURFACE.md
-test.md
-README.md
-docs/**
-agent-host/src/**
-src/**
-protocol-fixtures/**
-```
-
-### 13.2 删除内容
-
-删除所有关于以下实现的说明：
-
-- `/goal`；
-- `/goals`；
-- GoalStore；
-- GoalSpec；
-- GoalTask；
-- Goal lifecycle；
-- Goal approval；
-- Goal automation；
-- Goal planner/verifier/reviewer；
-- Goal repair；
-- Goal permission lease；
-- Goal worktree recovery；
-- Goal protocol events。
-
-删除过期架构图、命令表、测试说明和注释。
-
-### 13.3 不新增替代文档
-
-本次不得添加：
-
-- Goal Skill 文档；
-- Prompt 模板；
-- WorkflowRun 设计；
-- Task Runtime 设计；
-- 新架构提案。
-
-如果现有文档必须解释删除后的事实，只做最小删除或一句事实修正，例如：
-
-```text
-Goal workflows are not part of the core runtime.
-```
-
-但不要扩写未来方案。
-
-### 13.4 阶段完成条件
-
-- Core 文档不再描述 Goal runtime；
-- 命令文档不再列出 `/goal`、`/goals`；
-- 不包含替代设计。
-
----
-
-## 14. 最终符号归零检查
-
-### 14.1 精确符号扫描
-
-执行：
-
-```bash
-rg -n --hidden \
-  -g '!target/**' \
-  -g '!agent-host/node_modules/**' \
-  -g '!.git/**' \
-  'GoalStore|GoalRecord|GoalSnapshot|GoalsSnapshot|GoalTask|GoalSpec|GoalApproval|goalId|goal_id|goal_state|goals_state|goal_start|goal_action|goal_approve|goal_spec_ready|goal_review|goal_error|goal_lease|goalWorkerPermissions' \
-  .
-```
-
-期望：**无输出，退出码 1。**
-
-### 14.2 词汇扫描
-
-执行：
-
-```bash
-rg -ni --hidden \
-  -g '!target/**' \
-  -g '!agent-host/node_modules/**' \
-  -g '!.git/**' \
-  '\bgoals?\b' \
-  agent-host/src src protocol-fixtures AGENTS.md SUBAGENTS.md TRANSCRIPT_SURFACE.md test.md README.md docs
-```
-
-期望：Core、协议、测试和运行文档无 Goal runtime 引用。
-
-若仓库本身不存在某些路径，删除相应参数后重跑。
-
-对于命中项：
-
-- runtime/test/protocol/docs 中的 Goal：必须删除；
-- 第三方 license、不可修改 vendored 内容：记录但不修改；
-- `skills/**` 或 `prompts/**`：本次不新增，已有内容也不得因本任务扩展；
-- 普通英语“goal”若与 Goal runtime 无关：优先改写为 `objective`、`target` 或删除，以满足“尽可能清空 Goal”；不得改变行为。
-
-### 14.3 文件名扫描
-
-执行：
-
-```bash
-find . \
-  -path './.git' -prune -o \
-  -path './target' -prune -o \
-  -path './agent-host/node_modules' -prune -o \
-  -iname '*goal*' -print
-```
-
-期望：无 Core、测试或 protocol 文件名包含 Goal。
-
-### 14.4 JSON key 扫描
-
-执行：
-
-```bash
-rg -n '"goal"\s*:|"goals"\s*:|"goalId"\s*:|"taskId"\s*:' \
-  protocol-fixtures agent-host/src src
-```
-
-对 `taskId` 命中必须判断：
-
-- 当前 GoalTask 关联：删除；
-- 与 Goal 无关的第三方/通用协议字段：不得仅为清零盲删。若存在这种情况，记录其非 Goal 用途。
-
-### 14.5 阶段完成条件
-
-- Goal 核心符号扫描为零；
-- Goal runtime 词汇扫描为零；
-- 无 Goal 文件名；
-- 无 Goal JSON keys；
-- 无隐藏的兼容层或 deprecated alias。
-
----
-
-## 15. 完整验证矩阵
-
-### 15.1 TypeScript 静态验证
-
-```bash
-cd agent-host
-npm run typecheck
-cd ..
-```
-
-通过标准：退出码 0，无 TypeScript error。
-
-### 15.2 TypeScript 全量测试
-
-```bash
-cd agent-host
-npm test
-cd ..
-```
-
-通过标准：所有现有非 Goal 测试与更新后的契约测试通过，无 skip/only。
-
-检查：
-
-```bash
-rg -n '\.(skip|only)\(|describe\.skip|it\.skip|test\.skip' agent-host/src
-```
-
-不得因本任务新增 skip/only。
-
-### 15.3 Rust 格式和静态检查
-
-```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-```
-
-通过标准：退出码 0。
-
-### 15.4 Rust 全量测试
-
-```bash
-cargo test --all-targets
-```
-
-通过标准：所有测试通过，无 ignored 数量因本任务增加。
-
-### 15.5 协议契约
-
-必须验证：
-
-- TypeScript 可解析更新后的 `bootstrap-state.json`；
-- Rust 可反序列化同一 fixture；
-- bootstrap 不含 Goal；
-- session activation 不含 Goal；
-- agent snapshot 不含 Goal IDs；
-- approval/integration/worktree payload 不含 Goal。
-
-### 15.6 Coding-agent 核心回归
-
-至少运行或通过已有自动化测试覆盖以下路径：
-
-#### 会话
-
-- 新建 session；
-- 发送普通 prompt；
-- streaming assistant output；
-- tool call/tool result；
-- resume session；
-- switch session；
-- bootstrap/reconnect。
-
-#### Plan
-
-- 进入 Plan mode；
-- submit Plan；
-- Plan review/批准或现有执行路径；
-- 退出 Plan mode。
-
-本任务不得改变 Plan 行为。
-
-#### Subagent
-
-- `/agent` 或等价普通入口；
-- 主代理 `delegate_task`；
-- running/completed/failed/cancelled；
-- agents snapshot；
-- 并发控制；
--普通结果回传。
-
-#### Permission
-
-- allow；
-- deny；
-- ask；
-- once；
-- session；
-- workspace；
-- approval digest；
-- tool/session/workspace binding；
-- audit。
-
-#### Worktree
-
-- prepare；
-- capture；
-- apply；
-- discard；
-- conflict；
-- recovery；
-- non-Git fallback；
-- dirty workspace；
-- credential-like file exclusion。
-
-#### TUI
-
-- bootstrap；
--普通 transcript；
-- tool rendering；
-- permission modal；
-- question modal；
-- integration prompt；
-- agent view/picker；
-- resize/scroll/streaming。
-
-### 15.7 手工 smoke test
-
-若项目现有开发流程支持本地运行，执行一轮最小 smoke：
-
-1. 启动 Nabla；
-2. 确认命令列表无 `/goal`、`/goals`；
-3. 发送普通代码调查请求；
-4. 触发一次只读工具；
-5. 触发一次需要审批的操作；
-6. 启动普通子代理；
-7. 查看子代理状态；
-8. 在 Git 仓库中启动 worktree 写代理；
-9. 捕获并应用或丢弃 patch；
-10. 退出并恢复 session。
-
-不得为 smoke test 实现任何新功能。
-
----
-
-## 16. 文件级修改清单
-
-以下是当前已知的主要修改范围。Coding Agent 必须在实际分支上通过 `rg` 补齐遗漏，不得只依赖本表。
-
-### 16.1 删除文件
-
-- [ ] `src/state/goals.rs`
-  - [ ] 先移动 `AgentProfileSnapshot` 到 `src/state/agents.rs`
-  - [ ] 确认文件剩余内容全部为 Goal
-  - [ ] 删除文件
-
-### 16.2 TypeScript 生产代码
-
-- [ ] `agent-host/src/harness.ts`
-  - [ ] 删除 Goal 类型
-  - [ ] 删除 Goal transitions
-  - [ ] 删除 GoalStore
-  - [ ] 删除 Goal persistence/migration
-  - [ ] 清理 profile Goal 文案
-  - [ ] 最小重命名 `goalWorkerPermissions`
-- [ ] `agent-host/src/main.ts`
-  - [ ] 删除 Goal imports/fields/bootstrap
-  - [ ] 删除 Goal commands/events
-  - [ ] 删除 Goal fixed pipeline
-  - [ ] 删除 Goal 与 subagent/permission/worktree/integration 耦合
-  - [ ] 删除 `taskId/goalId`
-  - [ ] 删除 `goal_spec`
-- [ ] `agent-host/src/approval.ts`
-  - [ ] 删除 Goal approval context
-- [ ] `agent-host/src/worktree.ts`
-  - [ ] 删除 recovery `taskId/goalId`
-  - [ ] 删除 Goal integration/recovery behavior
-- [ ] `agent-host/src/permissions/**`
-  - [ ] 删除 Goal lease/grants/scopes
-  - [ ] 保留一般 permission 行为
-- [ ] `agent-host/src/protocol/**`（若存在相关类型）
-  - [ ] 删除 Goal commands/events/payload
-
-### 16.3 TypeScript 测试
-
-- [ ] `agent-host/src/harness.test.ts`
-  - [ ] 删除 Goal-only tests/helpers
-  - [ ] 保留非 Goal harness tests
-- [ ] `agent-host/src/protocol-contract.test.ts`
-  - [ ] 删除 Goal assertion
-  - [ ] 增加无 Goal 断言
-- [ ] `agent-host/src/command-lanes.test.ts`
-  - [ ] 如仅为示例，替换 `goal` lane 名
-- [ ] `agent-host/src/approval.test.ts`（若受影响）
-  - [ ] 删除 `goalId` fixture
-- [ ] `agent-host/src/permissions.test.ts`（若受影响）
-  - [ ] 删除 Goal lease tests
-  - [ ] 保留一般 permission tests
-- [ ] `agent-host/src/worktree.test.ts`
-  - [ ] 删除 Goal recovery fields/assertions
-  - [ ] 保留完整 worktree coverage
-- [ ] 其他 host/subagent tests
-  - [ ] 删除 Goal orchestration tests
-  - [ ] 保留普通 subagent regression
-
-### 16.4 协议 fixture
-
-- [ ] `protocol-fixtures/bootstrap-state.json`
-  - [ ] 删除顶层 `goal`
-  - [ ] 删除所有 `goalId`
-  - [ ] 删除 Goal 专用 `taskId`
-  - [ ] 保留其他 fixture 数据
-
-### 16.5 Rust state/protocol
-
-- [ ] `src/state.rs`
-  - [ ] 删除 goals module/export
-- [ ] `src/state/agents.rs`
-  - [ ] 接收 `AgentProfileSnapshot`
-  - [ ] 删除 `task_id/goal_id`
-- [ ] `src/state/app_state.rs`
-  - [ ] 删除 `goal`
-  - [ ] 删除 `goal_approval`
-  - [ ] 删除 Goal modal priority
-- [ ] `src/state/planning.rs`
-  - [ ] 删除 `GoalApprovalState`
-- [ ] `src/state/transcript.rs`
-  - [ ] 删除 Goal/Goals variants
-- [ ] `src/host.rs`
-  - [ ] 删除 bootstrap/session Goal fields
-  - [ ] 删除 Goal host methods
-  - [ ] 更新 serde tests
-- [ ] `src/event.rs`
-  - [ ] 删除 Goal CommandEvent variants/imports
-- [ ] `src/runtime.rs`
-  - [ ] 删除 Goal effect dispatch
-
-### 16.6 Rust app/TUI
-
-- [ ] `src/command.rs`
-  - [ ] 删除 `/goal`、`/goals`
-- [ ] `src/app.rs`
-  - [ ] 删除 Goal AppEffects/Completion
-  - [ ] 删除 bootstrap Goal assignment
-- [ ] `src/app/actions.rs`
-  - [ ] 删除 Goal command/action/receive logic
-- [ ] `src/app/command_events.rs`
-  - [ ] 删除 Goal command completion
-- [ ] `src/app/host_events.rs`
-  - [ ] 删除 Goal host events
-- [ ] Goal modal key/input 文件（通过 `rg` 定位）
-  - [ ] 删除 Goal approval input route
-- [ ] UI modal enum 定义文件（通过 `rg` 定位）
-  - [ ] 删除 `GoalApproval`
-- [ ] `src/ui/scene.rs`
-  - [ ] 删除 Goal approval modal
-- [ ] `src/ui/transcript.rs`
-  - [ ] 删除 Goal/Goals rendering
-- [ ] `src/app/tests.rs`
-  - [ ] 删除 Goal tests
-  - [ ] 更新 bootstrap/session/non-Goal fixtures
-- [ ] 其他 Rust tests/snapshots
-  - [ ] 删除 Goal-only snapshots
-  - [ ] 保留非 Goal coverage
-
-### 16.7 文档
-
-- [ ] `AGENTS.md`
-- [ ] `SUBAGENTS.md`
-- [ ] `TRANSCRIPT_SURFACE.md`
-- [ ] `test.md`
-- [ ] `README.md`
-- [ ] `docs/**`
-
-只删除 Goal runtime 说明，不添加替代设计。
-
----
-
-## 17. 推荐提交顺序
-
-这些提交用于降低审查难度。最终 PR 必须整体可构建、可测试。
+## 15. 推荐提交顺序
 
 ### Commit 1
 
 ```text
-refactor: detach shared runtime state from goal
+refactor(plan): remove plan lifecycle state
 ```
 
-包含：
+修改：
 
-- subagent `taskId/goalId`；
-- approval `goalId`；
-- worktree recovery `taskId/goalId`；
-- Goal lease/grants；
-- profile Goal 文案；
-- `goal_spec` output branch。
+- `agent-host/src/plan.ts`
+- `src/state/planning.rs`
+- `protocol-fixtures/bootstrap-state.json`
+- Plan 基础测试
 
 ### Commit 2
 
 ```text
-refactor: remove goal store and host orchestration
+refactor(plan): add self-contained handoff and context budget guidance
 ```
 
-包含：
+修改：
 
-- Goal types；
-- GoalStore；
-- persistence/migration；
-- Host commands/events；
-- planner/worker/verifier/reviewer pipeline；
-- repair loop；
-- Goal integration hooks。
+- `agent-host/src/context-manager.ts`
+- `agent-host/src/main.ts` Plan instructions
+- `submit_plan` schema
+- context tests
 
 ### Commit 3
 
 ```text
-refactor: remove goal protocol and tui surface
+refactor(plan): dispatch current and fresh execution as normal turns
 ```
 
-包含：
+修改：
 
-- bootstrap/session activation；
-- fixture；
-- Rust state；
-- commands/effects/events；
-- modal；
-- transcript renderer。
+- `agent-host/src/plan-execution.ts`
+- `agent-host/src/main.ts`
+- Host protocol
+- 删除 lifecycle events和 special execution message
 
 ### Commit 4
 
 ```text
-test: synchronize coverage after goal removal
+refactor(tui): simplify plan review to execute fresh close
 ```
 
-包含：
+修改：
 
-- 删除 Goal-only tests；
-- 更新 fixtures/contracts；
-- 保留并修复 coding-agent 回归测试。
+- `src/state/planning.rs`
+- `src/app/workflow_input.rs`
+- `src/ui/scene.rs`
+- `src/app/command_events.rs`
 
 ### Commit 5
 
 ```text
-docs: remove goal runtime references
+refactor(command): reduce plan command to a single mode entry
 ```
 
-包含：
+修改：
 
-- 文档和注释清理；
-- 不包含任何未来设计。
+- `src/command.rs`
+- `src/app/actions.rs`
+- pending Plan prompt delivery
 
-如果某个中间 commit 无法独立构建，可在本地保留该顺序，但在提交前 squash 成逻辑完整的可构建提交。不得为了保持 commit 独立而添加临时兼容层。
+### Commit 6
 
----
-
-## 18. Coding Agent 操作规约
-
-Coding Agent 执行本计划时必须遵守：
-
-1. 每次修改前先 `rg` 查调用链；
-2. 删除 Goal 代码，不用新抽象替换；
-3. 保持 Plan、subagent、permission、worktree 的非 Goal 行为不变；
-4. 不修改用户未要求的文件；
-5. 不批量格式化无关文件；
-6. 不升级依赖；
-7. 不修改 package manager lockfile，除非 Goal 删除确实改变依赖且编译器证明依赖已完全无用；
-8. 不改协议版本；
-9. 不添加兼容 decoder；
-10. 不自动删除旧用户数据；
-11. 每个阶段后运行对应测试；
-12. 最终运行全量测试和全仓扫描；
-13. 报告任何残留 Goal 命中及其原因；
-14. 若某个 `goal` 单词来自非 Goal 业务，优先改写词汇但不改变行为；
-15. 遇到模糊代码时以“最小删除、保留非 Goal 行为”为准。
-
----
-
-## 19. 完成定义（Definition of Done）
-
-本任务只有在以下条件全部满足时完成。
-
-### 19.1 代码
-
-- [ ] `GoalStore` 不存在；
-- [ ] `GoalRecord/GoalSnapshot/GoalTask/GoalSpec` 不存在；
-- [ ] Goal state transitions 不存在；
-- [ ] Goal persistence/migration 不存在；
-- [ ] Host 无 Goal fields/commands/events；
-- [ ] 普通 subagent 无 Goal IDs；
-- [ ] permission 无 Goal lease/grants/context；
-- [ ] worktree 无 Goal metadata/behavior；
-- [ ] Rust state 无 Goal；
-- [ ] Rust TUI 无 Goal command/modal/transcript；
-- [ ] protocol 无 Goal payload；
-- [ ] fixture 无 Goal key；
-- [ ] Core 文档无 Goal runtime 描述。
-
-### 19.2 禁止项
-
-- [ ] 未添加 Goal-lite；
-- [ ] 未添加 WorkflowRun 等替代层；
-- [ ] 未添加 Goal Skill/Prompt；
-- [ ] 未保留 `goal: null`；
-- [ ] 未保留 deprecated command；
-- [ ] 未添加 migration/compatibility；
-- [ ] 未重构 Plan；
-- [ ] 未重构 Task Runtime；
-- [ ] 未改变一般 permission/worktree 行为；
-- [ ] 未包含无关重构。
-
-### 19.3 测试
-
-- [ ] `npm run typecheck` 通过；
-- [ ] `npm test` 通过；
-- [ ] `cargo fmt --check` 通过；
-- [ ] `cargo clippy --all-targets -- -D warnings` 通过；
-- [ ] `cargo test --all-targets` 通过；
-- [ ] 协议 fixture 在 TS/Rust 两侧通过；
-- [ ] 无新增 skip/ignore/only；
-- [ ] coding-agent 普通会话回归通过；
-- [ ] Plan 回归通过；
-- [ ] subagent 回归通过；
-- [ ] permission 回归通过；
-- [ ] worktree/integration/recovery 回归通过；
-- [ ] TUI 非 Goal 交互回归通过。
-
-### 19.4 归零
-
-- [ ] 精确 Goal 符号扫描无结果；
-- [ ] Core Goal 词汇扫描无结果；
-- [ ] Goal 文件名扫描无结果；
-- [ ] Goal JSON key 扫描无结果；
-- [ ] 不存在隐藏空壳或兼容 alias。
-
----
-
-## 20. 最终交付报告格式
-
-Coding Agent 完成后必须提交一份简洁报告，格式如下：
-
-```markdown
-## Goal removal result
-
-### Removed
-- 删除的核心类型和模块
-- 删除的命令和协议
-- 删除的 UI 和持久化
-- 删除的测试数量或测试组
-
-### Preserved
-- Plan
-- Generic subagents
-- Permission
-- Worktree/integration
-- Session/TUI core
-
-### Validation
-- `npm run typecheck`: pass/fail
-- `npm test`: pass/fail
-- `cargo fmt --check`: pass/fail
-- `cargo clippy --all-targets -- -D warnings`: pass/fail
-- `cargo test --all-targets`: pass/fail
-- Goal symbol scan: zero/non-zero
-
-### Residual matches
-- 无；或列出每个无法删除的命中及原因
-
-### Out-of-scope changes
-- 无
+```text
+test(plan): cover artifact transfer across context windows
 ```
 
-如果存在任何非 Goal 改动，必须明确列出并说明其为何是 Goal 删除所必需；否则任务不视为完成。
+修改所有 Rust/TypeScript tests（含 session.test.ts）和 protocol fixture。
+
+### Commit 7
+
+```text
+chore(plan): remove lifecycle symbols and dead code
+```
+
+执行全文清理、格式化、clippy 和完整测试。
+
+Commit 1-3 在 TypeScript 侧互相依赖（删除 lifecycle 字段会立即破坏 `main.ts` 的调用点），不强制每个 commit 独立编译，可按需合并；只保证最终 PR 整体可编译、格式化与测试通过，且任何中间状态都不提交 Rust/TypeScript wire shape 不一致的组合。
 
 ---
 
-## 21. 一句话执行准则
+## 16. 手工端到端验收
 
-> 删除 Goal，而不是重建 Goal；同步删除它在 Host、协议、Rust、权限、worktree、UI、持久化和测试中的全部痕迹，同时保持现有 coding-agent 非 Goal 能力不变。
+### 场景 A：普通 Plan
+
+1. 启动 Nabla。
+2. 输入 `/plan`。
+3. 确认 composer 和状态栏显示 Plan mode。
+4. 输入规划请求。
+5. 模型调用 `submit_plan`。
+6. Plan review 显示恰好三个选项。
+
+### 场景 B：Execute
+
+1. 选择 Execute。
+2. Plan mode 退出。
+3. 当前 session 启动普通实施 turn。
+4. Plan artifact 不出现 executing/completed 状态。
+5. turn 失败或取消后 artifact 不变化。
+6. 再次 `/plan` 可以打开同一 artifact review。
+
+### 场景 C：Fresh execute
+
+1. 选择 Fresh execute。
+2. 创建新 session。
+3. 新 session 能找到同一个 Plan id/revision。
+4. 新 session 不包含完整 planning transcript。
+5. 实施模型能够仅根据 handoff + Plan 理解目标并开始工作。
+6. 原 session artifact 不变化。
+
+### 场景 D：低剩余 context
+
+1. 将源 session 推到较低剩余 context。
+2. 进入 Plan mode。
+3. 确认模型 prompt 中包含正确 context remaining。
+4. 提交 Plan。
+5. 选择 Execute，确认能启动并在必要时 compaction。
+6. compaction 后模型仍能获得 Plan checkpoint。
+
+### 场景 E：较小目标 context window
+
+1. 在源模型 context window 较小（或 Plan 超限）时执行 Fresh execute。
+2. 正常大小 Plan 成功传递。
+3. 超大 Plan 被明确拒绝。
+4. 不发生静默截断。
+5. 返回 Plan mode 后缩短 Plan，可以重新执行。
+
+### 场景 F：Close 和修订
+
+1. 提交 Plan。
+2. 选择 Close。
+3. 保持 Plan mode。
+4. 继续输入修订意见。
+5. 再次 `submit_plan`，id 保持、revision 增加。
+6. 新 revision review 正常打开。
+
+---
+
+## 17. 完成定义
+
+本次改造只有在以下条件全部满足时完成：
+
+```text
+Plan = immutable revisioned artifact
+Plan mode = read-only planning mode
+Execute = normal turn in current session
+Fresh execute = normal turn in new session with self-contained handoff
+Close = keep artifact and remain in Plan mode
+```
+
+并且仓库中不存在：
+
+```text
+Plan-specific submitted/executing/completed 状态或逻辑
+Plan execution recovery
+Plan completion on agent_settled
+Plan execution error rollback
+Plan-specific execution custom message
+/plan status
+/plan exit
+/plan run current
+/plan run fresh
+```
+
+最终核心数据流：
+
+```text
+/plan [prompt]
+  -> Plan mode with context remaining in system prompt
+  -> submit_plan(PlanArtifact with handoffMarkdown)
+  -> [Execute | Fresh execute | Close]
+  -> ordinary Agent Turn or no execution
+```

@@ -128,6 +128,7 @@ function isPlanModeEntry(value: unknown): value is PlanModeEntry {
 export function planImplementationPrompt(artifact: PlanArtifact): string {
   return [
     `Execute Nabla Plan ${artifact.id} revision ${artifact.revision} as a normal agent turn.`,
+    `Nabla plan artifact marker: ${planRevisionMarker(artifact.id, artifact.revision)}`,
     "The plan below is the authoritative implementation request.",
     "Implement it completely, run proportionate verification, and report the outcome.",
     "",
@@ -147,6 +148,10 @@ export function planImplementationPrompt(artifact: PlanArtifact): string {
     "## Test plan",
     ...artifact.testPlan.map((item) => `- ${item}`),
   ].join("\n");
+}
+
+export function planRevisionMarker(id: string, revision: number): string {
+  return `nabla-plan-artifact:${id}:${revision}`;
 }
 
 export function isPlanArtifact(value: unknown): value is PlanArtifact {

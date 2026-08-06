@@ -105,11 +105,15 @@ impl SceneBuilder {
                 panel_height: panel_request.as_ref().map(|panel| panel.height),
             },
         );
-        // Keep one owned blank row between transcript/panel output and the
-        // composer without letting it enter native scrollback.
+        // Keep one owned blank row between transcript output and the composer
+        // without letting it enter native scrollback. A panel consumes that
+        // row so it sits flush against the composer without moving the input.
         if layout.composer.height > 1 {
             layout.composer.y = layout.composer.y.saturating_add(1);
             layout.composer.height = layout.composer.height.saturating_sub(1);
+            if let Some(panel) = layout.panel.as_mut() {
+                panel.y = panel.y.saturating_add(1);
+            }
         }
 
         let mut canvas = Canvas::new(ui.revision, size, layout);
@@ -3127,5 +3131,40 @@ mod tests {
 
         assert!(text.contains("Current context remaining: unknown"));
         assert_eq!(panel.selected_row, Some(3));
+    }
+
+    #[test]
+    fn open_panel_sits_flush_against_the_composer() {
+        let size = super::super::types::TerminalSize::new(48, 14);
+        let mut store = UiStore::new(size);
+        let baseline_domain = state();
+        store.synchronize(&baseline_domain);
+        let baseline = SceneBuilder.build(&baseline_domain, store.state(), SurfaceKind::Primary);
+
+        let mut domain = state();
+        domain.plan_review = Some(crate::state::PlanReviewState {
+            selected: 0,
+            submitting: false,
+        });
+        store.synchronize(&domain);
+
+        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+        let panel = frame.panel.expect("plan review panel");
+
+        assert_eq!(frame.main_layout.composer, baseline.main_layout.composer);
+        assert_eq!(frame.main_layout.composer.y, panel.area.bottom());
+        assert!(
+            panel
+                .rows
+                .last()
+                .expect("panel border")
+                .plain_text()
+                .starts_with('╰')
+        );
+        assert!(
+            frame.rows[usize::from(frame.main_layout.composer.y)]
+                .plain_text()
+                .starts_with('╭')
+        );
     }
 }
