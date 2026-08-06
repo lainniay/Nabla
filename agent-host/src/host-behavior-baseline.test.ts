@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
+import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -80,25 +80,49 @@ const HOST_EVENTS = [
   "workspace_state",
 ].sort();
 
-class FakeSocket extends EventEmitter {
-  destroyed = false;
-  readonly written: string[] = [];
+class TestClient {
+  private buffer = "";
+  private readonly socket: Socket;
+  readonly messages: JsonObject[] = [];
+  private readonly closedPromise: Promise<void>;
 
-  setEncoding(_encoding: string): void {}
-
-  write(chunk: string): boolean {
-    this.written.push(chunk);
-    return true;
+  constructor(socket: Socket) {
+    this.socket = socket;
+    this.socket.setEncoding("utf8");
+    this.socket.on("data", (chunk: string) => {
+      this.buffer += chunk;
+      while (true) {
+        const newline = this.buffer.indexOf("\n");
+        if (newline < 0) break;
+        const line = this.buffer.slice(0, newline);
+        this.buffer = this.buffer.slice(newline + 1);
+        if (!line) continue;
+        this.messages.push(JSON.parse(line) as JsonObject);
+      }
+    });
+    this.closedPromise = new Promise((resolve) => socket.once("close", resolve));
   }
 
-  destroy(): void {
-    if (this.destroyed) return;
-    this.destroyed = true;
-    this.emit("close");
+  write(data: string): void {
+    this.socket.write(data);
   }
 
-  feed(chunk: string): void {
-    this.emit("data", chunk);
+  close(): Promise<void> {
+    this.socket.destroy();
+    return this.closedPromise;
+  }
+
+  async waitFor(
+    predicate: (message: JsonObject) => boolean,
+    timeoutMs = 1_000,
+  ): Promise<JsonObject> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const match = this.messages.find(predicate);
+      if (match) return match;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("timed out waiting for message");
   }
 }
 
@@ -112,11 +136,11 @@ function tempSocketPath(): string {
 function createBridge(options: {
   modelRuntime?: ModelRuntime;
   planMode?: PlanModeController;
-  socketPath?: string;
-} = {}): { bridge: HostBridge; socket: FakeSocket } {
+} = {}): { bridge: HostBridge; socketPath: string } {
   const planMode = options.planMode ?? new PlanModeController();
+  const socketPath = tempSocketPath();
   const bridge = new HostBridge(
-    options.socketPath ?? tempSocketPath(),
+    socketPath,
     options.modelRuntime ?? ({} as ModelRuntime),
     planMode,
     new PlanStore(),
@@ -131,34 +155,51 @@ function createBridge(options: {
     } satisfies HarnessConfig,
     async () => undefined,
   );
-  return { bridge, socket: new FakeSocket() };
+  return { bridge, socketPath };
 }
 
-function accept(bridge: HostBridge, socket: FakeSocket): void {
-  (bridge as unknown as { accept(socket: FakeSocket): void }).accept(socket);
+async function openClient(socketPath: string): Promise<TestClient> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    socket.once("connect", () => resolve(new TestClient(socket)));
+    socket.once("error", reject);
+  });
 }
 
-function messages(socket: FakeSocket): JsonObject[] {
-  const parsed: JsonObject[] = [];
-  for (const chunk of socket.written) {
-    for (const line of chunk.split("\n")) {
-      if (!line) continue;
-      const value = JSON.parse(line) as unknown;
-      if (isJsonObject(value)) parsed.push(value);
-    }
+async function withBridge(
+  options: {
+    modelRuntime?: ModelRuntime;
+    planMode?: PlanModeController;
+  },
+  run: (bridge: HostBridge, client: TestClient) => Promise<void>,
+): Promise<void> {
+  const planMode = options.planMode ?? new PlanModeController();
+  if (!options.planMode) planMode.attach(fakeRuntime(true));
+  const { bridge, socketPath } = createBridge({ ...options, planMode });
+  (bridge as unknown as { worktrees: unknown }).worktrees = {
+    listRecoverable: async () => ({ records: [], warnings: [] }),
+    pruneTerminalArtifacts: async () => undefined,
+  };
+  await bridge.listen();
+  const client = await openClient(socketPath);
+  try {
+    await run(bridge, client);
+  } finally {
+    await client.close();
+    await bridge.close();
   }
-  return parsed;
 }
 
-function response(socket: FakeSocket, id: string): JsonObject {
-  const message = messages(socket).find(
+function response(client: TestClient, id: string): Promise<JsonObject> {
+  return client.waitFor(
     (message) => message.id === id && message.type === "response",
   );
-  assert.ok(message, `missing response for ${id}`);
-  return message;
 }
 
-function fakeRuntime(isIdle: boolean, cwd = join(tmpdir(), "nabla-baseline-cwd")): AgentSessionRuntime {
+function fakeRuntime(
+  isIdle: boolean,
+  cwd = join(tmpdir(), "nabla-baseline-cwd"),
+): AgentSessionRuntime {
   let activeTools: string[] = [];
   const session = {
     isIdle,
@@ -190,14 +231,34 @@ test("host command and event inventories are stable", () => {
   const events = [...new Set(
     source
       .split(";")
-      .filter((statement) => /this\.send/u.test(statement))
+      .filter((statement) =>
+        /this\.send|this\.control\.respond/u.test(statement),
+      )
       .flatMap((statement) =>
         [...statement.matchAll(/type: "([a-z0-9_]+)"/gu)].map(
           (match) => match[1],
         ),
       ),
   )].sort();
-  assert.deepEqual(events, HOST_EVENTS);
+  const transportSource = [
+    "control-connection.ts",
+    "control-server.ts",
+  ]
+    .map((file) =>
+      readFileSync(new URL(`./transport/${file}`, import.meta.url), "utf8"),
+    )
+    .join("\n");
+  const transportEvents = [
+    ...new Set(
+      [...transportSource.matchAll(/type: "([a-z0-9_]+)"/gu)].map(
+        (match) => match[1],
+      ),
+    ),
+  ];
+  assert.deepEqual(
+    [...new Set([...events, ...transportEvents])].sort(),
+    HOST_EVENTS,
+  );
 
   const approvalSource = readFileSync(
     new URL("./approval.ts", import.meta.url),
@@ -207,29 +268,34 @@ test("host command and event inventories are stable", () => {
 });
 
 test("unknown command returns a failure response instead of crashing", async () => {
-  const { bridge, socket } = createBridge();
-  accept(bridge, socket);
-  socket.feed('{"id":"r1","type":"no_such_command"}\n');
-  await tick();
-  const message = response(socket, "r1");
-  assert.equal(message.command, "no_such_command");
-  assert.equal(message.success, false);
-  assert.equal(message.error, "Unknown host command");
+  await withBridge({}, async (_bridge, client) => {
+    client.write('{"id":"r1","type":"no_such_command"}\n');
+    const message = await response(client, "r1");
+    assert.equal(message.command, "no_such_command");
+    assert.equal(message.success, false);
+    assert.equal(message.error, "Unknown host command");
+  });
 });
 
 test("invalid JSON and non-object JSON return protocol errors", async () => {
-  const { bridge, socket } = createBridge();
-  accept(bridge, socket);
-  socket.feed("not json\n");
-  await tick();
-  assert.equal(messages(socket)[0]?.type, "host_protocol_error");
+  await withBridge({}, async (_bridge, client) => {
+    client.write("not json\n");
+    const parseError = await client.waitFor(
+      (m) => m.type === "host_protocol_error",
+    );
+    assert.ok(String(parseError.error).length > 0);
 
-  socket.feed("[1,2]\n");
-  await tick();
-  const last = messages(socket).at(-1);
-  assert.equal(last?.type, "response");
-  assert.equal(last?.command, "unknown");
-  assert.equal(last?.success, false);
+    client.write("[1,2]\n");
+    const requestError = await client.waitFor(
+      (m) =>
+        m.type === "host_protocol_error" &&
+        String(m.error).includes("must be a JSON object"),
+    );
+    assert.ok(String(requestError.error).includes("Host request"));
+
+    client.write('{"id":"r2","type":"no_such_command"}\n');
+    assert.equal((await response(client, "r2")).success, false);
+  });
 });
 
 test("connection close cancels the active authentication flow", async () => {
@@ -256,95 +322,92 @@ test("connection close cancels the active authentication flow", async () => {
       return new Promise<never>(() => {});
     },
   } as unknown as ModelRuntime;
-  const { bridge, socket } = createBridge({ modelRuntime });
-  accept(bridge, socket);
-  socket.feed(
-    '{"id":"a1","type":"auth_login","flowId":"flow-1","providerId":"fake","authType":"api_key"}\n',
-  );
-  await started;
-  const prompt = interaction.prompt({ type: "text", message: "Enter key" } as never);
-  await tick();
-  assert.ok(
-    socket.written.some((chunk) => chunk.includes('"auth_prompt"')),
-    "auth prompt was announced",
-  );
-  socket.destroy();
-  await assert.rejects(prompt, /Login cancelled/u);
+  await withBridge({ modelRuntime }, async (_bridge, client) => {
+    client.write(
+      '{"id":"a1","type":"auth_login","flowId":"flow-1","providerId":"fake","authType":"api_key"}\n',
+    );
+    await started;
+    const prompt = interaction.prompt({ type: "text", message: "Enter key" } as never);
+    await client.waitFor((m) => m.type === "auth_prompt");
+    const promptRejected = assert.rejects(prompt, /Login cancelled/u);
+    await client.close();
+    await promptRejected;
+  });
 });
 
 test("connection close denies ordinary approvals and cancels questions", async () => {
-  const { bridge, socket } = createBridge();
-  accept(bridge, socket);
-  const queues = bridge as unknown as {
-    approvals: ApprovalQueue;
-    questions: QuestionQueue;
-  };
-  const approval = queues.approvals.request(
-    {
-      requestId: "request-1",
-      toolCallId: "tool-1",
-      sessionId: "session-1",
-      workspaceId: "workspace-1",
-      summary: "Test approval",
-      risk: "normal",
-      intentDigest: "digest",
-      availableDecisions: ["allow_once", "deny"],
-      toolName: "bash",
-      input: { command: "echo hi" },
-    } satisfies ApprovalRequest,
-    undefined,
-    () => {},
-  );
-  const question = queues.questions.request(
-    [
+  await withBridge({}, async (bridge, client) => {
+    const queues = bridge as unknown as {
+      approvals: ApprovalQueue;
+      questions: QuestionQueue;
+    };
+    const approval = queues.approvals.request(
       {
-        id: "q1",
-        prompt: "Continue?",
-        options: [
-          { id: "yes", label: "Yes" },
-          { id: "no", label: "No" },
-        ],
-      },
-    ] satisfies PlanQuestion[],
-    undefined,
-    () => {},
-    () => {},
-  );
-  socket.destroy();
-  assert.equal(await approval, "deny");
-  await assert.rejects(question, /disconnected/u);
+        requestId: "request-1",
+        toolCallId: "tool-1",
+        sessionId: "session-1",
+        workspaceId: "workspace-1",
+        summary: "Test approval",
+        risk: "normal",
+        intentDigest: "digest",
+        availableDecisions: ["allow_once", "deny"],
+        toolName: "bash",
+        input: { command: "echo hi" },
+      } satisfies ApprovalRequest,
+      undefined,
+      () => {},
+    );
+    const question = queues.questions.request(
+      [
+        {
+          id: "q1",
+          prompt: "Continue?",
+          options: [
+            { id: "yes", label: "Yes" },
+            { id: "no", label: "No" },
+          ],
+        },
+      ] satisfies PlanQuestion[],
+      undefined,
+      () => {},
+      () => {},
+    );
+    await client.close();
+    assert.equal(await approval, "deny");
+    await assert.rejects(question, /disconnected/u);
+  });
 });
 
 test("connection close does not cancel running subagents", async () => {
-  const { bridge, socket } = createBridge();
-  accept(bridge, socket);
-  const controller = new AbortController();
-  const subagents = (
-    bridge as unknown as { subagents: Map<string, { controller: AbortController }> }
-  ).subagents;
-  subagents.set("agent-1", { controller });
-  socket.destroy();
-  assert.equal(controller.signal.aborted, false);
-  assert.equal(subagents.has("agent-1"), true);
+  await withBridge({}, async (bridge, client) => {
+    const controller = new AbortController();
+    const subagents = (
+      bridge as unknown as {
+        subagents: Map<string, { controller: AbortController }>;
+      }
+    ).subagents;
+    subagents.set("agent-1", { controller });
+    await client.close();
+    assert.equal(controller.signal.aborted, false);
+    assert.equal(subagents.has("agent-1"), true);
+  });
 });
 
 test("session new/resume are rejected while the agent is running", async () => {
   const planMode = new PlanModeController();
   planMode.attach(fakeRuntime(false));
-  const { bridge, socket } = createBridge({ planMode });
-  accept(bridge, socket);
-  socket.feed('{"id":"s1","type":"session_new"}\n');
-  await tick();
-  assert.equal(
-    response(socket, "s1").error,
-    "Cannot create a session while the agent is running",
-  );
-  socket.feed('{"id":"s2","type":"session_resume","sessionPath":"/x"}\n');
-  await tick();
-  assert.equal(
-    response(socket, "s2").error,
-    "Cannot resume a session while the agent is running",
-  );
+  await withBridge({ planMode }, async (_bridge, client) => {
+    client.write('{"id":"s1","type":"session_new"}\n');
+    assert.equal(
+      (await response(client, "s1")).error,
+      "Cannot create a session while the agent is running",
+    );
+    client.write('{"id":"s2","type":"session_resume","sessionPath":"/x"}\n');
+    assert.equal(
+      (await response(client, "s2")).error,
+      "Cannot resume a session while the agent is running",
+    );
+  });
 });
 
 test("worktree recovery completes before the control socket listens", async () => {
@@ -379,10 +442,10 @@ test("worktree recovery completes before the control socket listens", async () =
 test("plan_execute returns a failure response when no plan is submitted", async () => {
   const planMode = new PlanModeController();
   planMode.attach(fakeRuntime(true));
-  const { bridge, socket } = createBridge({ planMode });
-  accept(bridge, socket);
-  socket.feed('{"id":"p1","type":"plan_execute","context":"current"}\n');
-  await tick();
-  assert.equal(response(socket, "p1").success, false);
-  assert.equal(response(socket, "p1").error, "No Plan is submitted");
+  await withBridge({ planMode }, async (_bridge, client) => {
+    client.write('{"id":"p1","type":"plan_execute","context":"current"}\n');
+    const message = await response(client, "p1");
+    assert.equal(message.success, false);
+    assert.equal(message.error, "No Plan is submitted");
+  });
 });

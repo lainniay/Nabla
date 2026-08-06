@@ -1,9 +1,7 @@
-import { chmodSync, existsSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { createServer, type Socket } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AsyncLocalStorage } from "node:async_hooks";
 
 import {
   type AgentSession,
@@ -120,6 +118,8 @@ import {
   type OutboundHostEvent,
 } from "./protocol/host-event-publisher.ts";
 import { HostDiagnostics } from "./diagnostics/host-diagnostics.ts";
+import { ControlServer } from "./transport/control-server.ts";
+import type { OperationContext } from "./app/operation-scope.ts";
 import {
   WorktreeManager,
   type WorktreeRecoveryState,
@@ -265,8 +265,8 @@ export class PlanModeController {
 }
 
 export class HostBridge {
-  private socket?: Socket;
   private activeFlow?: ActiveFlow;
+  private readonly control: ControlServer;
   private readonly events: HostEventPublisher;
   private readonly diagnostics = new HostDiagnostics();
   private readonly approvals = new ApprovalQueue();
@@ -285,8 +285,6 @@ export class HostBridge {
   private readonly shellPermissionAdapter = new ShellAdapter();
   private readonly questions = new QuestionQueue();
   private readonly plans: PlanStore;
-  private readonly server;
-  private readonly socketPath: string;
   private readonly modelRuntime: ModelRuntime;
   private readonly planMode: PlanModeController;
   private readonly contextBudget: ContextBudgetManager;
@@ -306,12 +304,6 @@ export class HostBridge {
   private subagentSequence = 0;
   private writeSubagentTail: Promise<unknown> = Promise.resolve();
   private readonly commandLanes = new CommandLanes();
-  private readonly requestSockets = new Map<string, Socket>();
-  private readonly requestContext = new AsyncLocalStorage<{
-    id?: string;
-    socket: Socket;
-  }>();
-  private connectionGeneration = 0;
 
   constructor(
     socketPath: string,
@@ -322,7 +314,6 @@ export class HostBridge {
     config: HarnessConfig,
     afterLogin: (providerId: string) => Promise<unknown>,
   ) {
-    this.socketPath = socketPath;
     this.modelRuntime = modelRuntime;
     this.planMode = planMode;
     this.plans = plans;
@@ -331,6 +322,22 @@ export class HostBridge {
     this.afterLogin = afterLogin;
     this.events = new HostEventPublisher((event) => this.writeEvent(event));
     this.events.setScopeIdProvider(() => this.tryCurrentScopeId());
+    this.control = new ControlServer(
+      socketPath,
+      this,
+      {
+        onConnectionReplaced: () => {
+          this.cancelActiveFlow("Host control client replaced");
+          this.approvals.denyAll();
+          this.questions.cancelAll("Host control client replaced");
+        },
+        onConnectionClosed: () => {
+          this.cancelActiveFlow("Authentication client disconnected");
+          this.approvals.denyAll();
+          this.questions.cancelAll("Host control client disconnected");
+        },
+      },
+    );
     this.permissionPolicies.setBuiltin(
       ["ask_user", "submit_plan"].map(
         (tool): PermissionRule => ({
@@ -341,7 +348,6 @@ export class HostBridge {
         }),
       ),
     );
-    this.server = createServer((socket) => this.accept(socket));
   }
 
   extension(): InlineExtension {
@@ -571,16 +577,8 @@ export class HostBridge {
   }
 
   async listen(): Promise<void> {
-    rmSync(this.socketPath, { force: true });
     await this.recoverWorktrees();
-    await new Promise<void>((resolve, reject) => {
-      this.server.once("error", reject);
-      this.server.listen(this.socketPath, () => {
-        this.server.off("error", reject);
-        chmodSync(this.socketPath, 0o600);
-        resolve();
-      });
-    });
+    await this.control.listen();
   }
 
   async close(): Promise<void> {
@@ -594,44 +592,7 @@ export class HostBridge {
         subagent.session ? [subagent.session.abort()] : [],
       ),
     );
-    this.socket?.destroy();
-    this.requestSockets.clear();
-    await new Promise<void>((resolve) => this.server.close(() => resolve()));
-    rmSync(this.socketPath, { force: true });
-  }
-
-  private accept(socket: Socket): void {
-    const generation = ++this.connectionGeneration;
-    if (this.socket) {
-      this.cancelActiveFlow("Host control client replaced");
-      this.approvals.denyAll();
-      this.questions.cancelAll("Host control client replaced");
-      this.forgetSocketRequests(this.socket);
-    }
-    this.socket?.destroy();
-    this.socket = socket;
-    socket.setEncoding("utf8");
-
-    let buffered = "";
-    socket.on("data", (chunk: string) => {
-      buffered += chunk;
-      while (true) {
-        const newline = buffered.indexOf("\n");
-        if (newline < 0) break;
-        const line = buffered.slice(0, newline).replace(/\r$/u, "");
-        buffered = buffered.slice(newline + 1);
-        if (line.length > 0) this.dispatchLine(line, socket, generation);
-      }
-    });
-    socket.on("close", () => {
-      this.forgetSocketRequests(socket);
-      if (this.socket !== socket) return;
-      this.connectionGeneration += 1;
-      this.socket = undefined;
-      this.cancelActiveFlow("Authentication client disconnected");
-      this.approvals.denyAll();
-      this.questions.cancelAll("Host control client disconnected");
-    });
+    await this.control.close();
   }
 
   private send(message: JsonObject): void {
@@ -639,23 +600,10 @@ export class HostBridge {
   }
 
   private writeEvent(event: OutboundHostEvent): void {
-    if (!this.socket || this.socket.destroyed) return;
-    this.socket.write(`${JSON.stringify(event)}\n`);
-  }
-
-  private sendTo(socket: Socket, message: JsonObject): void {
-    if (socket.destroyed) return;
-    socket.write(`${JSON.stringify(message)}\n`);
-  }
-
-  private forgetSocketRequests(socket: Socket): void {
-    for (const [id, target] of this.requestSockets) {
-      if (target === socket) this.requestSockets.delete(id);
-    }
+    this.control.send(event);
   }
 
   private sendContextBudget(snapshot: ContextSnapshot): void {
-    if (!this.socket || this.socket.destroyed) return;
     const policyWarning = this.contextBudget.takeWarning();
     this.send({
       type: "context_budget",
@@ -671,16 +619,7 @@ export class HostBridge {
     data?: unknown,
     error?: string,
   ): void {
-    const context = this.requestContext.getStore();
-    const target =
-      context && context.id === id
-        ? context.socket
-        : id
-          ? this.requestSockets.get(id)
-          : this.socket;
-    if (id) this.requestSockets.delete(id);
-    if (!target) return;
-    this.sendTo(target, {
+    this.control.respond(id, {
       id,
       type: "response",
       command,
@@ -690,40 +629,19 @@ export class HostBridge {
     });
   }
 
-  private dispatchLine(line: string, socket: Socket, generation: number): void {
-    let request: JsonObject;
-    try {
-      request = JSON.parse(line) as JsonObject;
-    } catch (error) {
-      this.sendTo(socket, {
-        type: "host_protocol_error",
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return;
-    }
-    const id = typeof request.id === "string" ? request.id : undefined;
-    if (id) this.requestSockets.set(id, socket);
+  async handleRequest(
+    context: OperationContext,
+    request: JsonObject,
+  ): Promise<void> {
+    if (!this.control.isCurrent(context)) return;
     const lane = commandLane(request);
-    void this.commandLanes
-      .run(lane, async () => {
-        if (generation !== this.connectionGeneration || socket.destroyed) {
-          if (id) this.requestSockets.delete(id);
-          return;
-        }
-        await this.requestContext.run({ id, socket }, () =>
-          this.handleRequest(request),
-        );
-      })
-      .catch((error) => {
-        if (id) this.requestSockets.delete(id);
-        this.sendTo(socket, {
-          type: "host_protocol_error",
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
+    await this.commandLanes.run(lane, async () => {
+      if (!this.control.isCurrent(context)) return;
+      await this.handleRequestInner(request);
+    });
   }
 
-  private async handleRequest(request: JsonObject): Promise<void> {
+  private async handleRequestInner(request: JsonObject): Promise<void> {
     const id = typeof request.id === "string" ? request.id : undefined;
     const command = typeof request.type === "string" ? request.type : "";
     try {
@@ -1029,7 +947,7 @@ export class HostBridge {
 
   activateWorkspace(cwd: string, session?: AgentSession): void {
     this.config = loadHarnessConfig(cwd);
-    if (session && this.socket && !this.socket.destroyed) {
+    if (session && this.control.hasConnection()) {
       this.publishWorkspaceState(session);
     }
   }
@@ -2762,7 +2680,7 @@ export class HostBridge {
       intent,
       identity,
       async ({ intent: requestedIntent, proposals }, approvalSignal) => {
-        if (!this.socket || this.socket.destroyed) return "deny";
+        if (!this.control.hasConnection()) return "deny";
         const sessionGrant = proposals.find(
           (proposal) => proposal.scope === "session",
         );
