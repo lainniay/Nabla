@@ -1,6 +1,5 @@
-import type { AgentSessionRuntime } from "@earendil-works/pi-coding-agent";
-
 import type { HostEvent } from "../protocol/contracts.ts";
+export type { RuntimeAccess } from "../runtime/runtime-access.ts";
 
 export interface HostEventPublisher {
   publish(
@@ -10,12 +9,6 @@ export interface HostEventPublisher {
       delivery?: "reliable" | "coalescible";
     },
   ): void;
-}
-
-export interface RuntimeAccess {
-  current(): AgentSessionRuntime;
-  requireIdle(operation: string): AgentSessionRuntime;
-  sessionGeneration(): number;
 }
 
 export interface HostDiagnosticsPort {

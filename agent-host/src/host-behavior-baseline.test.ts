@@ -13,10 +13,12 @@ import type {
 import { ApprovalQueue, type ApprovalRequest } from "./approval.ts";
 import { ContextBudgetManager } from "./context-manager.ts";
 import type { HarnessConfig } from "./harness.ts";
-import { HostBridge, PlanModeController } from "./main.ts";
+import { HostBridge } from "./legacy-host-bridge.ts";
 import { PlanStore } from "./plan.ts";
 import { QuestionQueue, type PlanQuestion } from "./questions.ts";
 import { isJsonObject, type JsonObject } from "./protocol/validation.ts";
+import { PlanModeService } from "./runtime/plan-mode-service.ts";
+import { RuntimeSupervisor } from "./runtime/runtime-supervisor.ts";
 
 const HOST_COMMANDS = [
   "agents_reload",
@@ -135,14 +137,24 @@ function tempSocketPath(): string {
 
 function createBridge(options: {
   modelRuntime?: ModelRuntime;
-  planMode?: PlanModeController;
+  planMode?: PlanModeService;
+  runtime?: RuntimeSupervisor;
 } = {}): { bridge: HostBridge; socketPath: string } {
-  const planMode = options.planMode ?? new PlanModeController();
+  const planMode = options.planMode ?? new PlanModeService();
+  const runtime =
+    options.runtime ??
+    new RuntimeSupervisor(
+      async () => {
+        throw new Error("factory should not run");
+      },
+      fakeRuntime(true),
+    );
   const socketPath = tempSocketPath();
   const bridge = new HostBridge(
     socketPath,
     options.modelRuntime ?? ({} as ModelRuntime),
     planMode,
+    runtime,
     new PlanStore(),
     new ContextBudgetManager(),
     {
@@ -169,13 +181,12 @@ async function openClient(socketPath: string): Promise<TestClient> {
 async function withBridge(
   options: {
     modelRuntime?: ModelRuntime;
-    planMode?: PlanModeController;
+    planMode?: PlanModeService;
+    runtime?: RuntimeSupervisor;
   },
   run: (bridge: HostBridge, client: TestClient) => Promise<void>,
 ): Promise<void> {
-  const planMode = options.planMode ?? new PlanModeController();
-  if (!options.planMode) planMode.attach(fakeRuntime(true));
-  const { bridge, socketPath } = createBridge({ ...options, planMode });
+  const { bridge, socketPath } = createBridge(options);
   (bridge as unknown as { worktrees: unknown }).worktrees = {
     listRecoverable: async () => ({ records: [], warnings: [] }),
     pruneTerminalArtifacts: async () => undefined,
@@ -219,7 +230,10 @@ function fakeRuntime(
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 test("host command and event inventories are stable", () => {
-  const source = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+  const source = readFileSync(
+    new URL("./legacy-host-bridge.ts", import.meta.url),
+    "utf8",
+  );
   const commandSource = [
     "auth-commands.ts",
     "bootstrap-commands.ts",
@@ -411,9 +425,14 @@ test("connection close does not cancel running subagents", async () => {
 });
 
 test("session new/resume are rejected while the agent is running", async () => {
-  const planMode = new PlanModeController();
-  planMode.attach(fakeRuntime(false));
-  await withBridge({ planMode }, async (_bridge, client) => {
+  const planMode = new PlanModeService();
+  const runtime = new RuntimeSupervisor(
+    async () => {
+      throw new Error("factory should not run");
+    },
+    fakeRuntime(false),
+  );
+  await withBridge({ planMode, runtime }, async (_bridge, client) => {
     client.write('{"id":"s1","type":"session_new"}\n');
     assert.equal(
       (await response(client, "s1")).error,
@@ -428,10 +447,15 @@ test("session new/resume are rejected while the agent is running", async () => {
 });
 
 test("worktree recovery completes before the control socket listens", async () => {
-  const planMode = new PlanModeController();
+  const planMode = new PlanModeService();
   const cwd = join(tmpdir(), "nabla-baseline-recovery");
-  planMode.attach(fakeRuntime(true, cwd));
-  const { bridge } = createBridge({ planMode });
+  const runtime = new RuntimeSupervisor(
+    async () => {
+      throw new Error("factory should not run");
+    },
+    fakeRuntime(true, cwd),
+  );
+  const { bridge } = createBridge({ planMode, runtime });
   const order: string[] = [];
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
@@ -457,9 +481,14 @@ test("worktree recovery completes before the control socket listens", async () =
 });
 
 test("plan_execute returns a failure response when no plan is submitted", async () => {
-  const planMode = new PlanModeController();
-  planMode.attach(fakeRuntime(true));
-  await withBridge({ planMode }, async (_bridge, client) => {
+  const planMode = new PlanModeService();
+  const runtime = new RuntimeSupervisor(
+    async () => {
+      throw new Error("factory should not run");
+    },
+    fakeRuntime(true),
+  );
+  await withBridge({ planMode, runtime }, async (_bridge, client) => {
     client.write('{"id":"p1","type":"plan_execute","context":"current"}\n');
     const message = await response(client, "p1");
     assert.equal(message.success, false);
