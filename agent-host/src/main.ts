@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { createServer, type Socket } from "node:net";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import {
@@ -254,7 +255,7 @@ interface SubagentHandle {
   completion: Promise<JsonObject>;
 }
 
-class PlanModeController {
+export class PlanModeController {
   private active = false;
   private runtime?: AgentSessionRuntime;
 
@@ -307,7 +308,7 @@ class PlanModeController {
   }
 }
 
-class HostBridge {
+export class HostBridge {
   private socket?: Socket;
   private activeFlow?: ActiveFlow;
   private readonly approvals = new ApprovalQueue();
@@ -3117,129 +3118,135 @@ function expandHomePath(value: string): string {
   return value;
 }
 
-const socketPath = process.env.NABLA_CONTROL_SOCKET;
-if (!socketPath) throw new Error("NABLA_CONTROL_SOCKET is required");
+const isMain =
+  typeof process.argv[1] === "string" &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
-const cwd = process.cwd();
-const agentDir = getAgentDir();
-const modelRuntime = await ModelRuntime.create();
-const planMode = new PlanModeController();
-const plans = new PlanStore();
-const contextBudget = new ContextBudgetManager();
-const startupSettings = SettingsManager.create(cwd, agentDir);
-const startupConfig = loadHarnessConfig(cwd);
-startupSettings.setProjectTrusted(workspaceIsTrusted(cwd, startupConfig));
-const configuredSessionDir =
-  (process.env.PI_CODING_AGENT_SESSION_DIR
-    ? expandHomePath(process.env.PI_CODING_AGENT_SESSION_DIR)
-    : undefined) ?? startupSettings.getSessionDir();
-const startupSessionManager = createStartupSessionManager(
-  cwd,
-  configuredSessionDir,
-);
-let runtime: AgentSessionRuntime | undefined;
-const hostBridge = new HostBridge(
-  socketPath,
-  modelRuntime,
-  planMode,
-  plans,
-  contextBudget,
-  startupConfig,
-  async (providerId) => {
-    const currentRuntime = runtime;
-    if (!currentRuntime) return undefined;
-    try {
-      if (currentRuntime.session.model) return currentRuntime.session.model;
-
-      const available = await modelRuntime.getAvailable(providerId);
-      if (available.length === 0) return undefined;
-      const settings = currentRuntime.services.settingsManager;
-      const defaultModel =
-        settings.getDefaultProvider() === providerId
-          ? available.find((model) => model.id === settings.getDefaultModel())
-          : undefined;
-      const selectedModel = defaultModel ?? available[0];
-      await currentRuntime.session.setModel(selectedModel);
-      return selectedModel;
-    } catch {
-      // Authentication remains valid even if model selection needs to be done later.
-      return undefined;
-    }
-  },
-);
-
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({
-  cwd: runtimeCwd,
-  sessionManager,
-  sessionStartEvent,
-}) => {
-  const runtimeConfig = loadHarnessConfig(runtimeCwd);
-  const settingsManager = SettingsManager.create(runtimeCwd, agentDir);
-  settingsManager.setProjectTrusted(
-    workspaceIsTrusted(runtimeCwd, runtimeConfig),
+if (isMain) {
+  const socketPath = process.env.NABLA_CONTROL_SOCKET;
+  if (!socketPath) throw new Error("NABLA_CONTROL_SOCKET is required");
+  
+  const cwd = process.cwd();
+  const agentDir = getAgentDir();
+  const modelRuntime = await ModelRuntime.create();
+  const planMode = new PlanModeController();
+  const plans = new PlanStore();
+  const contextBudget = new ContextBudgetManager();
+  const startupSettings = SettingsManager.create(cwd, agentDir);
+  const startupConfig = loadHarnessConfig(cwd);
+  startupSettings.setProjectTrusted(workspaceIsTrusted(cwd, startupConfig));
+  const configuredSessionDir =
+    (process.env.PI_CODING_AGENT_SESSION_DIR
+      ? expandHomePath(process.env.PI_CODING_AGENT_SESSION_DIR)
+      : undefined) ?? startupSettings.getSessionDir();
+  const startupSessionManager = createStartupSessionManager(
+    cwd,
+    configuredSessionDir,
   );
-  const services = await createAgentSessionServices({
-    cwd: runtimeCwd,
-    agentDir,
+  let runtime: AgentSessionRuntime | undefined;
+  const hostBridge = new HostBridge(
+    socketPath,
     modelRuntime,
-    settingsManager,
-    resourceLoaderOptions: {
-      noThemes: true,
-      noContextFiles: false,
-      extensionFactories: [hostBridge.extension()],
-      extensionsOverride: (base) => ({
-        ...base,
-        extensions: base.extensions.filter(
-          (extension) =>
-            extension.resolvedPath.startsWith("<inline:") ||
-            loadHarnessConfig(runtimeCwd).allowedProjectExtensions.some(
-              (allowed) =>
-                extension.resolvedPath === resolve(runtimeCwd, allowed) ||
-                extension.resolvedPath === resolve(agentDir, allowed),
-            ),
-        ),
-      }),
-      agentsFilesOverride: (base) => ({
-        agentsFiles: filterContextFilesByTrust(
-          base.agentsFiles,
-          agentDir,
-          workspaceIsTrusted(
-            runtimeCwd,
-            loadHarnessConfig(runtimeCwd),
-          ),
-        ),
-      }),
+    planMode,
+    plans,
+    contextBudget,
+    startupConfig,
+    async (providerId) => {
+      const currentRuntime = runtime;
+      if (!currentRuntime) return undefined;
+      try {
+        if (currentRuntime.session.model) return currentRuntime.session.model;
+  
+        const available = await modelRuntime.getAvailable(providerId);
+        if (available.length === 0) return undefined;
+        const settings = currentRuntime.services.settingsManager;
+        const defaultModel =
+          settings.getDefaultProvider() === providerId
+            ? available.find((model) => model.id === settings.getDefaultModel())
+            : undefined;
+        const selectedModel = defaultModel ?? available[0];
+        await currentRuntime.session.setModel(selectedModel);
+        return selectedModel;
+      } catch {
+        // Authentication remains valid even if model selection needs to be done later.
+        return undefined;
+      }
     },
-  });
-  const result = await createAgentSessionFromServices({
-    services,
+  );
+  
+  const createRuntime: CreateAgentSessionRuntimeFactory = async ({
+    cwd: runtimeCwd,
     sessionManager,
     sessionStartEvent,
-  });
-  planMode.restore(
-    result.session,
-    restorePlanMode(result.session.sessionManager.getBranch()),
-  );
-  hostBridge.activateWorkspace(runtimeCwd, result.session);
-  return {
-    ...result,
-    services,
-    diagnostics: services.diagnostics,
+  }) => {
+    const runtimeConfig = loadHarnessConfig(runtimeCwd);
+    const settingsManager = SettingsManager.create(runtimeCwd, agentDir);
+    settingsManager.setProjectTrusted(
+      workspaceIsTrusted(runtimeCwd, runtimeConfig),
+    );
+    const services = await createAgentSessionServices({
+      cwd: runtimeCwd,
+      agentDir,
+      modelRuntime,
+      settingsManager,
+      resourceLoaderOptions: {
+        noThemes: true,
+        noContextFiles: false,
+        extensionFactories: [hostBridge.extension()],
+        extensionsOverride: (base) => ({
+          ...base,
+          extensions: base.extensions.filter(
+            (extension) =>
+              extension.resolvedPath.startsWith("<inline:") ||
+              loadHarnessConfig(runtimeCwd).allowedProjectExtensions.some(
+                (allowed) =>
+                  extension.resolvedPath === resolve(runtimeCwd, allowed) ||
+                  extension.resolvedPath === resolve(agentDir, allowed),
+              ),
+          ),
+        }),
+        agentsFilesOverride: (base) => ({
+          agentsFiles: filterContextFilesByTrust(
+            base.agentsFiles,
+            agentDir,
+            workspaceIsTrusted(
+              runtimeCwd,
+              loadHarnessConfig(runtimeCwd),
+            ),
+          ),
+        }),
+      },
+    });
+    const result = await createAgentSessionFromServices({
+      services,
+      sessionManager,
+      sessionStartEvent,
+    });
+    planMode.restore(
+      result.session,
+      restorePlanMode(result.session.sessionManager.getBranch()),
+    );
+    hostBridge.activateWorkspace(runtimeCwd, result.session);
+    return {
+      ...result,
+      services,
+      diagnostics: services.diagnostics,
+    };
   };
-};
-
-runtime = await createAgentSessionRuntime(createRuntime, {
-  cwd,
-  agentDir,
-  sessionManager: startupSessionManager,
-});
-planMode.attach(runtime);
-await hostBridge.listen();
-
-const shutdown = () => {
-  void hostBridge.close().finally(() => process.exit(0));
-};
-process.once("SIGINT", shutdown);
-process.once("SIGTERM", shutdown);
-
-await runRpcMode(runtime);
+  
+  runtime = await createAgentSessionRuntime(createRuntime, {
+    cwd,
+    agentDir,
+    sessionManager: startupSessionManager,
+  });
+  planMode.attach(runtime);
+  await hostBridge.listen();
+  
+  const shutdown = () => {
+    void hostBridge.close().finally(() => process.exit(0));
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  
+  await runRpcMode(runtime);
+}
