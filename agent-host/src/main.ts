@@ -1,6 +1,5 @@
 import { chmodSync, existsSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
 import { createServer, type Socket } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -83,24 +82,7 @@ import {
   type TreeFilterMode,
 } from "./session-navigation.ts";
 import { workspacePathError } from "./workspace.ts";
-import {
-  AppendAdapter,
-  CreateAdapter,
-  DeleteAdapter,
-  EditAdapter,
-  ListAdapter,
-  ReadAdapter,
-  RenameAdapter,
-  WriteAdapter,
-  type FileToolInput,
-} from "./permissions/adapters/filesystem.ts";
-import {
-  ShellAdapter,
-  type ShellInput,
-} from "./permissions/adapters/shell.ts";
-import { createIntent } from "./permissions/adapters/tool-adapter.ts";
-import { AgentAdapter } from "./permissions/adapters/agent.ts";
-import { McpAdapter } from "./permissions/adapters/mcp.ts";
+import { ShellAdapter } from "./permissions/adapters/shell.ts";
 import { JsonlPermissionAuditLog } from "./permissions/audit-log.ts";
 import { ApprovalBroker as PermissionApprovalBroker } from "./permissions/approvals/broker.ts";
 import { PermissionKernel } from "./permissions/kernel.ts";
@@ -109,17 +91,23 @@ import { ExecutionBroker } from "./permissions/execution/broker.ts";
 import { DirectRunner } from "./permissions/execution/direct-runner.ts";
 import type {
   ExecutionProfile,
-  PermissionIntent,
   PermissionRule,
   ToolContext,
 } from "./permissions/model.ts";
 import { mutatesManagedWorktree } from "./permissions/managed-worktree.ts";
 import { PolicyStore } from "./permissions/policy-store.ts";
-import { digestValue } from "./permissions/shell/digest.ts";
 import { resolveWorkspaceIdentity } from "./permissions/workspace-identity.ts";
 import { parseSubagentOutput } from "./protocol/subagent-output.ts";
 import { CommandLanes } from "./protocol/command-lanes.ts";
-import { isJsonObject, type JsonObject } from "./protocol/validation.ts";
+import {
+  enumField,
+  isJsonObject,
+  optionalNonNegativeIntegerField,
+  optionalStringField,
+  stringArrayField,
+  stringField,
+  type JsonObject,
+} from "./protocol/validation.ts";
 import type {
   ActiveAgentSnapshot,
   AgentsSnapshot,
@@ -128,12 +116,16 @@ import type {
 } from "./protocol/contracts.ts";
 import {
   WorktreeManager,
-  type IntegrationStatus,
-  type IsolationBackend,
-  type PreparedIsolation,
   type WorktreeRecoveryState,
   type WorktreeRecord,
 } from "./worktree.ts";
+import { expandHomePath } from "./runtime/path-utils.ts";
+import { agentToolResource, permissionIntentForTool } from "./features/permissions/tool-intent.ts";
+import type {
+  ActiveSubagent,
+  SubagentHandle,
+  SubagentOptions,
+} from "./features/subagents/subagent-types.ts";
 
 type AuthType = Parameters<ModelRuntime["login"]>[1];
 type AuthInteraction = Parameters<ModelRuntime["login"]>[2];
@@ -211,48 +203,6 @@ interface ActiveFlow {
   controller: AbortController;
   prompts: AuthPromptQueue;
   nextPromptId: number;
-}
-
-interface SubagentOptions {
-  task: string;
-  profile: string;
-  parentSignal?: AbortSignal;
-  direct?: boolean;
-  preparedIsolation?: PreparedIsolation;
-  forceAutoIntegrate?: boolean;
-  resolutionForAgentId?: string;
-  discardWorktreeChanges?: boolean;
-}
-
-interface ActiveSubagent {
-  id: string;
-  profile: string;
-  task: string;
-  direct: boolean;
-  planReadOnly: boolean;
-  lifecycle:
-    | "queued"
-    | "preparing_isolation"
-    | "running"
-    | "awaiting_integration"
-    | "resolving";
-  session?: AgentSession;
-  originSession: AgentSession;
-  originSessionId: string;
-  controller: AbortController;
-  startedAt: string;
-  turns: number;
-  maxTurns: number;
-  model: string;
-  isolationBackend: IsolationBackend;
-  integrationStatus: IntegrationStatus;
-  isolationWarning?: string;
-  worktree?: WorktreeRecord;
-}
-
-interface SubagentHandle {
-  agent: ActiveSubagent;
-  completion: Promise<JsonObject>;
 }
 
 export class PlanModeController {
@@ -2897,142 +2847,6 @@ function toolsForPlanMode(active: boolean): readonly string[] {
   return active ? PLAN_TOOLS : STANDARD_TOOLS;
 }
 
-function permissionIntentForTool(
-  context: ToolContext,
-  toolName: string,
-  input: unknown,
-  shellAdapter: ShellAdapter,
-): PermissionIntent {
-  const value = isJsonObject(input) ? input : {};
-  if (toolName === "delegate_task") {
-    return new AgentAdapter().normalize(context, {
-      action: "spawn",
-      ...(typeof value.profile === "string" ? { profile: value.profile } : {}),
-      payload: value,
-    });
-  }
-  if (toolName.startsWith("mcp__")) {
-    const [, server = "unknown", ...methodParts] = toolName.split("__");
-    return new McpAdapter().normalize(context, {
-      server,
-      method: methodParts.join("__") || toolName,
-      arguments: value,
-    });
-  }
-  if (toolName === "bash" && typeof value.command === "string") {
-    return shellAdapter.normalize(context, {
-      command: value.command,
-      ...(typeof value.cwd === "string" ? { cwd: value.cwd } : {}),
-      ...(isStringRecord(value.environment)
-        ? { environment: value.environment }
-        : {}),
-    } satisfies ShellInput);
-  }
-  if (typeof value.path === "string") {
-    const adapter = (() => {
-      switch (toolName) {
-        case "edit":
-        case "edit_file":
-          return EditAdapter;
-        case "write":
-        case "write_file":
-          return existsSync(resolve(context.cwd, value.path))
-            ? WriteAdapter
-            : CreateAdapter;
-        case "append":
-        case "append_file":
-          return AppendAdapter;
-        case "rename":
-        case "move":
-        case "move_file":
-          return RenameAdapter;
-        case "delete":
-        case "remove":
-        case "delete_file":
-          return DeleteAdapter;
-        case "ls":
-          return ListAdapter;
-        default:
-          return ReadAdapter;
-      }
-    })();
-    return adapter.normalize(context, value as FileToolInput);
-  }
-  const normalizedInput = isJsonObject(input) ? input : { value: input };
-  return createIntent(context, toolName, normalizedInput, [{
-    kind: "opaque_code",
-    runtime: `tool:${toolName}`,
-    digest: digestValue(normalizedInput),
-    reason: "tool input has no specialized capability adapter",
-  }]);
-}
-
-function isStringRecord(value: unknown): value is Record<string, string> {
-  return (
-    isJsonObject(value) &&
-    Object.values(value).every((item) => typeof item === "string")
-  );
-}
-
-function agentToolResource(
-  cwd: string,
-  path: string | undefined,
-  command: string | undefined,
-): string {
-  if (command) return command.trim().replace(/\s+/gu, " ");
-  if (!path) return "*";
-  return workspaceRelativePath(cwd, resolve(cwd, path));
-}
-
-function stringField(value: JsonObject, name: string): string {
-  const field = value[name];
-  if (typeof field !== "string" || field.length === 0) {
-    throw new Error(`Missing string field: ${name}`);
-  }
-  return field;
-}
-
-function optionalStringField(
-  value: JsonObject,
-  name: string,
-): string | undefined {
-  const field = value[name];
-  return typeof field === "string" ? field : undefined;
-}
-
-function optionalNonNegativeIntegerField(
-  value: JsonObject,
-  name: string,
-): number | undefined {
-  const field = value[name];
-  if (field === undefined) return undefined;
-  if (!Number.isInteger(field) || (field as number) < 0) {
-    throw new Error(`Invalid non-negative integer field: ${name}`);
-  }
-  return field as number;
-}
-
-function stringArrayField(value: JsonObject, name: string): string[] {
-  const field = value[name];
-  if (field === undefined) return [];
-  if (!Array.isArray(field) || !field.every((item) => typeof item === "string")) {
-    throw new Error(`Invalid string array field: ${name}`);
-  }
-  return field;
-}
-
-function enumField<const T extends readonly string[]>(
-  value: JsonObject,
-  name: string,
-  choices: T,
-): T[number] {
-  const field = stringField(value, name);
-  if (!choices.includes(field)) {
-    throw new Error(`Unsupported ${name}: ${field}`);
-  }
-  return field as T[number];
-}
-
 function commandLane(request: JsonObject): string | undefined {
   const command = typeof request.type === "string" ? request.type : "";
   if (
@@ -3110,12 +2924,6 @@ function lastAssistantText(messages: unknown[]): string {
     if (text) return text;
   }
   throw new Error("Subagent returned no assistant text");
-}
-
-function expandHomePath(value: string): string {
-  if (value === "~") return homedir();
-  if (value.startsWith("~/")) return resolve(homedir(), value.slice(2));
-  return value;
 }
 
 const isMain =
