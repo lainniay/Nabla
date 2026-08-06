@@ -12,7 +12,6 @@ import {
   ModelRuntime,
   SessionManager,
   SettingsManager,
-  copyToClipboard,
   createAgentSession,
   type ToolCallEvent,
   type ToolCallEventResult,
@@ -54,7 +53,6 @@ import {
   type PlanArtifact,
   type PlanContent,
   planImplementationPrompt,
-  restorePlanMode,
 } from "./plan.ts";
 import {
   executePlan as dispatchPlanExecution,
@@ -65,11 +63,7 @@ import {
   type QuestionAnswer,
 } from "./questions.ts";
 import {
-  SessionCatalog,
   type SessionBrowserSnapshot,
-  buildTreeSnapshot,
-  copyTextForEntry,
-  createStartupSessionManager,
   projectSessionHistory,
   TURN_METRICS_ENTRY_TYPE,
   type TurnMetrics,
@@ -139,6 +133,9 @@ import { ModelService } from "./features/models/model-service.ts";
 import { AuthService } from "./features/auth/auth-service.ts";
 import { WorkspaceService } from "./features/workspace/workspace-service.ts";
 import { BootstrapService } from "./features/bootstrap/bootstrap-service.ts";
+import { SessionService } from "./features/sessions/session-service.ts";
+import { SessionBrowserService } from "./features/sessions/session-browser-service.ts";
+import { TreeService } from "./features/sessions/tree-service.ts";
 import type {
   ActiveSubagent,
   SubagentHandle,
@@ -204,6 +201,9 @@ export class HostBridge implements LegacyHostOperations {
   private readonly auth: AuthService;
   private readonly workspace: WorkspaceService;
   private readonly bootstrap: BootstrapService;
+  private readonly sessionBrowser: SessionBrowserService;
+  private readonly sessionService: SessionService;
+  private readonly treeService: TreeService;
   private readonly events: HostEventPublisher;
   private readonly diagnostics = new HostDiagnostics();
   private readonly interactions = new InteractionBroker();
@@ -227,7 +227,6 @@ export class HostBridge implements LegacyHostOperations {
   private readonly runtime: RuntimeSupervisor;
   private readonly contextBudget: ContextBudgetManager;
   private readonly afterLogin: (providerId: string) => Promise<unknown>;
-  private readonly sessionCatalogs = new Map<string, SessionCatalog>();
   private readonly subagents = new Map<string, ActiveSubagent>();
   private readonly completedSubagents = new Map<
     string,
@@ -265,6 +264,25 @@ export class HostBridge implements LegacyHostOperations {
       config,
     );
     this.bootstrap = new BootstrapService();
+    this.sessionBrowser = new SessionBrowserService(
+      this.runtime,
+      (event) => this.send(event),
+    );
+    this.sessionService = new SessionService(
+      this.runtime,
+      this.planMode,
+      () => this.sessionBrowser.closeAll(),
+      () => this.sessionActivation(),
+    );
+    this.treeService = new TreeService(
+      this.runtime,
+      this.planMode,
+      this.plans,
+      this.contextBudget,
+      (event) => this.send(event),
+      () => this.sessionActivation(),
+      (snapshot) => this.contextSnapshot(snapshot),
+    );
     this.afterLogin = afterLogin;
     this.auth = new AuthService(
       this.modelRuntime,
@@ -298,6 +316,7 @@ export class HostBridge implements LegacyHostOperations {
         onConnectionClosed: () => {
           this.auth.cancel("Authentication client disconnected");
           this.interactions.cancelAll("Host control client disconnected");
+          this.sessionBrowser.closeAll();
         },
       },
     );
@@ -652,11 +671,7 @@ export class HostBridge implements LegacyHostOperations {
   }
 
   public clearQueue(): JsonObject {
-    const queue = this.runtime.current().session.clearQueue();
-    return {
-      ...queue,
-      restoredText: [...queue.steering, ...queue.followUp].join("\n\n"),
-    };
+    return this.sessionService.clearQueue();
   }
 
   public async listModels(): Promise<{
@@ -1802,29 +1817,8 @@ export class HostBridge implements LegacyHostOperations {
     this.interactions.replyQuestion(input.requestId, input.answers);
   }
 
-  private restoreActivePlan(sessionManager: SessionManager) {
-    return this.plans.restore(sessionManager.getBranch());
-  }
-
   public async openSessionBrowser(): Promise<SessionBrowserSnapshot> {
-    const runtime = this.runtime.current();
-    if (!runtime.session.isIdle) {
-      throw new Error("Cannot browse sessions while the agent is running");
-    }
-    const catalog = new SessionCatalog({
-      manager: runtime.session.sessionManager,
-      onProgress: (browserId, scope, loaded, total) =>
-        this.send({
-          type: "session_list_progress",
-          browserId,
-          scope,
-          loaded,
-          total,
-        }),
-    });
-    this.sessionCatalogs.set(catalog.browserId, catalog);
-    const snapshot = await catalog.query("current", "", "threaded", false);
-    return snapshot;
+    return this.sessionBrowser.open();
   }
 
   public async querySessionBrowser(input: {
@@ -1835,63 +1829,25 @@ export class HostBridge implements LegacyHostOperations {
     namedOnly: boolean;
     offset: number;
   }): Promise<SessionBrowserSnapshot> {
-    const catalog = this.sessionCatalogs.get(input.browserId);
-    if (!catalog) throw new Error("Session browser is no longer active");
-    const snapshot = await catalog.query(
-      input.scope,
-      input.query,
-      input.sortMode,
-      input.namedOnly,
-      input.offset,
-    );
-    return snapshot;
+    return this.sessionBrowser.query(input);
   }
 
   public closeSessionBrowser(browserId: string): void {
-    this.sessionCatalogs.delete(browserId);
+    this.sessionBrowser.close(browserId);
   }
 
   public async newSession(): Promise<{
     cancelled: boolean;
     activation?: JsonObject;
   }> {
-    const runtime = this.runtime.current();
-    if (!runtime.session.isIdle) {
-      throw new Error("Cannot create a session while the agent is running");
-    }
-    if (this.planMode.current()) {
-      this.planMode.set(runtime.session, false);
-    }
-    const result = await this.runtime.newSession();
-    if (result.cancelled) {
-      return { cancelled: true };
-    }
-    this.sessionCatalogs.clear();
-    return {
-      cancelled: false,
-      activation: this.sessionActivation(),
-    };
+    return this.sessionService.newSession();
   }
 
   public async resumeSession(input: {
     sessionPath: string;
     cwdOverride?: string;
   }): Promise<{ cancelled: boolean; activation?: JsonObject }> {
-    const runtime = this.runtime.current();
-    if (!runtime.session.isIdle) {
-      throw new Error("Cannot resume a session while the agent is running");
-    }
-    const result = await this.runtime.switchSession(input.sessionPath, {
-      ...(input.cwdOverride ? { cwdOverride: input.cwdOverride } : {}),
-    });
-    if (result.cancelled) {
-      return { cancelled: true };
-    }
-    this.sessionCatalogs.clear();
-    return {
-      cancelled: false,
-      activation: this.sessionActivation(),
-    };
+    return this.sessionService.resumeSession(input);
   }
 
   public treeState(input: {
@@ -1899,30 +1855,15 @@ export class HostBridge implements LegacyHostOperations {
     query: string;
     foldedEntryIds: string[];
   }): TreeSnapshot {
-    const runtime = this.runtime.current();
-    return buildTreeSnapshot(
-      runtime.session.sessionManager,
-      input.filterMode,
-      input.query,
-      input.foldedEntryIds,
-    );
+    return this.treeService.state(input);
   }
 
   public setTreeLabel(input: { entryId: string; label?: string }): void {
-    const runtime = this.runtime.current();
-    if (!runtime.session.isIdle) {
-      throw new Error("Cannot edit tree labels while the agent is running");
-    }
-    runtime.session.sessionManager.appendLabelChange(input.entryId, input.label);
+    this.treeService.label(input);
   }
 
   public async copyTreeEntry(entryId: string): Promise<void> {
-    const runtime = this.runtime.current();
-    const entry = runtime.session.sessionManager.getEntry(entryId);
-    if (!entry) throw new Error(`Tree entry not found: ${entryId}`);
-    const text = copyTextForEntry(entry);
-    if (!text) throw new Error("Selected tree entry has no text to copy");
-    await copyToClipboard(text);
+    await this.treeService.copy(entryId);
   }
 
   public async navigateTree(input: {
@@ -1930,45 +1871,11 @@ export class HostBridge implements LegacyHostOperations {
     summarize: boolean;
     customInstructions?: string;
   }): Promise<JsonObject> {
-    const runtime = this.runtime.current();
-    if (!runtime.session.isIdle) {
-      throw new Error("Cannot navigate the tree while the agent is running");
-    }
-    const result = await runtime.session.navigateTree(input.entryId, {
-      summarize: input.summarize,
-      ...(input.customInstructions ? { customInstructions: input.customInstructions } : {}),
-      replaceInstructions: false,
-    });
-    if (result.cancelled) {
-      return {
-        cancelled: true,
-        aborted: result.aborted === true,
-      };
-    }
-
-    const restored = this.restoreActivePlan(runtime.session.sessionManager);
-    const restoredPlanMode = restorePlanMode(
-      runtime.session.sessionManager.getBranch(),
-    );
-    if (this.planMode.current() !== restoredPlanMode) {
-      this.planMode.set(runtime.session, restoredPlanMode);
-    }
-    this.sendPlanModeState();
-    this.send({
-      type: "plan_state",
-      artifact: restored ?? null,
-    });
-    this.sendContextBudget(this.contextBudget.onTreeNavigation());
-    return {
-      cancelled: false,
-      aborted: false,
-      editorText: result.editorText,
-      activation: this.sessionActivation(),
-    };
+    return this.treeService.navigate(input);
   }
 
   public abortTreeNavigation(): void {
-    this.runtime.current().session.abortBranchSummary();
+    this.treeService.abort();
   }
 
   private sessionActivation(): JsonObject {
