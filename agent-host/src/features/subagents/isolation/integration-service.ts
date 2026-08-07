@@ -6,11 +6,13 @@ import type { HarnessConfig } from "../../workspace/config.ts";
 import { evaluateProfilePermission } from "../../permissions/policy/profile-compiler.ts";
 import { workspaceRelativePath } from "../../permissions/filesystem/path.ts";
 import { isJsonObject } from "../../../protocol/validation.ts";
+import type {
+  AgentIsolationPolicy,
+  WorktreeRecord,
+  WorktreeRecoveryState,
+} from "./model.ts";
 import {
   WorktreeIsolation,
-  type AgentIsolationPolicy,
-  type WorktreeRecord,
-  type WorktreeRecoveryState,
 } from "./worktree.ts";
 
 export interface RecoveredSubagent {

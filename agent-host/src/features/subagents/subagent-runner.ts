@@ -27,7 +27,7 @@ import type {
 import type {
   WorktreeRecoveryState,
   WorktreeRecord,
-} from "./isolation/worktree.ts";
+} from "./isolation/model.ts";
 import type {
   ActiveSubagent,
   CompletedSubagent,

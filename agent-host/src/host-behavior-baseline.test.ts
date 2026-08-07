@@ -85,7 +85,7 @@ const EVENT_SOURCES = [
   "features/auth/auth-service.ts",
   "features/workspace/workspace-service.ts",
   "features/sessions/session-browser-service.ts",
-  "features/context/context-service.ts",
+  "app/create-host-app.ts",
   "features/plans/plan-controller.ts",
   "features/subagents/subagent-supervisor.ts",
   "features/subagents/subagent-runner.ts",

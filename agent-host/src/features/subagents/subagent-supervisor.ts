@@ -19,7 +19,7 @@ import type { PlanModePort } from "../plans/plan-controller.ts";
 import type {
   WorktreeRecord,
   WorktreeRecoveryState,
-} from "./isolation/worktree.ts";
+} from "./isolation/model.ts";
 import type { WorkspaceService } from "../workspace/workspace-service.ts";
 import type { PermissionService } from "../permissions/permission-service.ts";
 import type { ToolAuthorizationContext } from "../permissions/permission-service.ts";

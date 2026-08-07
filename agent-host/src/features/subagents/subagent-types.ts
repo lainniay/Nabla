@@ -6,7 +6,7 @@ import type {
   IsolationBackend,
   PreparedIsolation,
   WorktreeRecord,
-} from "./isolation/worktree.ts";
+} from "./isolation/model.ts";
 
 export interface SubagentOptions {
   task: string;

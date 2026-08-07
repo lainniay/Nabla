@@ -6,7 +6,11 @@ import test from "node:test";
 
 import { ShellAdapter } from "./adapters/shell.ts";
 import type { ToolContext } from "./model.ts";
-import { agentToolResource, permissionIntentForTool } from "./tool-intent.ts";
+import {
+  agentToolResource,
+  assessOpaqueRisk,
+  permissionIntentForTool,
+} from "./tool-intent.ts";
 
 const context: ToolContext = {
   requestId: "request-1",
@@ -163,6 +167,47 @@ test("mcp, delegate_task, and unknown tools keep their opaque fallbacks", () => 
     throw new Error("unknown tool intent must be opaque");
   }
   assert.equal(unknown.atoms[0].runtime, "tool:custom_tool");
+});
+
+test("opaque risk comes from ShellAnalysis for bash and atoms otherwise", () => {
+  const shellAdapter = new ShellAdapter();
+  const opaqueBash = permissionIntentForTool(
+    context,
+    "bash",
+    { command: "eval $(generate)" },
+    shellAdapter,
+  );
+  assert.equal(
+    assessOpaqueRisk(opaqueBash, shellAdapter.analysis(opaqueBash)),
+    true,
+  );
+
+  const clearBash = permissionIntentForTool(
+    context,
+    "bash",
+    { command: "echo hi" },
+    shellAdapter,
+  );
+  assert.equal(
+    assessOpaqueRisk(clearBash, shellAdapter.analysis(clearBash)),
+    false,
+  );
+
+  const mcp = permissionIntentForTool(
+    context,
+    "mcp__server__method",
+    { x: 1 },
+    shellAdapter,
+  );
+  assert.equal(assessOpaqueRisk(mcp), true);
+
+  const edit = permissionIntentForTool(
+    context,
+    "edit",
+    { path: "src/a.ts" },
+    shellAdapter,
+  );
+  assert.equal(assessOpaqueRisk(edit), false);
 });
 
 test("agentToolResource normalizes commands and workspace paths", () => {

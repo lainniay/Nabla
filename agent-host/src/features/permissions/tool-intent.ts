@@ -25,7 +25,17 @@ import type {
   ToolContext,
 } from "./model.ts";
 import { digestValue } from "./shell/digest.ts";
+import type { ShellAnalysis } from "./shell/planner.ts";
 import { isJsonObject } from "../../protocol/validation.ts";
+
+export function assessOpaqueRisk(
+  intent: PermissionIntent,
+  shellAnalysis?: ShellAnalysis,
+): boolean {
+  return intent.tool === "bash"
+    ? (shellAnalysis?.safety.opaque ?? false)
+    : intent.atoms.some((atom) => atom.kind === "opaque_code");
+}
 
 export function permissionIntentForTool(
   context: ToolContext,

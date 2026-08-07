@@ -3543,7 +3543,7 @@ A.foo()
 
 - [ ] `PermissionRule` 是否只有一种？
 - [ ] Shell read-only 判断是否只有一个入口？
-- [ ] Shell risk 是否直接来自 ShellAnalysis？
+- [x] Shell risk 是否直接来自 ShellAnalysis？
 - [ ] path canonicalization 是否只有一份？
 - [ ] workspace containment 是否只有一份 primitive？
 - [ ] Plan mode 是否只有一个 state owner？
@@ -3555,15 +3555,15 @@ A.foo()
 - [ ] PermissionAdapter 是否保持现状（不执行接口收敛）？
 - [ ] `ExecutionBroker` / `DirectRunner` / `ShellFallback` 是否已删除？
 - [ ] Bash 是否只有 Rust Sandbox 一个真实 executor？
-- [ ] `ContextService` 是否仍只是转发？
+- [x] `ContextService` 是否仍只是转发？
 - [ ] `harness.ts` 是否已逐步拆空？
 - [ ] `session-navigation.ts` 是否已经拆成 session 子模块？
-- [ ] `WorktreeManager` 是否仍作为大型公开 API？
+- [x] `WorktreeManager` 是否仍作为大型公开 API？
 - [ ] `features/permissions` 是否是唯一 Permission root？
 - [ ] `policy/` 是否已经删除？
 - [ ] Rust selector 是否复用 `selection.rs`？
 - [ ] Rust renderer 是否都复用 `ui/text.rs`？
-- [ ] `scene.rs` / `transcript.rs` 是否按职责拆分？
+- [x] `scene.rs` / `transcript.rs` 是否按职责拆分？
 - [ ] protocol schema 和 validator 是否来自同一来源？
 - [ ] Rust/TS protocol fixture 是否双向测试？
 - [ ] `create-host-app.ts` 是否只负责依赖装配？

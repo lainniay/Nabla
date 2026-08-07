@@ -13,12 +13,13 @@ use crate::{
         scene::{
             composer::alternate_input_model,
             panels::{
-                panel_choice_row, primary_panel_request, tree_choice_rows, tree_identity_color,
-                tree_prefix,
+                modals::tree::{tree_choice_rows, tree_identity_color, tree_prefix},
+                panel_choice_row, primary_panel_request,
             },
         },
         store::UiStore,
-        types::{Color, VisualRow},
+        text::display_width,
+        types::{Color, HitTarget, Rect, SurfaceKind, VisualRow},
     },
 };
 use serde_json::json;

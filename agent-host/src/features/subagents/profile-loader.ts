@@ -3,7 +3,7 @@ import { basename, extname, join } from "node:path";
 
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
-import type { AgentIsolationPolicy } from "./isolation/worktree.ts";
+import type { AgentIsolationPolicy } from "./isolation/model.ts";
 import {
   READ_ONLY_TOOL_NAMES,
   THINKING_LEVELS,

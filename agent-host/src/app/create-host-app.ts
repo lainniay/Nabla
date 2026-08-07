@@ -4,6 +4,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { ContextBudgetManager } from "../features/context/engine.ts";
+import type { ContextSnapshot } from "../features/context/model.ts";
 import { loadHarnessConfig } from "../features/workspace/config.ts";
 import { workspaceIsTrusted } from "../features/workspace/trust.ts";
 import { PlanStore } from "../features/plans/store.ts";
@@ -34,7 +35,6 @@ import { PermissionService } from "../features/permissions/permission-service.ts
 import { SessionService } from "../features/sessions/session-service.ts";
 import { SessionBrowserService } from "../features/sessions/session-browser-service.ts";
 import { TreeService } from "../features/sessions/tree-service.ts";
-import { ContextService } from "../features/context/context-service.ts";
 import { IntegrationService } from "../features/subagents/isolation/integration-service.ts";
 import { SubagentSupervisor } from "../features/subagents/subagent-supervisor.ts";
 import { RustSandboxBackend } from "../features/permissions/execution/rust-sandbox-backend.ts";
@@ -95,14 +95,45 @@ export async function createHostApp(
 
   // Modules.
   const rustSandboxBackend = await RustSandboxBackend.probe();
-  const context = new ContextService(
-    contextBudget,
-    send,
-    (snapshot) => ({
-      ...snapshot,
-      scopeId: runtimeAccess.current().session.sessionId,
-    }),
-  );
+  const scopeContext = (snapshot: ContextSnapshot): ContextSnapshot => ({
+    ...snapshot,
+    scopeId: runtimeAccess.current().session.sessionId,
+  });
+  const publishContext = (snapshot: ContextSnapshot): void => {
+    const policyWarning = contextBudget.takeWarning();
+    send({
+      type: "context_budget",
+      snapshot: scopeContext(snapshot),
+      ...(policyWarning ? { policyWarning } : {}),
+    });
+  };
+  const context = {
+    snapshot: () => contextBudget.snapshot(),
+    scopedSnapshot: () => scopeContext(contextBudget.snapshot()),
+    onRuntimeSessionStart: (runtime: {
+      sessionManager: { getSessionId(): string };
+      getContextUsage(): Parameters<
+        ContextBudgetManager["onModelResponse"]
+      >[0];
+    }): void => {
+      contextBudget.onSessionStart(runtime.sessionManager.getSessionId());
+      publishContext(contextBudget.onModelResponse(runtime.getContextUsage()));
+    },
+    filter: (
+      messages: Parameters<ContextBudgetManager["filter"]>[0],
+      usage: Parameters<ContextBudgetManager["filter"]>[1],
+      options: Parameters<ContextBudgetManager["filter"]>[2],
+    ): ReturnType<ContextBudgetManager["filter"]> =>
+      contextBudget.filter(messages, usage, options),
+    onModelResponse: (
+      usage: Parameters<ContextBudgetManager["onModelResponse"]>[0],
+    ): ContextSnapshot => contextBudget.onModelResponse(usage),
+    onCompaction: (
+      record: Parameters<ContextBudgetManager["onCompaction"]>[0],
+    ): ContextSnapshot => contextBudget.onCompaction(record),
+    onTreeNavigation: (): ContextSnapshot => contextBudget.onTreeNavigation(),
+    publish: publishContext,
+  };
   const plans = new PlanController(planStore, modelRuntime, runtimeAccess, send);
   const permissions = new PermissionService(
     interactions,

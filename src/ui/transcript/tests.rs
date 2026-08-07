@@ -6,11 +6,12 @@ use crate::{
     },
     ui::{
         palette,
+        transcript::render::common::format_turn_duration,
         transcript::render::{
-            ToolRenderMode, format_turn_duration, render_item, render_tool, render_turn_separator,
-            render_user, render_viewer_item,
+            ToolRenderMode, render_item, render_tool, render_turn_separator, render_user,
+            render_viewer_item,
         },
-        transcript::store::RENDER_CACHE_MAX_ENTRIES,
+        transcript::store::cache::RENDER_CACHE_MAX_ENTRIES,
         types::{Color, CommittedHistoryBlock, TranscriptSyncOutcome, VisualRow},
     },
 };

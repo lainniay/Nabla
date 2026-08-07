@@ -23,26 +23,6 @@ import type {
   WorktreeRecoveryState,
 } from "./model.ts";
 
-export type {
-  AgentIsolationPolicy,
-  CapturedWorktree,
-  IntegrationMode,
-  IntegrationResult,
-  IntegrationStatus,
-  IsolationBackend,
-  IsolationMode,
-  PreparedIsolation,
-  PreparedResolution,
-  WorktreeRecord,
-  WorktreeRecoveryScan,
-  WorktreeRecoveryState,
-} from "./model.ts";
-export {
-  DEFAULT_GIT_TIMEOUT_MS,
-  DEFAULT_LOCK_TIMEOUT_MS,
-  DEFAULT_TERMINAL_RETENTION_MS,
-} from "./model.ts";
-
 export interface WorktreeIsolationOptions {
   rootDir?: string;
   credentialPath?: (path: string) => boolean;

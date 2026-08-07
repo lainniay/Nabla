@@ -24,7 +24,10 @@ import { PolicyStore } from "./policy-store.ts";
 import { ShellAdapter } from "./adapters/shell.ts";
 import type { WorkspaceGrantSnapshot } from "./approvals/workspace-store.ts";
 import type { InteractionBroker } from "../interactions/interaction-broker.ts";
-import { permissionIntentForTool } from "./tool-intent.ts";
+import {
+  assessOpaqueRisk,
+  permissionIntentForTool,
+} from "./tool-intent.ts";
 import { compileAgentProfileRules } from "./policy/profile-compiler.ts";
 import {
   buildCredentialDenyRules,
@@ -309,11 +312,7 @@ export class PermissionService {
     );
 
     let risk: "normal" | "high" | "credential" | "outside_workspace" =
-      (intent.tool === "bash"
-        ? (shellAnalysis?.safety.opaque ?? false)
-        : intent.atoms.some((atom) => atom.kind === "opaque_code"))
-        ? "high"
-        : "normal";
+      assessOpaqueRisk(intent, shellAnalysis) ? "high" : "normal";
     let reason =
       risk === "high"
         ? "The request contains code that cannot be statically decomposed"

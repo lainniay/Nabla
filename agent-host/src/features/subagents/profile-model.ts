@@ -1,4 +1,4 @@
-import type { AgentIsolationPolicy } from "./isolation/worktree.ts";
+import type { AgentIsolationPolicy } from "./isolation/model.ts";
 import {
   READ_ONLY_TOOL_NAMES,
   type ThinkingLevel,
