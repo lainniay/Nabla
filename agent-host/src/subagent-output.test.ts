@@ -20,7 +20,7 @@ test("strict subagent output rejects malformed and unknown task results", () => 
           blockers: [],
         }),
       ),
-    /status/u,
+    /must match a schema in anyOf|must be equal to constant/u,
   );
 });
 

@@ -5,7 +5,7 @@ import {
   type SessionManager,
 } from "@earendil-works/pi-coding-agent";
 
-import type { RuntimeAccess } from "./runtime-access.ts";
+import type { SessionRuntimePort } from "./runtime-access.ts";
 
 export interface SessionTransition {
   cancelled: boolean;
@@ -26,7 +26,7 @@ export interface InitializeOptions {
   sessionManager: SessionManager;
 }
 
-export class RuntimeSupervisor implements RuntimeAccess {
+export class RuntimeSupervisor implements SessionRuntimePort {
   private readonly factory: CreateAgentSessionRuntimeFactory;
   private runtime?: AgentSessionRuntime;
   private generation = 0;

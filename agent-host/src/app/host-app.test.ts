@@ -5,7 +5,7 @@ import type { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import { RuntimeSupervisor } from "../runtime/runtime-supervisor.ts";
 import type { ControlServer } from "../transport/control-server.ts";
-import type { IntegrationService } from "../features/subagents/integration-service.ts";
+import type { IntegrationService } from "../features/subagents/isolation/integration-service.ts";
 import type { SubagentSupervisor } from "../features/subagents/subagent-supervisor.ts";
 import type { AuthService } from "../features/auth/auth-service.ts";
 import type { InteractionBroker } from "../features/interactions/interaction-broker.ts";

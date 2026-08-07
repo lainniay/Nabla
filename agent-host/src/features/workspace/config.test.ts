@@ -12,7 +12,7 @@ import {
 import type { AgentProfile } from "../subagents/profile-model.ts";
 import {
   compileAgentProfileRules,
-  profileToolEffect,
+  evaluateProfilePermission,
 } from "../permissions/policy/profile-compiler.ts";
 
 function fixture() {
@@ -27,6 +27,8 @@ function fixture() {
 
 test("profile rules match workspace-relative paths", () => {
   const setup = fixture();
+  mkdirSync(join(setup.cwd, "src"));
+  writeFileSync(join(setup.cwd, "src", "app.ts"), "");
   const profile: AgentProfile = {
     description: "Writer",
     source: "builtin",
@@ -42,11 +44,11 @@ test("profile rules match workspace-relative paths", () => {
     instructions: [],
   };
   assert.equal(
-    profileToolEffect(profile, "write", "src/app.ts", setup.cwd),
+    evaluateProfilePermission(profile, "write", "src/app.ts", setup.cwd),
     "allow",
   );
   assert.equal(
-    profileToolEffect(profile, "write", "../secret", setup.cwd),
+    evaluateProfilePermission(profile, "write", "../secret", setup.cwd),
     "ask",
   );
 });
@@ -59,7 +61,7 @@ test("built-in verifier does not auto-allow shell commands", () => {
   const verifier = config.profiles.verifier;
   assert.ok(verifier);
   assert.equal(
-    profileToolEffect(
+    evaluateProfilePermission(
       verifier,
       "bash",
       "cargo clippy --all-targets",
@@ -68,7 +70,7 @@ test("built-in verifier does not auto-allow shell commands", () => {
     "deny",
   );
   assert.equal(
-    profileToolEffect(
+    evaluateProfilePermission(
       verifier,
       "bash",
       "cargo test && touch changed.txt",
@@ -102,7 +104,7 @@ test("trusted project config cannot expand profile permissions", () => {
   const trusted = loadHarnessConfig(setup.cwd, { homeDir: home });
   assert.equal(trusted.maxParallel, 99);
   assert.equal(
-    profileToolEffect(
+    evaluateProfilePermission(
       trusted.profiles.reviewer!,
       "write",
       "src/app.rs",
@@ -169,11 +171,11 @@ test("markdown subagents merge globally and from trusted projects", () => {
     "Follow this project's documentation conventions.",
   ]);
   assert.equal(
-    profileToolEffect(profile, "write", "docs/guide.md", setup.cwd),
+    evaluateProfilePermission(profile, "write", "docs/guide.md", setup.cwd),
     "deny",
   );
   assert.equal(
-    profileToolEffect(profile, "write", "src/app.ts", setup.cwd),
+    evaluateProfilePermission(profile, "write", "src/app.ts", setup.cwd),
     "deny",
   );
 });
@@ -210,15 +212,15 @@ test("custom profiles use a safe baseline and ordered permission rules", () => {
   });
   const profile = config.profiles.audit!;
   assert.equal(
-    profileToolEffect(profile, "read", "src/lib.rs", setup.cwd),
+    evaluateProfilePermission(profile, "read", "src/lib.rs", setup.cwd),
     "allow",
   );
   assert.equal(
-    profileToolEffect(profile, "bash", "cargo test app", setup.cwd),
+    evaluateProfilePermission(profile, "bash", "cargo test app", setup.cwd),
     "deny",
   );
   assert.equal(
-    profileToolEffect(profile, "bash", "cargo publish", setup.cwd),
+    evaluateProfilePermission(profile, "bash", "cargo publish", setup.cwd),
     "deny",
   );
   assert.equal(profile.maxParallel, 1);
@@ -236,7 +238,7 @@ test("custom profiles use a safe baseline and ordered permission rules", () => {
     integration: "source",
   });
   assert.equal(
-    profileToolEffect(
+    evaluateProfilePermission(
       config.profiles.writer!,
       "write",
       "src/app.ts",

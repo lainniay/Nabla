@@ -1,15 +1,15 @@
-import type { RuntimeSupervisor } from "../../runtime/runtime-supervisor.ts";
+import type { SessionRuntimePort } from "../../runtime/runtime-access.ts";
 import type { PlanModePort } from "../plans/plan-controller.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 
 export class SessionService {
-  private readonly runtime: RuntimeSupervisor;
+  private readonly runtime: SessionRuntimePort;
   private readonly planMode: PlanModePort;
   private readonly onTransition: () => void;
   private readonly activation: () => JsonObject;
 
   constructor(
-    runtime: RuntimeSupervisor,
+    runtime: SessionRuntimePort,
     planMode: PlanModePort,
     onTransition: () => void,
     activation: () => JsonObject,

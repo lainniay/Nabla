@@ -33,7 +33,7 @@ import type {
   CompletedSubagent,
   SubagentOptions,
 } from "./subagent-types.ts";
-import type { IntegrationService } from "./integration-service.ts";
+import type { IntegrationService } from "./isolation/integration-service.ts";
 import type { ToolAuthorizationContext } from "../permissions/permission-service.ts";
 
 export interface SubagentRunnerPort {

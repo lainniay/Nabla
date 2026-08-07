@@ -61,6 +61,9 @@ export function createNablaBashTool(
       if (authorization.decision === "deny") {
         throw new Error(authorization.reason ?? "Denied by permission policy");
       }
+      if (authorization.sandboxProfile === null) {
+        throw new Error("Bash authorization did not include a sandbox profile");
+      }
 
       let succeeded = false;
       try {
@@ -74,7 +77,7 @@ export function createNablaBashTool(
         succeeded = true;
         return result;
       } finally {
-        deps.permissions.finishBash(toolCallId, succeeded);
+        deps.permissions.finishBash(authorization, succeeded);
       }
     },
   });

@@ -77,12 +77,14 @@ fn canonicalize_path(path: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::SandboxMode;
     use crate::sandbox::request::{FilesystemProfile, SandboxExecRequest, SandboxProfile};
     use std::collections::BTreeMap;
 
     fn request() -> SandboxExecRequest {
         SandboxExecRequest {
             version: 1,
+            mode: SandboxMode::Enforced,
             cwd: "/workspace".into(),
             command: "true".into(),
             timeout_ms: None,

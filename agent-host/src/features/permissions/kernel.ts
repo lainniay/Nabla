@@ -7,10 +7,10 @@ import {
   evaluatePermission,
   type PermissionEvaluation,
 } from "./evaluator.ts";
+import type { SandboxExecutionProfile } from "./execution/sandbox-profile.ts";
 import { proposeGrantBundles } from "./grant-proposal.ts";
 import type {
   ApprovalDecision,
-  ExecutionProfile,
   PermissionIntent,
 } from "./model.ts";
 import type { PermissionRule } from "./model.ts";
@@ -98,10 +98,10 @@ export class PermissionKernel {
     return { requestId, intent, evaluation, decision, risk };
   }
 
-  consumeForExecution(
+  consume(
     authorization: Authorization,
     recomputedIntent: PermissionIntent,
-    executionProfile?: ExecutionProfile,
+    sandboxProfile?: SandboxExecutionProfile | null,
   ): boolean {
     if (
       authorization.intent.digest !== recomputedIntent.digest ||
@@ -119,7 +119,7 @@ export class PermissionKernel {
         {
           decision: authorization.decision,
           risk: authorization.risk,
-          executionProfile,
+          sandboxProfile: sandboxProfile ?? undefined,
           onceConsumed: false,
           outcome: "preflight_rejected",
         },
@@ -149,7 +149,7 @@ export class PermissionKernel {
       {
         decision: authorization.decision,
         risk: authorization.risk,
-        executionProfile,
+        sandboxProfile: sandboxProfile ?? undefined,
         onceConsumed,
         outcome: authorized ? "execution_started" : "preflight_rejected",
       },
@@ -157,9 +157,9 @@ export class PermissionKernel {
     return authorized;
   }
 
-  recordExecutionResult(
+  recordResult(
     authorization: Authorization,
-    executionProfile: ExecutionProfile,
+    sandboxProfile: SandboxExecutionProfile | null,
     succeeded: boolean,
   ): void {
     this.audit.record(auditEntry(
@@ -169,7 +169,7 @@ export class PermissionKernel {
       {
         decision: authorization.decision,
         risk: authorization.risk,
-        executionProfile,
+        sandboxProfile: sandboxProfile ?? undefined,
         outcome: succeeded ? "executed" : "execution_failed",
       },
     ));

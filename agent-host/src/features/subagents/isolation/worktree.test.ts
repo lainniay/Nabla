@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { WorktreeManager } from "./worktree.ts";
+import { WorktreeIsolation } from "./worktree.ts";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], {
@@ -29,7 +29,7 @@ test("software-managed worktree snapshots an unborn dirty repository and applies
   await mkdir(join(repo, "node_modules"));
   await writeFile(join(repo, "node_modules", "dependency.js"), "module\n");
   const statusBefore = git(repo, "status", "--porcelain=v1");
-  const manager = new WorktreeManager({
+  const manager = new WorktreeIsolation({
     rootDir: join(root, "managed"),
     credentialPath: (path) => path.endsWith("/.env"),
   });
@@ -71,7 +71,7 @@ test("software-managed worktree snapshots an unborn dirty repository and applies
       originSessionId: "session-1",
       result: { status: "completed", summary: "updated" },
     });
-    const recovery = await new WorktreeManager({
+    const recovery = await new WorktreeIsolation({
       rootDir: join(root, "managed"),
     }).listRecoverable(repo);
     const recovered = recovery.records;
@@ -113,7 +113,7 @@ test("snapshot preserves the user's staged index while including the final dirty
   await writeFile(join(repo, "untracked.txt"), "untracked\n");
   const statusBefore = git(repo, "status", "--porcelain=v1");
   const stagedBefore = git(repo, "diff", "--cached", "--binary");
-  const manager = new WorktreeManager({ rootDir: join(root, "managed") });
+  const manager = new WorktreeIsolation({ rootDir: join(root, "managed") });
   try {
     const prepared = await manager.prepare(
       "agent-1",
@@ -147,7 +147,7 @@ test("serialized integration accepts disjoint worker patches", async () => {
   await writeFile(join(repo, "b.txt"), "b\n");
   git(repo, "add", "a.txt", "b.txt");
   git(repo, "commit", "-m", "initial");
-  const manager = new WorktreeManager({ rootDir: join(root, "managed") });
+  const manager = new WorktreeIsolation({ rootDir: join(root, "managed") });
   try {
     const first = await manager.prepare(
       "agent-1",
@@ -188,7 +188,7 @@ test("capture preserves leading whitespace in Git paths", async () => {
   await writeFile(join(repo, "base.txt"), "base\n");
   git(repo, "add", "base.txt");
   git(repo, "commit", "-m", "initial");
-  const manager = new WorktreeManager({ rootDir: join(root, "managed") });
+  const manager = new WorktreeIsolation({ rootDir: join(root, "managed") });
   try {
     const prepared = await manager.prepare(
       "agent-path",
@@ -217,8 +217,8 @@ test("integration is idempotent across manager instances", async () => {
   await writeFile(join(repo, "file.txt"), "base\n");
   git(repo, "add", "file.txt");
   git(repo, "commit", "-m", "initial");
-  const firstManager = new WorktreeManager({ rootDir: managed });
-  const secondManager = new WorktreeManager({ rootDir: managed });
+  const firstManager = new WorktreeIsolation({ rootDir: managed });
+  const secondManager = new WorktreeIsolation({ rootDir: managed });
   try {
     const prepared = await firstManager.prepare(
       "agent-idempotent",
@@ -251,7 +251,7 @@ test("integration reconciles a crash after patch application", async () => {
   await writeFile(join(repo, "file.txt"), "base\n");
   git(repo, "add", "file.txt");
   git(repo, "commit", "-m", "initial");
-  const manager = new WorktreeManager({ rootDir: managed });
+  const manager = new WorktreeIsolation({ rootDir: managed });
   try {
     const prepared = await manager.prepare(
       "agent-crash",
@@ -267,7 +267,7 @@ test("integration reconciles a crash after patch application", async () => {
     await writeFile(recordPath, `${JSON.stringify(persisted, null, 2)}\n`);
     git(repo, "apply", "--binary", captured.record.patchPath);
 
-    const recovered = await new WorktreeManager({ rootDir: managed }).integrate(
+    const recovered = await new WorktreeIsolation({ rootDir: managed }).integrate(
       captured.record,
     );
     assert.equal(recovered.status, "applied");
@@ -280,7 +280,7 @@ test("integration reconciles a crash after patch application", async () => {
 
 test("auto serializes by falling back outside Git while explicit worktree fails", async () => {
   const root = await mkdtemp(join(tmpdir(), "nabla-worktree-nongit-"));
-  const manager = new WorktreeManager({ rootDir: join(root, "managed") });
+  const manager = new WorktreeIsolation({ rootDir: join(root, "managed") });
   try {
     const automatic = await manager.prepare(
       "agent-1",
@@ -312,7 +312,7 @@ test("recovery scan reports a corrupt record without hiding other state", async 
   await writeFile(join(artifact, "record.json"), "{not-json");
 
   try {
-    const scan = await new WorktreeManager({ rootDir: managed }).listRecoverable(
+    const scan = await new WorktreeIsolation({ rootDir: managed }).listRecoverable(
       workspace,
     );
     assert.deepEqual(scan.records, []);
@@ -333,7 +333,7 @@ test("integration is all-or-nothing and preserves a conflicting worktree", async
   await writeFile(join(repo, "file.txt"), "base\n");
   git(repo, "add", "file.txt");
   git(repo, "commit", "-m", "initial");
-  const manager = new WorktreeManager({ rootDir: join(root, "managed") });
+  const manager = new WorktreeIsolation({ rootDir: join(root, "managed") });
   try {
     const prepared = await manager.prepare(
       "agent-1",

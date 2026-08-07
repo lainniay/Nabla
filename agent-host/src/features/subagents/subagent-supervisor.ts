@@ -14,7 +14,7 @@ import type {
   WorktreeIntegrationSnapshot,
 } from "../../protocol/contracts.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
-import type { RuntimeSupervisor } from "../../runtime/runtime-supervisor.ts";
+import type { RuntimeAccess } from "../../runtime/runtime-access.ts";
 import type { PlanModePort } from "../plans/plan-controller.ts";
 import type {
   WorktreeRecord,
@@ -23,7 +23,8 @@ import type {
 import type { WorkspaceService } from "../workspace/workspace-service.ts";
 import type { PermissionService } from "../permissions/permission-service.ts";
 import type { ToolAuthorizationContext } from "../permissions/permission-service.ts";
-import type { IntegrationService } from "./integration-service.ts";
+import type { ExecutionPermit } from "../permissions/execution/sandbox-profile.ts";
+import type { IntegrationService } from "./isolation/integration-service.ts";
 import type { RustSandboxBackend } from "../permissions/execution/rust-sandbox-backend.ts";
 import { createNablaBashTool } from "../../runtime/create-nabla-bash-tool.ts";
 import { buildWorkspaceContext } from "../../runtime/workspace-context.ts";
@@ -50,7 +51,7 @@ export class SubagentSupervisor implements SubagentRunnerPort {
   private readonly permissions: PermissionService;
   private readonly sandboxBackend: RustSandboxBackend;
   private readonly modelRuntime: ModelRuntime;
-  private readonly runtime: RuntimeSupervisor;
+  private readonly runtime: RuntimeAccess;
   private readonly planMode: PlanModePort;
   private readonly sendEvent: (event: JsonObject) => void;
   private readonly warn: (message: string) => void;
@@ -62,7 +63,7 @@ export class SubagentSupervisor implements SubagentRunnerPort {
     permissions: PermissionService,
     sandboxBackend: RustSandboxBackend,
     modelRuntime: ModelRuntime,
-    runtime: RuntimeSupervisor,
+    runtime: RuntimeAccess,
     planMode: PlanModePort,
     sendEvent: (event: JsonObject) => void,
     warn: (message: string) => void,
@@ -557,6 +558,7 @@ export class SubagentSupervisor implements SubagentRunnerPort {
     return {
       name: `nabla-subagent-${agentId}`,
       factory: (pi) => {
+        const pendingPermits = new Map<string, ExecutionPermit>();
         pi.on("before_agent_start", (event, context) => ({
           systemPrompt: [
             event.systemPrompt,
@@ -566,13 +568,13 @@ export class SubagentSupervisor implements SubagentRunnerPort {
             "Do not ask the user directly. Return structured results to the parent agent.",
           ].join("\n\n"),
         }));
-        pi.on("tool_call", (event, context) => {
+        pi.on("tool_call", async (event, context) => {
           if (event.toolName === "bash") return;
           normalizeToolInputPaths(
             event.input as Record<string, unknown>,
             context.cwd,
           );
-          return this.permissions.authorizeTool(event, {
+          const result = await this.permissions.authorizeTool(event, {
             cwd: context.cwd,
             signal: context.signal,
             agent: {
@@ -585,10 +587,19 @@ export class SubagentSupervisor implements SubagentRunnerPort {
               sessionId: context.sessionManager.getSessionId(),
             },
           });
+          if ("blocked" in result) {
+            return { block: true, reason: result.reason };
+          }
+          pendingPermits.set(event.toolCallId, result.permit);
+          return undefined;
         });
         pi.on("tool_result", (event) => {
           if (event.toolName === "bash") return;
-          this.permissions.finishTool(event.toolCallId, !event.isError);
+          const permit = pendingPermits.get(event.toolCallId);
+          if (permit) {
+            pendingPermits.delete(event.toolCallId);
+            this.permissions.finishTool(permit, !event.isError);
+          }
         });
       },
     };

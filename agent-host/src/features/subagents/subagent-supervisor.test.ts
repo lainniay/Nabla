@@ -9,7 +9,7 @@ import type { PlanModePort } from "../plans/plan-controller.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 import type { WorkspaceService } from "../workspace/workspace-service.ts";
 import type { PermissionService } from "../permissions/permission-service.ts";
-import type { IntegrationService } from "./integration-service.ts";
+import type { IntegrationService } from "./isolation/integration-service.ts";
 import { SubagentSupervisor } from "./subagent-supervisor.ts";
 
 const planMode: PlanModePort = {

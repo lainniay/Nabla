@@ -6,7 +6,7 @@ use std::{
 use crate::ui::{
     palette,
     panel::PanelRequest,
-    scene::{append_text_cells, cells_width, text_row},
+    scene::{append_text_cells, cells_width, text_row, view_model::SceneViewModel},
     selector::VirtualList,
     shell,
     store::UiState,
@@ -18,16 +18,16 @@ use crate::{
     command::COMMAND_MENU_VISIBLE_ROWS,
     host::ApprovalDecision,
     state::{
-        AppState, AuthPromptKind, AuthState, GrantProposal, TranscriptItem, TranscriptViewMode,
-        TreeItem, TreePhase, UiModalKind, matching_auth_choice_indices,
+        AuthPromptKind, AuthState, GrantProposal, TranscriptItem, TranscriptViewMode, TreeItem,
+        TreePhase, UiModalKind, matching_auth_choice_indices,
     },
 };
 
-pub(crate) fn primary_panel_request(state: &AppState, width: u16) -> Option<PanelRequest> {
+pub(crate) fn primary_panel_request(view: &SceneViewModel, width: u16) -> Option<PanelRequest> {
     let width = width.saturating_sub(2).max(1);
-    match state.active_modal_kind() {
+    match view.active_modal_kind() {
         None => {
-            if let Some(completion) = state.file_completion.as_ref() {
+            if let Some(completion) = view.file_completion.as_ref() {
                 let rows = if let Some(error) = completion.error.as_ref() {
                     vec![text_row(
                         "file-panel",
@@ -62,7 +62,7 @@ pub(crate) fn primary_panel_request(state: &AppState, width: u16) -> Option<Pane
                 let height = rows.len().min(COMMAND_MENU_VISIBLE_ROWS);
                 return PanelRequest::new(rows, Some(completion.selected), height);
             }
-            let rows = state
+            let rows = view
                 .command_candidates()
                 .iter()
                 .enumerate()
@@ -71,18 +71,18 @@ pub(crate) fn primary_panel_request(state: &AppState, width: u16) -> Option<Pane
                         "command-panel",
                         &format!("/{}", command.name),
                         &command.description,
-                        index == state.command_menu_selected(),
+                        index == view.command_menu_selected(),
                         true,
                         width,
                     )
                 })
                 .collect::<Vec<_>>();
             let height = rows.len().min(COMMAND_MENU_VISIBLE_ROWS);
-            PanelRequest::new(rows, Some(state.command_menu_selected()), height)
+            PanelRequest::new(rows, Some(view.command_menu_selected()), height)
         }
-        Some(UiModalKind::Approval) => approval_panel_request(state.approval.as_ref()?, width),
+        Some(UiModalKind::Approval) => approval_panel_request(view.approval.as_ref()?, width),
         Some(UiModalKind::Permissions) => {
-            let manager = state.permission_manager.as_ref()?;
+            let manager = view.permission_manager.as_ref()?;
             let mut rows = vec![
                 text_row(
                     "permissions",
@@ -125,11 +125,11 @@ pub(crate) fn primary_panel_request(state: &AppState, width: u16) -> Option<Pane
             }
             let selected =
                 (!manager.snapshot.grants.is_empty()).then_some(manager.selected.saturating_add(2));
-            let height = rows.len().min(state.selection_page_size.saturating_add(2));
+            let height = rows.len().min(view.selection_page_size.saturating_add(2));
             PanelRequest::new(rows, selected, height)
         }
         Some(UiModalKind::Question) => {
-            let flow = state.question.as_ref()?;
+            let flow = view.question.as_ref()?;
             let question = flow.current_question()?;
             let mut rows = vec![text_row(
                 "question",
@@ -163,10 +163,10 @@ pub(crate) fn primary_panel_request(state: &AppState, width: u16) -> Option<Pane
                     CellStyle::foreground(Color::White),
                 ));
             }
-            let height = rows.len().min(state.selection_page_size.saturating_add(2));
+            let height = rows.len().min(view.selection_page_size.saturating_add(2));
             PanelRequest::new(rows, Some(flow.selected.saturating_add(1)), height)
         }
-        Some(UiModalKind::Selection) => state.selection_panel.as_ref().and_then(|panel| {
+        Some(UiModalKind::Selection) => view.selection_panel.as_ref().and_then(|panel| {
             let mut rows = vec![text_row(
                 "selection-panel",
                 &panel.title,
@@ -199,10 +199,10 @@ pub(crate) fn primary_panel_request(state: &AppState, width: u16) -> Option<Pane
                     )
                 }));
             }
-            let height = rows.len().min(state.selection_page_size.saturating_add(1));
+            let height = rows.len().min(view.selection_page_size.saturating_add(1));
             PanelRequest::new(rows, Some(panel.selected.saturating_add(1)), height)
         }),
-        Some(UiModalKind::AgentPicker) => state.agent_picker.as_ref().and_then(|picker| {
+        Some(UiModalKind::AgentPicker) => view.agent_picker.as_ref().and_then(|picker| {
             let rows = picker
                 .profiles
                 .iter()
@@ -218,10 +218,10 @@ pub(crate) fn primary_panel_request(state: &AppState, width: u16) -> Option<Pane
                     )
                 })
                 .collect::<Vec<_>>();
-            let height = rows.len().min(state.selection_page_size);
+            let height = rows.len().min(view.selection_page_size);
             PanelRequest::new(rows, Some(picker.selected), height)
         }),
-        Some(UiModalKind::Integration) => state.integration_prompt.as_ref().and_then(|prompt| {
+        Some(UiModalKind::Integration) => view.integration_prompt.as_ref().and_then(|prompt| {
             let mut rows = vec![text_row(
                 "integration",
                 &format!("Integrate changes from {}?", prompt.agent.profile),
@@ -253,7 +253,7 @@ pub(crate) fn primary_panel_request(state: &AppState, width: u16) -> Option<Pane
             let height = rows.len();
             PanelRequest::new(rows, Some(prompt.selected.saturating_add(1)), height)
         }),
-        Some(UiModalKind::PlanReview) => state.plan_review.as_ref().and_then(|review| {
+        Some(UiModalKind::PlanReview) => view.plan_review.as_ref().and_then(|review| {
             let labels = ["Execute", "Fresh execute", "Close"];
             let descriptions = [
                 "Continue in this conversation",
@@ -262,13 +262,13 @@ pub(crate) fn primary_panel_request(state: &AppState, width: u16) -> Option<Pane
             ];
             let mut rows = vec![text_row(
                 "plan-review",
-                &state.context.remaining_percent().map_or_else(
+                &view.context.remaining_percent().map_or_else(
                     || "Current context remaining: unknown".to_owned(),
                     |remaining| {
                         format!(
                             "Current context remaining: {:.0}% ({})",
                             remaining,
-                            state.context.usage_state.label()
+                            view.context.usage_state.label()
                         )
                     },
                 ),
@@ -599,14 +599,14 @@ fn choice_row(id: &str, label: &str, description: &str, selected: bool, width: u
 }
 
 pub(crate) fn alternate_rows(
-    state: &AppState,
+    view: &SceneViewModel,
     _ui: &UiState,
     width: u16,
     height: u16,
 ) -> Vec<VisualRow> {
     let mut rows = Vec::new();
     let title_style = CellStyle::foreground(Color::Magenta).bold();
-    match state.active_modal_kind() {
+    match view.active_modal_kind() {
         Some(UiModalKind::SessionBrowser) => {
             rows.push(text_row(
                 "session-browser",
@@ -614,7 +614,7 @@ pub(crate) fn alternate_rows(
                 title_style,
                 width,
             ));
-            if let Some(browser) = state.session_browser.as_ref() {
+            if let Some(browser) = view.session_browser.as_ref() {
                 rows.push(text_row(
                     "session-browser",
                     &format!(
@@ -663,7 +663,7 @@ pub(crate) fn alternate_rows(
                 CellStyle::foreground(palette::TEXT).bold(),
                 width,
             ));
-            if let Some(browser) = state.tree_browser.as_ref() {
+            if let Some(browser) = view.tree_browser.as_ref() {
                 rows.push(text_row(
                     "tree-browser",
                     &format!(
@@ -738,7 +738,7 @@ pub(crate) fn alternate_rows(
                 title_style,
                 width,
             ));
-            if let Some(viewer) = state.transcript_viewer.as_ref() {
+            if let Some(viewer) = view.transcript_viewer.as_ref() {
                 rows.push(text_row(
                     "transcript-viewer",
                     &format!(
@@ -751,10 +751,10 @@ pub(crate) fn alternate_rows(
                 ));
                 let mut body = Vec::new();
                 let mut ranges = HashMap::<usize, RowRange>::new();
-                for (index, item) in state.transcript.iter().enumerate() {
+                for (index, item) in view.transcript.iter().enumerate() {
                     if viewer.mode != TranscriptViewMode::Summary
                         && (index == 0
-                            || viewer_item_group(&state.transcript[index - 1])
+                            || viewer_item_group(&view.transcript[index - 1])
                                 != viewer_item_group(item))
                     {
                         body.push(VisualRow::blank("transcript-viewer-spacing"));
@@ -808,7 +808,7 @@ pub(crate) fn alternate_rows(
         }
         Some(UiModalKind::Auth) => {
             rows.push(text_row("auth", "Authentication", title_style, width));
-            match &state.auth_state {
+            match &view.auth_state {
                 AuthState::Inactive => {}
                 AuthState::LoadingProviders => rows.push(text_row(
                     "auth",

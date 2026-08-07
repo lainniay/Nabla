@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "mode": "degraded",
+  "cwd": "/workspace",
+  "command": "echo hi",
+  "profile": {
+    "filesystem": {
+      "readOnly": [],
+      "readWrite": [],
+      "denyRead": [],
+      "denyWrite": []
+    },
+    "network": "deny",
+    "protectedPaths": []
+  },
+  "environment": {}
+}

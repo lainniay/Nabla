@@ -29,9 +29,9 @@ import { WorkspaceGrantStore } from "./features/permissions/approvals/workspace-
 import { evaluatePermission } from "./features/permissions/evaluator.ts";
 import { proposeGrantBundles } from "./features/permissions/grant-proposal.ts";
 import { PermissionKernel } from "./features/permissions/kernel.ts";
+import type { SandboxExecutionProfile } from "./features/permissions/execution/sandbox-profile.ts";
 import type {
   CapabilityMatcher,
-  ExecutionProfile,
   PermissionIntent,
   PermissionRule,
   ToolContext,
@@ -625,8 +625,8 @@ test("execution rejects post-approval cwd, argv, and environment changes", async
         identity,
         async () => "allow_once",
       );
-      assert.equal(kernel.consumeForExecution(authorization, changed), false);
-      assert.equal(kernel.consumeForExecution(authorization, approved), false);
+      assert.equal(kernel.consume(authorization, changed), false);
+      assert.equal(kernel.consume(authorization, approved), false);
     }
     const valid = await kernel.authorize(
       ctx.requestId,
@@ -634,8 +634,8 @@ test("execution rejects post-approval cwd, argv, and environment changes", async
       identity,
       async () => "allow_once",
     );
-    assert.equal(kernel.consumeForExecution(valid, approved), true);
-    assert.equal(kernel.consumeForExecution(valid, approved), false);
+    assert.equal(kernel.consume(valid, approved), true);
+    assert.equal(kernel.consume(valid, approved), false);
   } finally {
     value.cleanup();
   }
@@ -665,21 +665,21 @@ test("permit consumption and completion record the execution lifecycle", async (
       identity,
       async () => "allow_once",
     );
-    const profile: ExecutionProfile = {
+    const profile: SandboxExecutionProfile = {
+      mode: "degraded",
       backend: "none",
-      filesystem: { read: [], write: [] },
-      network: { allow: [] },
-      environment: { inherit: [], set: {} },
+      filesystem: { readWrite: [], denyRead: [], denyWrite: [] },
+      network: "blocked",
     };
     assert.equal(
-      kernel.consumeForExecution(
+      kernel.consume(
         authorization,
         intent,
         profile,
       ),
       true,
     );
-    kernel.recordExecutionResult(
+    kernel.recordResult(
       authorization,
       profile,
       true,
@@ -694,7 +694,7 @@ test("permit consumption and completion record the execution lifecycle", async (
       true,
     );
     assert.equal(
-      kernel.consumeForExecution(
+      kernel.consume(
         authorization,
         intent,
         profile,
@@ -876,7 +876,7 @@ test("an ask policy requires approval every time but accepts the current decisio
       requester,
     );
     assert.equal(first.evaluation.effect, "ask");
-    assert.equal(kernel.consumeForExecution(first, intent), true);
+    assert.equal(kernel.consume(first, intent), true);
     const second = await kernel.authorize(
       "request-2",
       { ...intent, toolCallId: "tool-2" },

@@ -173,24 +173,3 @@ export interface PermissionAdapter<TInput> {
 export interface CapabilityGrantSet {
   matchers: CapabilityMatcher[];
 }
-
-export interface FileSystemProfile {
-  read: string[];
-  write: string[];
-}
-
-export interface NetworkProfile {
-  allow: Array<{ host: string; port?: number }>;
-}
-
-export interface EnvironmentProfile {
-  inherit: string[];
-  set: Record<string, string>;
-}
-
-export interface ExecutionProfile {
-  filesystem: FileSystemProfile;
-  network: NetworkProfile;
-  environment: EnvironmentProfile;
-  backend: "none" | "native" | "container";
-}

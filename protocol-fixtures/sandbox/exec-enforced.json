@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "mode": "enforced",
+  "cwd": "/workspace",
+  "command": "echo hi",
+  "timeoutMs": 30000,
+  "profile": {
+    "filesystem": {
+      "readOnly": [],
+      "readWrite": ["/workspace"],
+      "denyRead": ["/Users/test/.ssh"],
+      "denyWrite": []
+    },
+    "network": "deny",
+    "protectedPaths": ["/Users/test/.aws"]
+  },
+  "environment": {}
+}

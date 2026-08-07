@@ -1,6 +1,5 @@
 use crate::{
     command::{CommandCatalog, CommandSpec, DiscoveredCommand},
-    file_references::FileCompletionState,
     host::ApprovalDecision,
     rpc::PiState,
     selection::{next_wrapped, previous_wrapped},
@@ -10,6 +9,8 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+pub use crate::file_references::FileCompletionState;
 
 // INFO: State is grouped by domain so protocol data, workflows, and editor logic
 // can evolve independently while callers keep using the stable state facade.

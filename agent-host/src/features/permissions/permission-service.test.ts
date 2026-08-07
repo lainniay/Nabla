@@ -11,6 +11,13 @@ import type { AgentProfile } from "../subagents/profile-model.ts";
 import type { SandboxCapability } from "./execution/sandbox-capability.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 import { PermissionService } from "./permission-service.ts";
+import type { ToolAuthorizationResult } from "./permission-service.ts";
+
+function blockedReason(
+  result: ToolAuthorizationResult,
+): string | undefined {
+  return "blocked" in result ? result.reason : undefined;
+}
 
 const workerProfile: AgentProfile = {
   description: "Worker",
@@ -92,7 +99,7 @@ test("builtin tools are allowed without approval", async () => {
     const result = await permissions.authorizeTool(event("t1", "ask_user", {}), {
       cwd,
     });
-    assert.equal(result, undefined);
+    assert.equal("permit" in result, true);
   });
 });
 
@@ -102,17 +109,17 @@ test("workspace read-only tools are allowed without approval", async () => {
       event("t1", "read", { path: "a.ts" }),
       { cwd },
     );
-    assert.equal(read, undefined);
+    assert.equal("permit" in read, true);
     const find = await permissions.authorizeTool(
       event("t2", "find", { pattern: "*.ts", path: "." }),
       { cwd },
     );
-    assert.equal(find, undefined);
+    assert.equal("permit" in find, true);
     const patternOnly = await permissions.authorizeTool(
       event("t3", "find", { pattern: "*.md" }),
       { cwd },
     );
-    assert.equal(patternOnly, undefined);
+    assert.equal("permit" in patternOnly, true);
   });
 });
 
@@ -122,8 +129,8 @@ test("credential reads stay denied inside the workspace", async () => {
       event("t1", "read", { path: ".ssh/id_rsa" }),
       { cwd },
     );
-    assert.equal(result?.block, true);
-    assert.equal(result?.reason, "Denied by permission policy");
+    assert.equal("blocked" in result, true);
+    assert.equal(blockedReason(result), "Denied by permission policy");
   });
 });
 
@@ -150,7 +157,7 @@ test("outside-workspace reads still require approval", async () => {
     assert.ok(requestId, "approval request was announced");
     interactions.replyApproval(requestId, "deny");
     const result = await pending;
-    assert.equal(result?.block, true);
+    assert.equal("blocked" in result, true);
   });
 });
 
@@ -177,7 +184,7 @@ test("mutation tools still require approval", async () => {
     assert.ok(requestId, "approval request was announced");
     interactions.replyApproval(requestId, "deny");
     const result = await pending;
-    assert.equal(result?.block, true);
+    assert.equal("blocked" in result, true);
   });
 });
 
@@ -192,14 +199,14 @@ test("workspace read-only git and benign pipeline tools are allowed without appr
       event("t1", "bash", { command }),
       { cwd },
     );
-    assert.equal(result, undefined);
+    assert.equal("permit" in result, true);
     const ls = await permissions.authorizeTool(
       event("t2", "bash", {
         command: "ls src/ agent-host/src/ agent-host/ 2>/dev/null",
       }),
       { cwd },
     );
-    assert.equal(ls, undefined);
+    assert.equal("permit" in ls, true);
     const wc = await permissions.authorizeTool(
       event("t3", "bash", {
         command: [
@@ -210,14 +217,14 @@ test("workspace read-only git and benign pipeline tools are allowed without appr
       }),
       { cwd },
     );
-    assert.equal(wc, undefined);
+    assert.equal("permit" in wc, true);
     const cd = await permissions.authorizeTool(
       event("t4", "bash", {
         command: `cd ${cwd} && echo ok`,
       }),
       { cwd },
     );
-    assert.equal(cd, undefined);
+    assert.equal("permit" in cd, true);
     const findXargs = await permissions.authorizeTool(
       event("t5", "bash", {
         command: [
@@ -230,7 +237,7 @@ test("workspace read-only git and benign pipeline tools are allowed without appr
       }),
       { cwd },
     );
-    assert.equal(findXargs, undefined);
+    assert.equal("permit" in findXargs, true);
   });
 });
 
@@ -272,7 +279,7 @@ test("non-readonly git commands still require approval", async () => {
       assert.ok(requestId, `approval was announced for: ${source}`);
       interactions.replyApproval(requestId, "deny");
       const result = await pending;
-      assert.equal(result?.block, true, source);
+      assert.equal("blocked" in result, true, source);
     }
   });
 });
@@ -296,7 +303,7 @@ test("enforced sandbox auto-allows non-dangerous bash commands", async () => {
         event("t1", "bash", { command: source }),
         { cwd },
       );
-      assert.equal(result, undefined, source);
+      assert.equal("permit" in result, true, source);
     }
   });
 });
@@ -338,7 +345,7 @@ test("enforced sandbox still asks for dangerous or network commands", async () =
       assert.ok(requestId, `approval was announced for: ${source}`);
       interactions.replyApproval(requestId, "deny");
       const result = await pending;
-      assert.equal(result?.block, true, source);
+      assert.equal("blocked" in result, true, source);
     }
   });
 });
@@ -351,8 +358,8 @@ test("profile tool restrictions block before approval", async () => {
       cwd,
       agent: { profile: "worker", profileConfig: workerProfile },
     });
-    assert.equal(result?.block, true);
-    assert.match(String(result?.reason), /not exposed to profile worker/u);
+    assert.equal("blocked" in result, true);
+    assert.match(String(blockedReason(result)), /not exposed to profile worker/u);
   });
 });
 
@@ -365,8 +372,8 @@ test("plan mode mutation is denied without approval", async () => {
     }), {
       cwd,
     });
-    assert.equal(result?.block, true);
-    assert.equal(result?.reason, "Denied by permission policy");
+    assert.equal("blocked" in result, true);
+    assert.equal(blockedReason(result), "Denied by permission policy");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -396,9 +403,11 @@ test("unknown tools request approval with high risk and allow once passes", asyn
     }
     assert.ok(requestId, "approval request was announced");
     interactions.replyApproval(requestId, "allow_once");
-    assert.equal(await approving, undefined);
-    permissions.finishTool("t1", true);
-    permissions.finishTool("t1", true);
+    const result = await approving;
+    assert.equal("permit" in result, true);
+    const permit = "permit" in result ? result.permit : undefined;
+    permissions.finishTool(permit!, true);
+    permissions.finishTool(permit!, true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -459,8 +468,8 @@ test("denied approvals block with the user-denied reason", async () => {
       }
     }
     const result = await pending;
-    assert.equal(result?.block, true);
-    assert.equal(result?.reason, "Denied by user");
+    assert.equal("blocked" in result, true);
+    assert.equal(blockedReason(result), "Denied by user");
   });
 });
 

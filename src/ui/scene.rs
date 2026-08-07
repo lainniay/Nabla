@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use crate::state::{AppState, TranscriptItem};
+use crate::state::TranscriptItem;
+
+use view_model::SceneViewModel;
 
 use super::{
     layout::{LayoutEngine, LayoutRequest},
@@ -18,9 +20,9 @@ pub(crate) const MAX_COMPOSER_CONTENT_HEIGHT: u16 = 6;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SceneBuilder;
 
-pub fn animation_active(state: &AppState) -> bool {
-    state.run_state.is_busy()
-        || state.transcript.iter().any(|item| {
+pub fn animation_active(view: &SceneViewModel) -> bool {
+    view.run_state.is_busy()
+        || view.transcript.iter().any(|item| {
             matches!(
                 item,
                 TranscriptItem::Tool(tool)
@@ -34,42 +36,42 @@ pub fn animation_active(state: &AppState) -> bool {
 }
 
 impl SceneBuilder {
-    pub fn build(self, domain: &AppState, ui: &UiState, surface: SurfaceKind) -> VisualFrame {
+    pub fn build(self, view: &SceneViewModel, ui: &UiState, surface: SurfaceKind) -> VisualFrame {
         match surface {
-            SurfaceKind::Primary => self.build_primary(domain, ui, None),
-            SurfaceKind::Alternate => self.build_alternate(domain, ui),
+            SurfaceKind::Primary => self.build_primary(view, ui, None),
+            SurfaceKind::Alternate => self.build_alternate(view, ui),
         }
     }
 
     pub fn build_with_projection(
         self,
-        domain: &AppState,
+        view: &SceneViewModel,
         ui: &UiState,
         surface: SurfaceKind,
         projection: &super::types::PrimaryTranscriptProjection,
     ) -> VisualFrame {
         match surface {
-            SurfaceKind::Primary => self.build_primary(domain, ui, Some(projection)),
-            SurfaceKind::Alternate => self.build_alternate(domain, ui),
+            SurfaceKind::Primary => self.build_primary(view, ui, Some(projection)),
+            SurfaceKind::Alternate => self.build_alternate(view, ui),
         }
     }
 
     fn build_primary(
         self,
-        domain: &AppState,
+        view: &SceneViewModel,
         ui: &UiState,
         projection: Option<&super::types::PrimaryTranscriptProjection>,
     ) -> VisualFrame {
         let size = ui.terminal.size;
         let composer_width = composer_content_width(size.width);
         let (cursor_row, _) = cursor_geometry(
-            domain.editor.text(),
-            GraphemeIndex(domain.editor.cursor()),
+            view.editor.text(),
+            GraphemeIndex(view.editor.cursor()),
             composer_width,
         );
         let editor_height = wrap_text(
             "composer-measure",
-            domain.editor.text(),
+            view.editor.text(),
             composer_width,
             CellStyle::default(),
         )
@@ -79,7 +81,7 @@ impl SceneBuilder {
             .unwrap_or(MAX_COMPOSER_CONTENT_HEIGHT)
             .clamp(1, MAX_COMPOSER_CONTENT_HEIGHT)
             .saturating_add(COMPOSER_CHROME_HEIGHT);
-        let panel_request = primary_panel_request(domain, size.width);
+        let panel_request = primary_panel_request(view, size.width);
         let mut layout = LayoutEngine.layout(
             size,
             LayoutRequest {
@@ -126,7 +128,7 @@ impl SceneBuilder {
             .map(|(area, request)| request.render(area));
 
         let composer = composer_rows(
-            domain,
+            view,
             layout.composer.width,
             layout.composer.height,
             cursor_row,
@@ -137,8 +139,8 @@ impl SceneBuilder {
             target: HitTarget::Composer,
         });
         let (editor_row, editor_column) = cursor_geometry(
-            domain.editor.text(),
-            GraphemeIndex(domain.editor.cursor()),
+            view.editor.text(),
+            GraphemeIndex(view.editor.cursor()),
             composer_content_width(layout.composer.width),
         );
         let visible_cursor_row = editor_row.saturating_sub(composer.first_content_row);
@@ -157,13 +159,13 @@ impl SceneBuilder {
         });
         canvas.place(
             layout.status,
-            &[status_row(domain, size.width, ui.animation_frame)],
+            &[status_row(view, size.width, ui.animation_frame)],
         );
         canvas.viewport = layout.owned_surface;
         canvas.finish()
     }
 
-    fn build_alternate(self, domain: &AppState, ui: &UiState) -> VisualFrame {
+    fn build_alternate(self, view: &SceneViewModel, ui: &UiState) -> VisualFrame {
         let size = ui.terminal.size;
         let status_height = u16::from(size.height > 0);
         let composer_height = 3.min(size.height.saturating_sub(status_height));
@@ -183,9 +185,9 @@ impl SceneBuilder {
             status: Rect::new(0, size.height.saturating_sub(1), size.width, 1),
         };
         let mut canvas = Canvas::new(ui.revision, size, layout);
-        let rows = alternate_rows(domain, ui, size.width, layout.transcript.height);
+        let rows = alternate_rows(view, ui, size.width, layout.transcript.height);
         canvas.place(layout.transcript, &rows);
-        let input = alternate_input_model(domain);
+        let input = alternate_input_model(view);
         let cursor_text = input.display_text();
         let (cursor_row, cursor_column) = cursor_geometry(
             &cursor_text,
@@ -215,7 +217,7 @@ impl SceneBuilder {
                     .min(size.height.saturating_sub(1)),
             });
         }
-        let status = alternate_status(domain, input.focused);
+        let status = alternate_status(view, input.focused);
         canvas.place(
             layout.status,
             &[text_row(
@@ -334,6 +336,7 @@ pub(crate) fn text_row(id: &str, text: &str, style: CellStyle, width: u16) -> Vi
 
 pub mod composer;
 pub mod panels;
+pub mod view_model;
 
 #[cfg(test)]
 mod tests;
@@ -392,29 +395,29 @@ pub(crate) fn append_text_cells(cells: &mut Vec<StyledCell>, text: &str, style: 
     }
 }
 
-fn status_row(state: &AppState, width: u16, animation_frame: u8) -> VisualRow {
-    let context = state
+fn status_row(view: &SceneViewModel, width: u16, animation_frame: u8) -> VisualRow {
+    let context = view
         .context
         .actual_percent
         .map(|percent| format!("ctx {percent:.0}%"))
         .unwrap_or_else(|| "ctx —".to_owned());
     let left = format!(
         "{} · thinking {}",
-        state.model_label(),
-        state.session.thinking_level
+        view.model_label(),
+        view.session.thinking_level
     );
     let mut right_parts = Vec::new();
-    if state.run_state.is_busy() {
+    if view.run_state.is_busy() {
         right_parts.push(spinner(animation_frame).to_owned());
     }
-    if state.connection_state == crate::state::ConnectionState::Disconnected {
+    if *view.connection_state == crate::state::ConnectionState::Disconnected {
         right_parts.push("disconnected".to_owned());
     }
     right_parts.push(context);
-    if state.plan_mode_active {
+    if *view.plan_mode_active {
         right_parts.push("PLAN".to_owned());
     }
-    match state.sandbox_status.mode.as_str() {
+    match view.sandbox_status.mode.as_str() {
         "enforced" => right_parts.push("sandbox".to_owned()),
         "degraded" => right_parts.push("sandbox:degraded".to_owned()),
         _ => right_parts.push("sandbox:off".to_owned()),

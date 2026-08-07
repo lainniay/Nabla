@@ -6,10 +6,8 @@ import type {
   ApprovalDecision,
   PermissionEvaluation,
 } from "./kernel.ts";
-import type {
-  ExecutionProfile,
-  PermissionIntent,
-} from "./model.ts";
+import type { PermissionIntent } from "./model.ts";
+import type { SandboxExecutionProfile } from "./execution/sandbox-profile.ts";
 import { digestValue } from "./shell/digest.ts";
 
 export interface PermissionAuditEntry {
@@ -25,7 +23,7 @@ export interface PermissionAuditEntry {
   effect: "allow" | "ask" | "deny";
   decision?: ApprovalDecision;
   grantScope?: "once" | "session" | "workspace";
-  executionProfile?: ExecutionProfile;
+  sandboxProfile?: SandboxExecutionProfile;
   onceConsumed?: boolean;
   outcome:
     | "automatic_allow"
@@ -81,7 +79,7 @@ export function auditEntry(
   options: {
     decision?: ApprovalDecision;
     risk?: PermissionAuditEntry["risk"];
-    executionProfile?: ExecutionProfile;
+    sandboxProfile?: SandboxExecutionProfile;
     onceConsumed?: boolean;
     outcome?: PermissionAuditEntry["outcome"];
   } = {},
@@ -106,8 +104,8 @@ export function auditEntry(
     effect: evaluation.effect,
     ...(options.decision ? { decision: options.decision } : {}),
     ...(grantScope ? { grantScope } : {}),
-    ...(options.executionProfile
-      ? { executionProfile: options.executionProfile }
+    ...(options.sandboxProfile
+      ? { sandboxProfile: options.sandboxProfile }
       : {}),
     ...(options.onceConsumed === undefined
       ? {}

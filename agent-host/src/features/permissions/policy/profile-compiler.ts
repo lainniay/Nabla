@@ -1,22 +1,24 @@
-import { resolve } from "node:path";
-
+import { ShellAdapter } from "../adapters/shell.ts";
+import { evaluatePermission } from "../evaluator.ts";
+import { permissionIntentForTool } from "../tool-intent.ts";
 import type { AgentProfile } from "../../subagents/profile-model.ts";
 import type {
   CapabilityMatcher,
   FileOperation,
   PermissionRule,
   PolicyEffect,
+  ToolContext,
 } from "../model.ts";
-import { patternMatches } from "../filesystem/path.ts";
+import { canonicalizePath } from "../filesystem/path.ts";
 import { READ_ONLY_TOOL_NAMES } from "../shell/rules.ts";
 
-const FILE_OPERATION_BY_TOOL: Record<string, FileOperation> = {
-  read: "read",
-  grep: "read",
-  find: "list",
-  ls: "list",
-  edit: "write",
-  write: "write",
+const FILE_OPERATIONS_BY_TOOL: Record<string, readonly FileOperation[]> = {
+  read: ["read"],
+  grep: ["read"],
+  find: ["list"],
+  ls: ["list"],
+  edit: ["write"],
+  write: ["truncate", "write", "create"],
 };
 
 /**
@@ -46,16 +48,18 @@ export function compileAgentProfileRules(
         push(rule.effect, { kind: "tool", tool });
         continue;
       }
-      const operation = FILE_OPERATION_BY_TOOL[tool];
+      const operations = FILE_OPERATIONS_BY_TOOL[tool];
       if (tool === "bash") {
         push(rule.effect, { kind: "shell_command", pattern: rule.resource });
-      } else if (operation) {
-        push(rule.effect, {
-          kind: "file",
-          operation,
-          path: absolutePattern(workspace, rule.resource),
-          pattern: true,
-        });
+      } else if (operations) {
+        for (const operation of operations) {
+          push(rule.effect, {
+            kind: "file",
+            operation,
+            path: canonicalizePath(workspace, rule.resource),
+            pattern: true,
+          });
+        }
       } else {
         push(rule.effect, { kind: "tool", tool });
       }
@@ -65,49 +69,54 @@ export function compileAgentProfileRules(
 }
 
 /**
- * Display/validation convenience over the same compiled rules. Authorization
- * decisions always go through PermissionKernel.
+ * Evaluates a profile rule set against one tool/path using the canonical
+ * PermissionKernel evaluator. Authorization decisions never use this function;
+ * it exists for pre-flight checks (e.g. worktree changed paths) that need the
+ * same single evaluator without issuing approvals.
  */
-export function profileToolEffect(
+export function evaluateProfilePermission(
   profile: AgentProfile,
   tool: string,
-  resource?: string,
-  workspace?: string,
+  resource: string,
+  workspace: string,
 ): PolicyEffect {
-  let effect: PolicyEffect | undefined;
-  for (const rule of compileAgentProfileRules(profile, workspace ?? "")) {
-    if (!matchesProfileRule(rule.matcher, tool, resource, workspace)) {
-      continue;
-    }
-    if (rule.effect === "deny") return "deny";
-    if (rule.effect === "ask") effect = "ask";
-    else if (effect === undefined) effect = "allow";
-  }
-  return effect ?? (READ_ONLY_TOOL_NAMES.includes(
-    tool as (typeof READ_ONLY_TOOL_NAMES)[number],
-  )
-    ? "allow"
-    : "ask");
+  return evaluateProfileIntent(
+    profile,
+    tool,
+    tool === "bash" ? { command: resource } : { path: resource },
+    workspace,
+  );
 }
 
-function matchesProfileRule(
-  matcher: CapabilityMatcher,
+export function evaluateProfileToolExposure(
+  profile: AgentProfile,
   tool: string,
-  resource: string | undefined,
-  workspace: string | undefined,
-): boolean {
-  if (matcher.kind === "tool") return matcher.tool === tool;
-  if (resource === undefined) return false;
-  if (matcher.kind === "shell_command") {
-    return patternMatches(matcher.pattern, resource);
-  }
-  if (matcher.kind === "file") {
-    return workspace !== undefined &&
-      patternMatches(matcher.path, resolve(workspace, resource));
-  }
-  return false;
+  workspace = "",
+): PolicyEffect {
+  return evaluateProfileIntent(profile, tool, {}, workspace);
 }
 
-function absolutePattern(workspace: string, pattern: string): string {
-  return pattern.startsWith("/") ? pattern : resolve(workspace, pattern);
+function evaluateProfileIntent(
+  profile: AgentProfile,
+  tool: string,
+  input: Record<string, unknown>,
+  workspace: string,
+): PolicyEffect {
+  const context: ToolContext = {
+    requestId: `profile-${tool}`,
+    toolCallId: `profile-${tool}`,
+    sessionId: "",
+    workspaceId: "",
+    cwd: workspace,
+  };
+  const intent = permissionIntentForTool(
+    context,
+    tool,
+    input,
+    new ShellAdapter(),
+  );
+  return evaluatePermission(
+    intent,
+    compileAgentProfileRules(profile, workspace),
+  ).effect;
 }

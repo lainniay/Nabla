@@ -1,9 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
-import {
-  createLocalBashOperations,
-  type BashOperations,
-} from "@earendil-works/pi-coding-agent";
+import type { BashOperations } from "@earendil-works/pi-coding-agent";
 
 import type { SandboxStatus } from "../../../protocol/contracts.ts";
 import type { SandboxCapability } from "./sandbox-capability.ts";
@@ -80,16 +77,11 @@ export class RustSandboxBackend {
   }
 
   operationsFor(profile: SandboxExecutionProfile): BashOperations {
-    if (profile.mode !== "enforced" || profile.backend !== "native") {
-      // ponytail: degraded path reuses Pi's own local shell; sandbox enforcement
-      // is replaced by explicit approval, add a real fallback backend if needed.
-      return createLocalBashOperations();
-    }
-
     return {
       exec: async (command, cwd, { onData, signal, timeout, env }) => {
         const request = {
           version: 1,
+          mode: profile.mode,
           cwd,
           command,
           ...(timeout === undefined ? {} : { timeoutMs: timeout * 1000 }),

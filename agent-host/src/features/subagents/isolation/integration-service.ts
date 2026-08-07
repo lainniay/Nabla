@@ -1,17 +1,17 @@
 import { resolve } from "node:path";
 
-import { isCredentialPath } from "../permissions/filesystem/credential.ts";
-import type { AgentProfile } from "./profile-model.ts";
-import type { HarnessConfig } from "../workspace/config.ts";
-import { profileToolEffect } from "../permissions/policy/profile-compiler.ts";
-import { workspaceRelativePath } from "../permissions/filesystem/path.ts";
-import { isJsonObject } from "../../protocol/validation.ts";
+import { isCredentialPath } from "../../permissions/filesystem/credential.ts";
+import type { AgentProfile } from "../profile-model.ts";
+import type { HarnessConfig } from "../../workspace/config.ts";
+import { evaluateProfilePermission } from "../../permissions/policy/profile-compiler.ts";
+import { workspaceRelativePath } from "../../permissions/filesystem/path.ts";
+import { isJsonObject } from "../../../protocol/validation.ts";
 import {
-  WorktreeManager,
+  WorktreeIsolation,
   type AgentIsolationPolicy,
   type WorktreeRecord,
   type WorktreeRecoveryState,
-} from "./isolation/worktree.ts";
+} from "./worktree.ts";
 
 export interface RecoveredSubagent {
   record: WorktreeRecord;
@@ -20,7 +20,7 @@ export interface RecoveredSubagent {
 }
 
 export class IntegrationService {
-  private readonly worktrees = new WorktreeManager({
+  private readonly worktrees = new WorktreeIsolation({
     credentialPath: isCredentialPath,
   });
   private readonly warn: (message: string) => void;
@@ -156,7 +156,7 @@ export class IntegrationService {
         pathTools.length > 0 &&
         pathTools.every(
           (tool) =>
-            profileToolEffect(profile, tool, workspaceRelative, originCwd) ===
+            evaluateProfilePermission(profile, tool, workspaceRelative, originCwd) ===
             "deny",
         ) &&
         !profile.tools.includes("bash")

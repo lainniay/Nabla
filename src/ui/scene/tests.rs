@@ -25,6 +25,10 @@ use serde_json::json;
 
 use super::*;
 
+fn view(domain: &AppState) -> SceneViewModel<'_> {
+    SceneViewModel::from_domain(domain)
+}
+
 fn state() -> AppState {
     AppState::new(PiState {
         model: Some(json!({"provider": "test", "id": "model"})),
@@ -59,7 +63,7 @@ fn frame_rows_layout_bounds_and_cursor_share_one_revision() {
     domain.editor.insert_text("你👩🏽‍💻");
     let mut store = UiStore::new(super::super::types::TerminalSize::new(20, 8));
     store.synchronize(&domain);
-    let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
 
     assert_eq!(frame.revision, store.state().revision);
     assert_eq!(frame.rows.len(), 8);
@@ -90,7 +94,7 @@ fn stable_history_remains_resident_until_it_leaves_the_fixed_window() {
     ];
     let mut store = UiStore::new(super::super::types::TerminalSize::new(30, 8));
     store.synchronize(&domain);
-    let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     let visible = frame
         .rows
         .iter()
@@ -107,7 +111,7 @@ fn empty_primary_surface_owns_the_full_screen_with_fixed_history_geometry() {
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
 
-    let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
 
     assert_eq!(frame.viewport, Rect::new(0, 0, size.width, size.height));
     assert_eq!(frame.main_layout.owned_surface, frame.viewport);
@@ -133,7 +137,7 @@ fn bootstrap_blank_rows_move_up_as_transcript_grows() {
     let size = super::super::types::TerminalSize::new(40, 12);
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
-    let empty = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let empty = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
 
     domain
         .transcript
@@ -143,7 +147,7 @@ fn bootstrap_blank_rows_move_up_as_transcript_grows() {
             ..AssistantMessage::default()
         }));
     store.synchronize(&domain);
-    let grown = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let grown = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
 
     assert_eq!(empty.viewport, Rect::new(0, 0, size.width, size.height));
     assert_eq!(grown.viewport, empty.viewport);
@@ -166,7 +170,7 @@ fn claimed_primary_surface_never_exposes_shell_rows() {
     let size = super::super::types::TerminalSize::new(40, 12);
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
-    let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
 
     assert_eq!(frame.viewport, Rect::new(0, 0, size.width, size.height));
     assert_eq!(frame.main_layout.transcript.y, 0);
@@ -187,7 +191,7 @@ fn message_completion_preserves_visible_row_positions() {
     let size = super::super::types::TerminalSize::new(48, 14);
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
-    let streaming = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let streaming = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     let row_before = streaming
         .rows
         .iter()
@@ -208,7 +212,7 @@ fn message_completion_preserves_visible_row_positions() {
         store.state().animation_frame,
     );
     let completed = SceneBuilder.build_with_projection(
-        &domain,
+        &view(&domain),
         store.state(),
         SurfaceKind::Primary,
         &projection,
@@ -243,7 +247,7 @@ fn completed_assistant_does_not_leave_screen_height_gap() {
     let size = super::super::types::TerminalSize::new(48, 14);
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
-    let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     let last_history_row = frame.rows[..usize::from(frame.main_layout.composer.y)]
         .iter()
         .rposition(|row| !row.plain_text().is_empty())
@@ -275,7 +279,7 @@ fn turn_separator_remains_adjacent_to_visible_history() {
     let size = super::super::types::TerminalSize::new(48, 14);
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
-    let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     let visible = frame
         .rows
         .iter()
@@ -305,15 +309,15 @@ fn opening_and_closing_panel_restores_owned_primary_rows() {
     let size = super::super::types::TerminalSize::new(48, 14);
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
-    let baseline = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let baseline = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
 
     domain.editor.insert_text("/");
     store.synchronize(&domain);
-    let opened = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let opened = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     assert!(opened.panel.is_some());
     domain.editor.clear();
     store.synchronize(&domain);
-    let restored = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let restored = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
 
     assert_eq!(baseline.viewport, Rect::new(0, 0, size.width, size.height));
     assert_eq!(restored.viewport, baseline.viewport);
@@ -342,7 +346,7 @@ fn active_transcript_keeps_one_blank_row_above_the_composer() {
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
 
-    let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     let transcript = frame
         .component_bounds
         .get("transcript:0")
@@ -386,7 +390,7 @@ fn resident_turn_separator_keeps_an_owned_blank_row_above_the_composer() {
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
 
-    let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     let gap = frame.main_layout.composer.y.saturating_sub(1);
     assert_eq!(frame.viewport.y, 0);
     assert_eq!(frame.main_layout.history_window.y, 0);
@@ -419,10 +423,10 @@ fn animation_changes_only_the_live_frame_and_never_history_or_domain_state() {
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
 
-    assert!(animation_active(&domain));
-    let first = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    assert!(animation_active(&view(&domain)));
+    let first = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     store.state_mut().animation_frame = 1;
-    let second = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let second = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     let first_text = first
         .rows
         .iter()
@@ -461,11 +465,11 @@ fn panel_open_and_close_restores_the_occluded_transcript_exactly() {
         }));
     let mut store = UiStore::new(super::super::types::TerminalSize::new(80, 24));
     store.synchronize(&domain);
-    let baseline = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let baseline = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
 
     domain.editor.insert_text("/");
     store.reduce(super::super::store::UiEvent::DomainChanged);
-    let opened = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let opened = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     assert!(opened.main_layout.panel.is_some());
     assert_eq!(
         opened.main_layout.transcript,
@@ -491,7 +495,7 @@ fn panel_open_and_close_restores_the_occluded_transcript_exactly() {
 
     domain.editor.clear();
     store.reduce(super::super::store::UiEvent::DomainChanged);
-    let restored = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let restored = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     assert!(restored.main_layout.panel.is_none());
     assert!(restored.panel.is_none());
     assert_eq!(
@@ -566,7 +570,7 @@ fn approval_panel_only_renders_actions_valid_for_the_request() {
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
 
-    let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     let panel = frame.panel.expect("approval panel");
     let text = panel
         .rows
@@ -653,7 +657,7 @@ fn high_risk_approval_uses_the_same_full_width_floating_panel() {
     store.synchronize(&domain);
 
     assert_eq!(SurfaceManager.route(&domain), SurfaceKind::Primary);
-    let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     let panel = frame.panel.expect("high-risk approval panel");
     let text = panel
         .rows
@@ -714,7 +718,7 @@ fn approval_panel_normalizes_paths_truncates_details_and_keeps_actions_visible()
         ..ApprovalState::default()
     });
 
-    let request = primary_panel_request(&domain, 36).expect("approval panel request");
+    let request = primary_panel_request(&view(&domain), 36).expect("approval panel request");
     assert!(request.height <= 10);
     let all_text = request
         .rows
@@ -778,7 +782,7 @@ fn alternate_transcript_uses_modes_expansion_selection_and_full_output() {
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
 
-    let normal = SceneBuilder.build(&domain, store.state(), SurfaceKind::Alternate);
+    let normal = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Alternate);
     let normal_text = normal
         .rows
         .iter()
@@ -799,7 +803,7 @@ fn alternate_transcript_uses_modes_expansion_selection_and_full_output() {
     );
 
     domain.transcript_viewer.as_mut().unwrap().mode = TranscriptViewMode::Verbose;
-    let verbose = SceneBuilder.build(&domain, store.state(), SurfaceKind::Alternate);
+    let verbose = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Alternate);
     let verbose_text = verbose
         .rows
         .iter()
@@ -818,7 +822,7 @@ fn alternate_transcript_uses_modes_expansion_selection_and_full_output() {
     );
 
     domain.transcript_viewer.as_mut().unwrap().mode = TranscriptViewMode::Summary;
-    let summary = SceneBuilder.build(&domain, store.state(), SurfaceKind::Alternate);
+    let summary = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Alternate);
     let summary_text = summary
         .rows
         .iter()
@@ -872,7 +876,7 @@ fn alternate_search_box_tracks_editor_focus_cursor_and_escape_visual_state() {
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
 
-    let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Alternate);
+    let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Alternate);
     let composer = frame.main_layout.composer;
     let text = frame.rows[usize::from(composer.y)..usize::from(composer.bottom())]
         .iter()
@@ -894,7 +898,7 @@ fn alternate_search_box_tracks_editor_focus_cursor_and_escape_visual_state() {
 fn alternate_input_projection_covers_session_tree_and_secret_auth_editors() {
     let mut domain = state();
     domain.session_browser = Some(SessionBrowserState::loading());
-    let session = alternate_input_model(&domain);
+    let session = alternate_input_model(&view(&domain));
     assert_eq!(session.placeholder, "Search sessions");
     assert!(!session.focused);
 
@@ -907,7 +911,7 @@ fn alternate_input_projection_covers_session_tree_and_secret_auth_editors() {
         editor: label,
     };
     domain.tree_browser = Some(tree);
-    let tree = alternate_input_model(&domain);
+    let tree = alternate_input_model(&view(&domain));
     assert_eq!(tree.text, "branch label");
     assert!(tree.focused);
 
@@ -930,7 +934,7 @@ fn alternate_input_projection_covers_session_tree_and_secret_auth_editors() {
             editor: secret,
         }),
     }));
-    let auth = alternate_input_model(&domain);
+    let auth = alternate_input_model(&view(&domain));
     assert!(auth.focused);
     assert!(auth.secret);
     assert_eq!(auth.display_text(), "••");
@@ -1045,7 +1049,7 @@ fn resize_rebuilds_every_row_at_the_new_width_and_height() {
         super::super::types::TerminalSize::new(200, 60),
     ] {
         store.reduce(super::super::store::UiEvent::Resize(size));
-        let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+        let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
         assert_eq!(frame.terminal_size, size);
         assert_eq!(frame.rows.len(), usize::from(size.height));
         assert_eq!(frame.viewport.bottom(), size.height);
@@ -1066,11 +1070,11 @@ fn busy_to_idle_converges_in_the_same_frame_without_layout_holes() {
     store.synchronize(&domain);
     domain.run_state = RunState::Running;
     store.reduce(super::super::store::UiEvent::DomainChanged);
-    let busy = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let busy = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
 
     domain.run_state = RunState::Idle;
     store.reduce(super::super::store::UiEvent::DomainChanged);
-    let idle = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let idle = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     assert_eq!(busy.main_layout, idle.main_layout);
     assert_eq!(busy.rows.len(), idle.rows.len());
     let busy_status = busy.rows.last().unwrap().plain_text();
@@ -1093,7 +1097,7 @@ fn composer_has_a_full_width_border_and_cursor_stays_inside_it() {
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
 
-    let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     let composer = frame.main_layout.composer;
     let top = &frame.rows[usize::from(composer.y)];
     let content = &frame.rows[usize::from(composer.y.saturating_add(1))];
@@ -1131,7 +1135,7 @@ fn status_line_fills_the_width_without_a_background() {
     let mut store = UiStore::new(size);
     store.synchronize(&domain);
 
-    let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     let status = frame.rows.last().expect("status row");
     assert_eq!(status.display_width(), size.width);
     assert!(status.plain_text().starts_with(' '));
@@ -1159,7 +1163,7 @@ fn plan_review_panel_shows_only_execute_fresh_execute_close() {
         ..crate::state::ContextSnapshot::default()
     };
 
-    let panel = primary_panel_request(&domain, 48).expect("plan review panel");
+    let panel = primary_panel_request(&view(&domain), 48).expect("plan review panel");
     let text = panel
         .rows
         .iter()
@@ -1184,7 +1188,7 @@ fn plan_review_panel_shows_unknown_when_context_is_unavailable() {
         submitting: false,
     });
 
-    let panel = primary_panel_request(&domain, 48).expect("plan review panel");
+    let panel = primary_panel_request(&view(&domain), 48).expect("plan review panel");
     let text = panel
         .rows
         .iter()
@@ -1202,7 +1206,7 @@ fn open_panel_sits_flush_against_the_composer() {
     let mut store = UiStore::new(size);
     let baseline_domain = state();
     store.synchronize(&baseline_domain);
-    let baseline = SceneBuilder.build(&baseline_domain, store.state(), SurfaceKind::Primary);
+    let baseline = SceneBuilder.build(&view(&baseline_domain), store.state(), SurfaceKind::Primary);
 
     let mut domain = state();
     domain.plan_review = Some(crate::state::PlanReviewState {
@@ -1211,7 +1215,7 @@ fn open_panel_sits_flush_against_the_composer() {
     });
     store.synchronize(&domain);
 
-    let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
+    let frame = SceneBuilder.build(&view(&domain), store.state(), SurfaceKind::Primary);
     let panel = frame.panel.expect("plan review panel");
 
     assert_eq!(frame.main_layout.composer, baseline.main_layout.composer);

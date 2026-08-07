@@ -59,6 +59,7 @@ fn bind(flag: &str, path: &Path, args: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::SandboxMode;
     use crate::sandbox::profile::{CompiledProfile, compile};
     use crate::sandbox::request::{FilesystemProfile, SandboxExecRequest, SandboxProfile};
     use std::collections::BTreeMap;
@@ -66,6 +67,7 @@ mod tests {
     fn request() -> SandboxExecRequest {
         SandboxExecRequest {
             version: 1,
+            mode: SandboxMode::Enforced,
             cwd: "/workspace".into(),
             command: "echo hi".into(),
             timeout_ms: None,

@@ -6,7 +6,6 @@ import { resolve } from "node:path";
 import type {
   InlineExtension,
   ToolCallEvent,
-  ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -26,6 +25,8 @@ import type { JsonObject } from "../protocol/validation.ts";
 import type { SubagentOptions } from "../features/subagents/subagent-types.ts";
 import { buildWorkspaceContext } from "./workspace-context.ts";
 import { normalizeToolInputPaths } from "../features/permissions/filesystem/path.ts";
+import type { ExecutionPermit } from "../features/permissions/execution/sandbox-profile.ts";
+import type { ToolAuthorizationResult } from "../features/permissions/permission-service.ts";
 
 const STANDARD_INSTRUCTIONS = [
   "Follow Pi's normal interactive agent behavior and the user's direct request.",
@@ -87,8 +88,8 @@ export interface PiExtensionPort {
         signal?: AbortSignal;
         agent?: unknown;
       },
-    ): Promise<ToolCallEventResult | undefined>;
-    finishTool(toolCallId: string, succeeded: boolean): void;
+    ): Promise<ToolAuthorizationResult>;
+    finishTool(permit: ExecutionPermit, succeeded: boolean): void;
   };
   workspace: { subagentCatalogPrompt(): string };
   send(event: JsonObject): void;
@@ -106,6 +107,7 @@ export class PiExtensionFactory {
       name: "nabla-control",
       factory: (pi) => {
         const newWriteCalls = new Set<string>();
+        const pendingPermits = new Map<string, ExecutionPermit>();
         let activeTurn:
           | {
               turnId: string;
@@ -302,7 +304,7 @@ export class PiExtensionFactory {
             ),
           );
         });
-        pi.on("tool_call", (event, context) => {
+        pi.on("tool_call", async (event, context) => {
           if (event.toolName === "bash") return;
           const input = event.input as Record<string, unknown>;
           normalizeToolInputPaths(input, context.cwd);
@@ -310,14 +312,23 @@ export class PiExtensionFactory {
             const target = resolve(context.cwd, expandHomePath(input.path));
             if (!existsSync(target)) newWriteCalls.add(event.toolCallId);
           }
-          return this.port.permissions.authorizeTool(event, {
+          const result = await this.port.permissions.authorizeTool(event, {
             cwd: context.cwd,
             signal: context.signal,
           });
+          if ("blocked" in result) {
+            return { block: true, reason: result.reason };
+          }
+          pendingPermits.set(event.toolCallId, result.permit);
+          return undefined;
         });
         pi.on("tool_result", (event) => {
           if (event.toolName === "bash") return;
-          this.port.permissions.finishTool(event.toolCallId, !event.isError);
+          const permit = pendingPermits.get(event.toolCallId);
+          if (permit) {
+            pendingPermits.delete(event.toolCallId);
+            this.port.permissions.finishTool(permit, !event.isError);
+          }
           if (event.toolName !== "write") return;
           const wasNew = newWriteCalls.delete(event.toolCallId);
           if (!wasNew || event.isError) return;

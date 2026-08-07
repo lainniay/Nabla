@@ -83,9 +83,16 @@ function createFactory(overrides: Partial<PiExtensionPort> = {}) {
     permissions: {
       authorizeTool: async () => {
         calls.push("permissions.authorizeTool");
-        return undefined;
+        return {
+          permit: {
+            id: "p1",
+            toolCallId: "t1",
+            intentDigest: "d",
+            sandboxProfile: null,
+          },
+        };
       },
-      finishTool: () => {
+      finishTool: (_permit: unknown) => {
         calls.push("permissions.finishTool");
       },
     },
@@ -158,7 +165,7 @@ test("ask_user and delegate_task call their service ports", async () => {
   assert.ok(calls.includes("subagents.run"));
 });
 
-test("session, context, and permission hooks route to service ports", () => {
+test("session, context, and permission hooks route to service ports", async () => {
   const { calls, pi } = createFactory();
   pi.handlers.get("session_start")?.(
     {},
@@ -171,7 +178,7 @@ test("session, context, and permission hooks route to service ports", () => {
     { messages: [] },
     { getContextUsage: () => undefined },
   );
-  pi.handlers.get("tool_call")?.(
+  await pi.handlers.get("tool_call")?.(
     { toolCallId: "t1", toolName: "read", input: { path: "a.ts" } },
     { cwd: "/workspace", signal: undefined },
   );

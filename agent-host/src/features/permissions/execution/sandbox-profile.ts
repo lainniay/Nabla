@@ -17,8 +17,9 @@ export interface SandboxExecutionProfile {
 
 export interface ExecutionPermit {
   id: string;
+  toolCallId: string;
   intentDigest: string;
-  sandboxProfile: SandboxExecutionProfile;
+  sandboxProfile: SandboxExecutionProfile | null;
 }
 
 const CREDENTIAL_PATHS = [".ssh", ".aws", ".gnupg"].map((name) =>

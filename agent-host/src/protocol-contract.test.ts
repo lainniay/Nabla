@@ -96,3 +96,29 @@ test("shared persistent-approval fixture uses the cross-language wire shape", ()
   assert.equal(fixture.grants[0]?.scope, "workspace");
   assert.equal(fixture.grants[0]?.matchers[0]?.kind, "exec");
 });
+
+test("shared sandbox exec fixtures carry the execution mode", () => {
+  for (const [name, expectedMode] of [
+    ["exec-enforced.json", "enforced"],
+    ["exec-degraded.json", "degraded"],
+  ] as const) {
+    const fixturePath = new URL(
+      `../../protocol-fixtures/sandbox/${name}`,
+      import.meta.url,
+    );
+    const parsed = JSON.parse(
+      readFileSync(fixturePath, "utf8"),
+    ) as {
+      version: number;
+      mode: string;
+      cwd: string;
+      command: string;
+      profile: { filesystem: Record<string, unknown>; network: string };
+    };
+    assert.equal(parsed.version, 1);
+    assert.equal(parsed.mode, expectedMode);
+    assert.equal(typeof parsed.cwd, "string");
+    assert.equal(typeof parsed.command, "string");
+    assert.equal(parsed.profile.network, "deny");
+  }
+});

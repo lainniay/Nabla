@@ -14,7 +14,7 @@ import type { ApprovalRequest } from "./approval.ts";
 import type { PlanQuestion } from "./questions.ts";
 import type { JsonObject } from "./protocol/validation.ts";
 import type { InteractionBroker } from "./features/interactions/interaction-broker.ts";
-import type { IntegrationService } from "./features/subagents/integration-service.ts";
+import type { IntegrationService } from "./features/subagents/isolation/integration-service.ts";
 import { RuntimeSupervisor } from "./runtime/runtime-supervisor.ts";
 import type { HostApp } from "./app/host-app.ts";
 import { createHostApp } from "./app/create-host-app.ts";

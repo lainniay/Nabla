@@ -5,6 +5,7 @@ use std::{
 };
 
 use crossterm::event::Event as TerminalEvent;
+use nabla::ui::scene::view_model::SceneViewModel;
 use nabla::{
     app::{App, AppEffect, AppEvent},
     config::UiConfig,
@@ -215,7 +216,7 @@ async fn run(
                 }
                 let tick_result = ui.reduce(UiEvent::Tick {
                     now,
-                    animate: animation_active(app.state()),
+                    animate: animation_active(&SceneViewModel::from_domain(app.state())),
                 });
                 let resize_due = resize_debouncer.due(now).is_some();
                 let recovery_ready = canonical_replay.is_some()
@@ -356,7 +357,11 @@ fn render(
         });
         coordinator.invalidate();
     }
-    let provisional = SceneBuilder.build(app.state(), ui.state(), surface);
+    let provisional = SceneBuilder.build(
+        &SceneViewModel::from_domain(app.state()),
+        ui.state(),
+        surface,
+    );
     let (frame, projection) = if surface == SurfaceKind::Primary {
         let history_window = provisional.main_layout.history_window;
         let projection = ui.state().transcript.project_primary(
@@ -367,8 +372,12 @@ fn render(
             CANONICAL_REPLAY_BATCH_BYTES,
             ui.state().animation_frame,
         );
-        let frame =
-            SceneBuilder.build_with_projection(app.state(), ui.state(), surface, &projection);
+        let frame = SceneBuilder.build_with_projection(
+            &SceneViewModel::from_domain(app.state()),
+            ui.state(),
+            surface,
+            &projection,
+        );
         (frame, Some(projection))
     } else {
         (provisional, None)
@@ -395,7 +404,11 @@ fn drive_canonical_recovery(
 ) -> io::Result<RecoveryProgress> {
     if replay.is_none() {
         ui.state().transcript.invalidate_render_caches();
-        let provisional = SceneBuilder.build(app.state(), ui.state(), SurfaceKind::Primary);
+        let provisional = SceneBuilder.build(
+            &SceneViewModel::from_domain(app.state()),
+            ui.state(),
+            SurfaceKind::Primary,
+        );
         let history_window = provisional.main_layout.history_window;
         let projection = ui.state().transcript.canonical_reflow_projection(
             history_window.width,
@@ -455,7 +468,7 @@ fn drive_canonical_recovery(
         canonical_revision: projection.canonical_revision,
     };
     let frame = SceneBuilder.build_with_projection(
-        app.state(),
+        &SceneViewModel::from_domain(app.state()),
         &preview,
         SurfaceKind::Primary,
         &resident_projection,

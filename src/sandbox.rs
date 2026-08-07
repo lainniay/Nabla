@@ -6,7 +6,9 @@ pub mod profile;
 pub mod request;
 
 pub use detect::{SandboxCapability, detect};
-pub use request::{FilesystemProfile, NetworkProfile, SandboxExecRequest, SandboxProfile};
+pub use request::{
+    FilesystemProfile, NetworkProfile, SandboxExecRequest, SandboxMode, SandboxProfile,
+};
 
 pub fn run_probe() -> Result<(), String> {
     let capability = detect();
@@ -19,7 +21,11 @@ pub fn run_probe() -> Result<(), String> {
 
 pub fn run_exec() -> Result<(), String> {
     let request = request::read_request()?;
-    let compiled = profile::compile(&request)?;
-    let code = process::run(&request, &compiled)?;
+    let code = if request.mode == SandboxMode::Enforced {
+        let compiled = profile::compile(&request)?;
+        process::run(&request, &compiled)?
+    } else {
+        process::run_plain(&request)?
+    };
     std::process::exit(code);
 }

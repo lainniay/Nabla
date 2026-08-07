@@ -1,10 +1,7 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
-import type {
-  ToolCallEvent,
-  ToolCallEventResult,
-} from "@earendil-works/pi-coding-agent";
+import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 
 import type { ApprovalDecision } from "../../approval.ts";
 import { isCredentialPath } from "./filesystem/credential.ts";
@@ -15,18 +12,13 @@ import { JsonlPermissionAuditLog } from "./audit-log.ts";
 import { ApprovalBroker as PermissionApprovalBroker } from "./approvals/broker.ts";
 import { PermissionKernel } from "./kernel.ts";
 import type { Authorization } from "./kernel.ts";
-import { buildSandboxProfile } from "./execution/sandbox-profile.ts";
 import type {
   ExecutionPermit,
   SandboxExecutionProfile,
 } from "./execution/sandbox-profile.ts";
+import { buildSandboxProfile } from "./execution/sandbox-profile.ts";
 import type { SandboxCapability } from "./execution/sandbox-capability.ts";
-import type {
-  ExecutionProfile,
-  PermissionIntent,
-  PermissionRule,
-  ToolContext,
-} from "./model.ts";
+import type { PermissionIntent, PermissionRule, ToolContext } from "./model.ts";
 import { mutatesManagedWorktree } from "./managed-worktree.ts";
 import { PolicyStore } from "./policy-store.ts";
 import { ShellAdapter } from "./adapters/shell.ts";
@@ -34,15 +26,13 @@ import type { WorkspaceGrantSnapshot } from "./approvals/workspace-store.ts";
 import type { InteractionBroker } from "../interactions/interaction-broker.ts";
 import { permissionIntentForTool } from "./tool-intent.ts";
 import { compileAgentProfileRules } from "./policy/profile-compiler.ts";
+import {
+  buildCredentialDenyRules,
+  buildReadOnlyBashRules,
+  buildSandboxBashRules,
+} from "./policy/builtin.ts";
 import { PLAN_MODE_POLICY } from "../plans/plan-controller.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
-
-const EXTERNAL_TOOL_EXECUTION_PROFILE: ExecutionProfile = {
-  backend: "none",
-  filesystem: { read: ["*"], write: ["*"] },
-  network: { allow: [{ host: "*" }] },
-  environment: { inherit: [], set: {} },
-};
 
 const DEGRADED_CAPABILITY: SandboxCapability = {
   mode: "degraded",
@@ -78,6 +68,10 @@ export interface BashAuthorization extends ExecutionPermit {
   reason?: string;
 }
 
+export type ToolAuthorizationResult =
+  | { blocked: true; reason: string }
+  | { permit: ExecutionPermit };
+
 export class PermissionService {
   private readonly policies = new PolicyStore();
   private readonly approvals = new PermissionApprovalBroker();
@@ -86,15 +80,7 @@ export class PermissionService {
     this.approvals,
     new JsonlPermissionAuditLog(),
   );
-  private readonly pending = new Map<string, Authorization>();
-  private readonly pendingBash = new Map<
-    string,
-    {
-      authorization: Authorization;
-      intent: PermissionIntent;
-      profile: SandboxExecutionProfile;
-    }
-  >();
+  private readonly activeAuthorizations = new Map<string, Authorization>();
   private readonly shellAdapter = new ShellAdapter();
   private readonly sessionIdProvider: () => string;
   private readonly cwdProvider: () => string;
@@ -134,22 +120,28 @@ export class PermissionService {
   async authorizeTool(
     event: ToolCallEvent,
     context: ToolAuthorizationContext,
-  ): Promise<ToolCallEventResult | undefined> {
+  ): Promise<ToolAuthorizationResult> {
     const core = await this.authorizeCore(event, context);
     if ("blocked" in core) {
-      return { block: true, reason: core.reason };
+      return { blocked: true, reason: core.reason };
+    }
+    const permit: ExecutionPermit = {
+      id: core.authorization.requestId,
+      toolCallId: event.toolCallId,
+      intentDigest: core.intent.digest,
+      sandboxProfile: null,
     }
     if (
-      !this.kernel.consumeForExecution(
+      !this.kernel.consume(
         core.authorization,
         core.intent,
-        EXTERNAL_TOOL_EXECUTION_PROFILE,
+        null,
       )
     ) {
-      return { block: true, reason: "Tool input changed after approval" };
+      return { blocked: true, reason: "Tool input changed after approval" };
     }
-    this.pending.set(event.toolCallId, core.authorization);
-    return undefined;
+    this.activeAuthorizations.set(permit.id, core.authorization);
+    return { permit };
   }
 
   async authorizeBash(input: AuthorizeBashInput): Promise<BashAuthorization> {
@@ -170,6 +162,7 @@ export class PermissionService {
     if ("blocked" in core) {
       return {
         id: `denied-${input.toolCallId}`,
+        toolCallId: input.toolCallId,
         decision: "deny",
         reason: core.reason,
         intentDigest: "",
@@ -185,43 +178,37 @@ export class PermissionService {
       input.cwd,
       this.sandboxCapability(),
     );
-    if (
-      !this.kernel.consumeForExecution(
-        core.authorization,
-        core.intent,
-        toExecutionProfile(profile),
-      )
-    ) {
-      return {
-        id: core.authorization.requestId,
-        decision: "deny",
-        reason: "Tool input changed after approval",
-        intentDigest: core.intent.digest,
-        sandboxProfile: profile,
-      };
-    }
-    this.pendingBash.set(input.toolCallId, {
-      authorization: core.authorization,
-      intent: core.intent,
-      profile,
-    });
-    return {
+    const permit: ExecutionPermit = {
       id: core.authorization.requestId,
-      decision: "allow",
+      toolCallId: input.toolCallId,
       intentDigest: core.intent.digest,
       sandboxProfile: profile,
     };
+    if (
+      !this.kernel.consume(
+        core.authorization,
+        core.intent,
+        profile,
+      )
+    ) {
+      return {
+        ...permit,
+        decision: "deny",
+        reason: "Tool input changed after approval",
+      };
+    }
+    this.activeAuthorizations.set(permit.id, core.authorization);
+    return {
+      ...permit,
+      decision: "allow",
+    };
   }
 
-  finishBash(toolCallId: string, succeeded: boolean): void {
-    const entry = this.pendingBash.get(toolCallId);
-    if (!entry) return;
-    this.pendingBash.delete(toolCallId);
-    this.kernel.recordExecutionResult(
-      entry.authorization,
-      toExecutionProfile(entry.profile),
-      succeeded,
-    );
+  finishBash(permit: ExecutionPermit, succeeded: boolean): void {
+    const authorization = this.activeAuthorizations.get(permit.id);
+    if (!authorization) return;
+    this.activeAuthorizations.delete(permit.id);
+    this.kernel.recordResult(authorization, permit.sandboxProfile, succeeded);
   }
 
   private async authorizeCore(
@@ -311,102 +298,20 @@ export class PermissionService {
         },
       },
     );
-    for (const atom of intent.atoms) {
-      if (
-        atom.kind === "file" &&
-        (atom.operation === "read" || atom.operation === "list") &&
-        isCredentialPath(atom.path)
-      ) {
-        additionalRules.push({
-          id: `builtin-credential-deny-${atom.operation}-${atom.path}`,
-          effect: "deny",
-          source: "builtin",
-          matcher: {
-            kind: "file",
-            operation: atom.operation,
-            path: atom.path,
-          },
-        });
-      }
-    }
-    if (
-      shellAnalysis?.safety.readOnly &&
-      intent.atoms.some((atom) => atom.kind === "exec")
-    ) {
-      for (const atom of intent.atoms) {
-        if (atom.kind === "exec") {
-          additionalRules.push({
-            id: `builtin-readonly-bash-${additionalRules.length}`,
-            effect: "allow",
-            source: "builtin",
-            matcher: {
-              kind: "exec",
-              executable: atom.executable,
-              argv: atom.argv,
-              cwd: atom.cwd,
-            },
-          });
-        } else if (
-          atom.kind === "file" &&
-          atom.path === "/dev/null"
-        ) {
-          additionalRules.push({
-            id: `builtin-readonly-bash-${additionalRules.length}`,
-            effect: "allow",
-            source: "builtin",
-            matcher: {
-              kind: "file",
-              operation: atom.operation,
-              path: atom.path,
-            },
-          });
-        }
-      }
-    }
-    if (
-      this.sandboxCapability().mode === "enforced" &&
-      intent.atoms.some((atom) => atom.kind === "exec")
-    ) {
-      const sandboxAutoAllow =
-        shellAnalysis !== undefined &&
-        !shellAnalysis.safety.opaque &&
-        !shellAnalysis.safety.network &&
-        !shellAnalysis.safety.destructive;
-      if (sandboxAutoAllow) {
-        for (const atom of intent.atoms) {
-          if (atom.kind === "exec") {
-            additionalRules.push({
-              id: `builtin-sandbox-bash-${additionalRules.length}`,
-              effect: "allow",
-              source: "builtin",
-              matcher: {
-                kind: "exec",
-                executable: atom.executable,
-                argv: atom.argv,
-                cwd: atom.cwd,
-              },
-            });
-          } else if (atom.kind === "file") {
-            additionalRules.push({
-              id: `builtin-sandbox-bash-${additionalRules.length}`,
-              effect: "allow",
-              source: "builtin",
-              matcher: {
-                kind: "file",
-                operation: atom.operation,
-                path: atom.path,
-                ...(atom.destination === undefined
-                  ? {}
-                  : { destination: atom.destination }),
-              },
-            });
-          }
-        }
-      }
-    }
+    additionalRules.push(...buildCredentialDenyRules(intent));
+    additionalRules.push(...buildReadOnlyBashRules(shellAnalysis, intent));
+    additionalRules.push(
+      ...buildSandboxBashRules(
+        shellAnalysis,
+        intent,
+        this.sandboxCapability().mode === "enforced",
+      ),
+    );
 
     let risk: "normal" | "high" | "credential" | "outside_workspace" =
-      intent.atoms.some((atom) => atom.kind === "opaque_code")
+      (intent.tool === "bash"
+        ? (shellAnalysis?.safety.opaque ?? false)
+        : intent.atoms.some((atom) => atom.kind === "opaque_code"))
         ? "high"
         : "normal";
     let reason =
@@ -483,15 +388,11 @@ export class PermissionService {
     return { authorization, intent: normalize() };
   }
 
-  finishTool(toolCallId: string, succeeded: boolean): void {
-    const authorization = this.pending.get(toolCallId);
+  finishTool(permit: ExecutionPermit, succeeded: boolean): void {
+    const authorization = this.activeAuthorizations.get(permit.id);
     if (!authorization) return;
-    this.pending.delete(toolCallId);
-    this.kernel.recordExecutionResult(
-      authorization,
-      EXTERNAL_TOOL_EXECUTION_PROFILE,
-      succeeded,
-    );
+    this.activeAuthorizations.delete(permit.id);
+    this.kernel.recordResult(authorization, permit.sandboxProfile, succeeded);
   }
 
   workspaceRules(): WorkspaceGrantSnapshot {
@@ -522,18 +423,6 @@ export class PermissionService {
     return resolveWorkspaceIdentity(this.cwdProvider());
   }
 
-}
-
-function toExecutionProfile(
-  profile: SandboxExecutionProfile,
-): ExecutionProfile {
-  // Audit-only profile; the Rust sandbox owns real execution.
-  return {
-    backend: "none",
-    filesystem: { read: ["*"], write: profile.filesystem.readWrite },
-    network: { allow: profile.network === "allowed" ? [{ host: "*" }] : [] },
-    environment: { inherit: [], set: {} },
-  };
 }
 
 function emptyIntent(input: AuthorizeBashInput): PermissionIntent {

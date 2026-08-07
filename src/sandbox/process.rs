@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -48,9 +48,32 @@ pub fn run(request: &SandboxExecRequest, compiled: &CompiledProfile) -> Result<i
     #[cfg(unix)]
     command.process_group(0);
 
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| format!("failed to spawn {program}: {error}"))?;
+    wait_for_child(child, request.timeout_ms)
+}
+
+pub fn run_plain(request: &SandboxExecRequest) -> Result<i32, String> {
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(&request.command)
+        .current_dir(&request.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .envs(filtered_environment(request));
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let child = command
+        .spawn()
+        .map_err(|error| format!("failed to spawn /bin/sh: {error}"))?;
+    wait_for_child(child, request.timeout_ms)
+}
+
+fn wait_for_child(mut child: Child, timeout_ms: Option<u64>) -> Result<i32, String> {
     let mut stdout = child.stdout.take().ok_or("sandbox stdout unavailable")?;
     let mut stderr = child.stderr.take().ok_or("sandbox stderr unavailable")?;
     let stdout_thread = thread::spawn(move || {
@@ -60,9 +83,7 @@ pub fn run(request: &SandboxExecRequest, compiled: &CompiledProfile) -> Result<i
         pump(&mut stderr, &mut std::io::stderr().lock());
     });
 
-    let deadline = request
-        .timeout_ms
-        .map(|millis| Instant::now() + Duration::from_millis(millis));
+    let deadline = timeout_ms.map(|millis| Instant::now() + Duration::from_millis(millis));
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -127,6 +148,7 @@ fn kill_process_group(_pid: u32) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::SandboxMode;
     use crate::sandbox::request::{FilesystemProfile, SandboxExecRequest, SandboxProfile};
 
     #[test]
@@ -136,6 +158,7 @@ mod tests {
         }
         let request = SandboxExecRequest {
             version: 1,
+            mode: SandboxMode::Enforced,
             cwd: "/workspace".into(),
             command: "true".into(),
             timeout_ms: None,
@@ -151,5 +174,23 @@ mod tests {
             std::env::remove_var("LD_PRELOAD");
         }
         assert!(!environment.contains_key("LD_PRELOAD"));
+    }
+
+    #[test]
+    fn plain_execution_runs_the_command_and_returns_its_exit_code() {
+        let request = SandboxExecRequest {
+            version: 1,
+            mode: SandboxMode::Degraded,
+            cwd: std::env::current_dir().unwrap(),
+            command: "exit 7".into(),
+            timeout_ms: None,
+            profile: SandboxProfile {
+                filesystem: FilesystemProfile::default(),
+                network: crate::sandbox::NetworkProfile::Deny,
+                protected_paths: vec![],
+            },
+            environment: BTreeMap::new(),
+        };
+        assert_eq!(run_plain(&request).unwrap(), 7);
     }
 }

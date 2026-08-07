@@ -22,12 +22,13 @@ test("bash tool authorizes once, runs through sandbox operations, and finishes o
       calls.push("authorize");
       return {
         id: "a1",
+        toolCallId: "t1",
         decision: "allow" as const,
         intentDigest: "d",
         sandboxProfile: profile,
       };
     },
-    finishBash: (_toolCallId: string, succeeded: boolean) => {
+    finishBash: (_permit: unknown, succeeded: boolean) => {
       calls.push(`finish:${String(succeeded)}`);
     },
   } as unknown as PermissionService;
@@ -73,6 +74,7 @@ test("denied authorization throws and never executes", async () => {
   const permissions = {
     authorizeBash: async () => ({
       id: "denied",
+      toolCallId: "t1",
       decision: "deny" as const,
       reason: "Denied by user",
       intentDigest: "",

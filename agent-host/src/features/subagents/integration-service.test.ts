@@ -6,7 +6,7 @@ import test from "node:test";
 
 import type { HarnessConfig } from "../workspace/config.ts";
 import type { WorktreeRecord } from "./isolation/worktree.ts";
-import { IntegrationService } from "./integration-service.ts";
+import { IntegrationService } from "./isolation/integration-service.ts";
 
 const config: HarnessConfig = {
   schemaVersion: 2,

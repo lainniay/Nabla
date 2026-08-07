@@ -1,20 +1,11 @@
-import { resolve } from "node:path";
-
 import {
   ModelRuntime,
   SettingsManager,
-  createAgentSessionFromServices,
-  createAgentSessionServices,
-  type CreateAgentSessionRuntimeFactory,
-  type ModelRuntime as ModelRuntimeType,
 } from "@earendil-works/pi-coding-agent";
 
 import { ContextBudgetManager } from "../features/context/engine.ts";
 import { loadHarnessConfig } from "../features/workspace/config.ts";
-import {
-  filterContextFilesByTrust,
-  workspaceIsTrusted,
-} from "../features/workspace/trust.ts";
+import { workspaceIsTrusted } from "../features/workspace/trust.ts";
 import { PlanStore } from "../features/plans/store.ts";
 import { PlanController } from "../features/plans/plan-controller.ts";
 import { HostDiagnostics } from "../diagnostics/host-diagnostics.ts";
@@ -24,10 +15,16 @@ import { HostEventPublisher } from "../protocol/host-event-publisher.ts";
 import type { HostEvent } from "../protocol/contracts.ts";
 import type { JsonObject } from "../protocol/validation.ts";
 import { RuntimeSupervisor } from "../runtime/runtime-supervisor.ts";
+import { RuntimeHolder } from "../runtime/runtime-holder.ts";
+import { createSessionRuntimeFactory } from "../runtime/session-runtime-factory.ts";
 import { sessionActivation } from "../runtime/session-activation.ts";
 import { expandHomePath } from "../runtime/path-utils.ts";
 import { PiExtensionFactory } from "../runtime/pi-extension-factory.ts";
-import { createNablaBashTool } from "../runtime/create-nabla-bash-tool.ts";
+import {
+  ConnectionState,
+  EventRoute,
+  SubagentStateSource,
+} from "./composition-ports.ts";
 import { InteractionBroker } from "../features/interactions/interaction-broker.ts";
 import { ModelService } from "../features/models/model-service.ts";
 import { AuthService } from "../features/auth/auth-service.ts";
@@ -38,7 +35,7 @@ import { SessionService } from "../features/sessions/session-service.ts";
 import { SessionBrowserService } from "../features/sessions/session-browser-service.ts";
 import { TreeService } from "../features/sessions/tree-service.ts";
 import { ContextService } from "../features/context/context-service.ts";
-import { IntegrationService } from "../features/subagents/integration-service.ts";
+import { IntegrationService } from "../features/subagents/isolation/integration-service.ts";
 import { SubagentSupervisor } from "../features/subagents/subagent-supervisor.ts";
 import { RustSandboxBackend } from "../features/permissions/execution/rust-sandbox-backend.ts";
 import { createAgentCommands } from "../protocol/commands/agent-commands.ts";
@@ -59,7 +56,7 @@ export interface CreateHostAppOptions {
   cwd: string;
   agentDir: string;
   env: NodeJS.ProcessEnv;
-  modelRuntime?: ModelRuntimeType;
+  modelRuntime?: ModelRuntime;
   supervisor?: RuntimeSupervisor;
   integrations?: IntegrationService;
 }
@@ -68,6 +65,8 @@ export async function createHostApp(
   options: CreateHostAppOptions,
 ): Promise<HostApp> {
   const { socketPath, cwd, agentDir, env } = options;
+
+  // Core services.
   const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create());
   const planStore = new PlanStore();
   const contextBudget = new ContextBudgetManager();
@@ -82,112 +81,48 @@ export async function createHostApp(
     cwd,
     configuredSessionDir,
   );
-
   const diagnostics = new HostDiagnostics();
-  const controlRef: { current?: ControlServer } = {};
-  const events = new HostEventPublisher((event) =>
-    controlRef.current?.send(event),
-  );
+
+  // Late-bound ports assembled before their owners exist.
+  const runtimeAccess = new RuntimeHolder();
+  const connection = new ConnectionState();
+  const eventRoute = new EventRoute();
+  const events = new HostEventPublisher(eventRoute.sink);
   const send = (event: JsonObject) =>
     events.publish(event as unknown as HostEvent);
-
-  let workspace!: WorkspaceService;
-  let plans!: PlanController;
-  let permissions!: PermissionService;
-  let rustSandboxBackend!: RustSandboxBackend;
-  let extensionFactory!: PiExtensionFactory;
-  const runtime =
-    options.supervisor ??
-    new RuntimeSupervisor(
-      (async ({
-        cwd: runtimeCwd,
-        sessionManager,
-        sessionStartEvent,
-      }: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
-        const runtimeConfig = loadHarnessConfig(runtimeCwd);
-        const settingsManager = SettingsManager.create(runtimeCwd, agentDir);
-        settingsManager.setProjectTrusted(
-          workspaceIsTrusted(runtimeCwd, runtimeConfig),
-        );
-        const services = await createAgentSessionServices({
-          cwd: runtimeCwd,
-          agentDir,
-          modelRuntime,
-          settingsManager,
-          resourceLoaderOptions: {
-            noThemes: true,
-            noContextFiles: false,
-            extensionFactories: [extensionFactory.create()],
-            extensionsOverride: (base) => ({
-              ...base,
-              extensions: base.extensions.filter(
-                (extension) =>
-                  extension.resolvedPath.startsWith("<inline:") ||
-                  loadHarnessConfig(runtimeCwd).allowedProjectExtensions.some(
-                    (allowed) =>
-                      extension.resolvedPath === resolve(runtimeCwd, allowed) ||
-                      extension.resolvedPath === resolve(agentDir, allowed),
-                  ),
-              ),
-            }),
-            agentsFilesOverride: (base) => ({
-              agentsFiles: filterContextFilesByTrust(
-                base.agentsFiles,
-                agentDir,
-                workspaceIsTrusted(runtimeCwd, loadHarnessConfig(runtimeCwd)),
-              ),
-            }),
-          },
-        });
-        const result = await createAgentSessionFromServices({
-          services,
-          sessionManager,
-          sessionStartEvent,
-          customTools: [
-            createNablaBashTool(runtimeCwd, {
-              permissions,
-              sandboxBackend: rustSandboxBackend,
-              options: {
-                shellPath: startupSettings.getShellPath(),
-                commandPrefix: startupSettings.getShellCommandPrefix(),
-              },
-            }),
-          ],
-        });
-        plans.activateSession(
-          result.session.sessionManager.getBranch(),
-          result.session,
-        );
-        workspace.activate(runtimeCwd, result.session);
-        return {
-          ...result,
-          services,
-          diagnostics: services.diagnostics,
-        };
-      }) as CreateAgentSessionRuntimeFactory,
-    );
-
-  plans = new PlanController(planStore, modelRuntime, runtime, send);
+  const subagentState = new SubagentStateSource();
   const interactions = new InteractionBroker();
+
+  // Modules.
+  const rustSandboxBackend = await RustSandboxBackend.probe();
   const context = new ContextService(
     contextBudget,
     send,
     (snapshot) => ({
       ...snapshot,
-      scopeId: runtime.current().session.sessionId,
+      scopeId: runtimeAccess.current().session.sessionId,
     }),
   );
-  let subagents!: SubagentSupervisor;
-  workspace = new WorkspaceService(
-    runtime,
+  const plans = new PlanController(planStore, modelRuntime, runtimeAccess, send);
+  const permissions = new PermissionService(
+    interactions,
+    send,
+    plans,
+    () => connection.hasConnection(),
+    {
+      sessionId: () => runtimeAccess.current().session.sessionId,
+      cwd: () =>
+        runtimeAccess.current().session.sessionManager.getCwd(),
+    },
+    { capability: () => rustSandboxBackend.capability },
+  );
+  const workspace = new WorkspaceService(
+    runtimeAccess,
     modelRuntime,
     send,
     startupConfig,
-    () => ({
-      active: subagents.activeSnapshots(),
-      pending: subagents.pendingSnapshots(),
-    }),
-    () => controlRef.current?.hasConnection() ?? false,
+    () => subagentState.snapshot(),
+    () => connection.hasConnection(),
     (session) => plans.reapply(session),
   );
   const integrations =
@@ -196,57 +131,45 @@ export async function createHostApp(
       (message) => diagnostics.warn(message),
       () => workspace.configValue(),
     );
-  rustSandboxBackend = await RustSandboxBackend.probe();
-  permissions = new PermissionService(
-    interactions,
-    send,
-    plans,
-    () => controlRef.current?.hasConnection() ?? false,
-    {
-      sessionId: () => runtime.current().session.sessionId,
-      cwd: () => runtime.current().session.sessionManager.getCwd(),
-    },
-    { capability: () => rustSandboxBackend.capability },
-  );
-  const models = new ModelService(modelRuntime, runtime);
+  const models = new ModelService(modelRuntime, runtimeAccess);
   const auth = new AuthService(
     modelRuntime,
     (providerId) => models.selectDefaultModel(providerId),
     send,
   );
-  const browser = new SessionBrowserService(runtime, send);
+  const browser = new SessionBrowserService(runtimeAccess, send);
   const activation = () =>
     sessionActivation(
-      runtime.current(),
+      runtimeAccess.current(),
       plans,
       plans.snapshot(),
       () => context.scopedSnapshot(),
     );
   const sessions = new SessionService(
-    runtime,
+    runtimeAccess,
     plans,
     () => browser.closeAll(),
     activation,
   );
   const tree = new TreeService(
-    runtime,
+    runtimeAccess,
     plans,
     activation,
     () => context.publish(context.onTreeNavigation()),
   );
-  subagents = new SubagentSupervisor(
+  const subagents = new SubagentSupervisor(
     workspace,
     integrations,
     permissions,
     rustSandboxBackend,
     modelRuntime,
-    runtime,
+    runtimeAccess,
     plans,
     send,
     (message) => diagnostics.warn(message),
     () => workspace.publishAgentsState(),
   );
-  extensionFactory = new PiExtensionFactory({
+  const extensionFactory = new PiExtensionFactory({
     planMode: plans,
     plans,
     context,
@@ -257,11 +180,11 @@ export async function createHostApp(
     send,
   });
   const bootstrap = new BootstrapService(() => ({
-    scopeId: runtime.current().session.sessionId,
+    scopeId: runtimeAccess.current().session.sessionId,
     sandbox: rustSandboxBackend.status(),
     planMode: {
       active: plans.current(),
-      activeTools: runtime.current().session.getActiveToolNames(),
+      activeTools: runtimeAccess.current().session.getActiveToolNames(),
     },
     artifact: plans.snapshot(),
     resources: workspace.resourceSnapshot(),
@@ -306,8 +229,27 @@ export async function createHostApp(
         abortTreeNavigation: () => tree.abort(),
       }),
     ],
-    (context) => controlRef.current?.isCurrent(context) ?? false,
+    (context) => connection.isCurrent(context),
   );
+
+  const runtime =
+    options.supervisor ??
+    new RuntimeSupervisor(
+      createSessionRuntimeFactory({
+        modelRuntime,
+        agentDir,
+        startupSettings,
+        send,
+        extensionFactory,
+        permissions,
+        rustSandboxBackend,
+        plans,
+        workspace,
+      }),
+    );
+  runtimeAccess.bind(runtime);
+  subagentState.bind(subagents);
+
   const control = new ControlServer(socketPath, router, {
     onConnectionReplaced: () => {
       auth.cancel("Host control client replaced");
@@ -320,7 +262,8 @@ export async function createHostApp(
       browser.closeAll();
     },
   });
-  controlRef.current = control;
+  connection.bind(control);
+  eventRoute.bind((event) => control.send(event));
 
   return new HostAppImpl(
     runtime,

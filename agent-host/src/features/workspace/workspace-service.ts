@@ -16,7 +16,7 @@ import {
   modelReference,
   type AgentProfile,
 } from "../subagents/profile-model.ts";
-import { profileToolEffect } from "../permissions/policy/profile-compiler.ts";
+import { evaluateProfileToolExposure } from "../permissions/policy/profile-compiler.ts";
 import type { RuntimeAccess } from "../../runtime/runtime-access.ts";
 import type {
   ActiveAgentSnapshot,
@@ -175,7 +175,9 @@ export class WorkspaceService {
         skills: profile.skills,
         tools: profile.tools,
         permission: profile.tools
-          .map((tool) => `${tool}:${profileToolEffect(profile, tool)}`)
+          .map((tool) =>
+            `${tool}:${evaluateProfileToolExposure(profile, tool)}`
+          )
           .join(","),
         maxParallel: profile.maxParallel,
         maxTurns: profile.maxTurns,

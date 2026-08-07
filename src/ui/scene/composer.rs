@@ -1,9 +1,9 @@
-use crate::state::{AppState, AuthPromptKind, AuthState, TreePhase, UiModalKind};
+use crate::state::{AuthPromptKind, AuthState, TreePhase, UiModalKind};
 use crate::ui::{
     palette,
     scene::{
         COMPOSER_CHROME_HEIGHT, append_text_cells, cells_width, composer_border_row,
-        input_border_row, text_row,
+        input_border_row, text_row, view_model::SceneViewModel,
     },
     text::{truncate, wrap_file_references, wrap_text},
     types::{CellStyle, Color, StyledCell, VisualRow},
@@ -22,12 +22,12 @@ pub(crate) fn composer_content_width(width: u16) -> u16 {
 }
 
 pub(crate) fn composer_rows(
-    state: &AppState,
+    view: &SceneViewModel,
     width: u16,
     height: u16,
     cursor_row: usize,
 ) -> ComposerRender {
-    let accent = if state.plan_mode_active {
+    let accent = if *view.plan_mode_active {
         CellStyle::foreground(Color::Magenta)
     } else {
         palette::input_border()
@@ -35,7 +35,7 @@ pub(crate) fn composer_rows(
     if height < 3 || width < 4 {
         let mut rows = wrap_file_references(
             "composer",
-            state.editor.text(),
+            view.editor.text(),
             width.saturating_sub(2).max(1),
             CellStyle::foreground(palette::TEXT),
         );
@@ -56,7 +56,7 @@ pub(crate) fn composer_rows(
         };
     }
 
-    let border = if state.plan_mode_active {
+    let border = if *view.plan_mode_active {
         CellStyle::foreground(Color::Magenta).bold()
     } else {
         palette::input_border()
@@ -64,7 +64,7 @@ pub(crate) fn composer_rows(
     let text_style = CellStyle::foreground(palette::TEXT);
     let content_width = composer_content_width(width);
     let mut content =
-        wrap_file_references("composer", state.editor.text(), content_width, text_style);
+        wrap_file_references("composer", view.editor.text(), content_width, text_style);
     while content.len() <= cursor_row {
         content.push(VisualRow::blank("composer"));
     }
@@ -87,8 +87,8 @@ pub(crate) fn composer_rows(
             cells.push(StyledCell::new("  ", 2, text_style));
         }
 
-        if state.editor.text().is_empty() && first_content_row + visible_index == 0 {
-            let placeholder = if state.plan_mode_active {
+        if view.editor.text().is_empty() && first_content_row + visible_index == 0 {
+            let placeholder = if *view.plan_mode_active {
                 "Describe the plan you want Nabla to make"
             } else {
                 "Ask Nabla to work on your code"
@@ -147,9 +147,9 @@ impl AlternateInputModel {
     }
 }
 
-pub(crate) fn alternate_input_model(state: &AppState) -> AlternateInputModel {
-    match state.active_modal_kind() {
-        Some(UiModalKind::SessionBrowser) => state.session_browser.as_ref().map_or_else(
+pub(crate) fn alternate_input_model(view: &SceneViewModel) -> AlternateInputModel {
+    match view.active_modal_kind() {
+        Some(UiModalKind::SessionBrowser) => view.session_browser.as_ref().map_or_else(
             || alternate_placeholder("Search sessions", false),
             |browser| AlternateInputModel {
                 text: browser.query.text().to_owned(),
@@ -159,7 +159,7 @@ pub(crate) fn alternate_input_model(state: &AppState) -> AlternateInputModel {
                 secret: false,
             },
         ),
-        Some(UiModalKind::TreeBrowser) => state.tree_browser.as_ref().map_or_else(
+        Some(UiModalKind::TreeBrowser) => view.tree_browser.as_ref().map_or_else(
             || alternate_placeholder("Search tree", false),
             |browser| match &browser.phase {
                 TreePhase::EditLabel { editor, .. } => AlternateInputModel {
@@ -185,7 +185,7 @@ pub(crate) fn alternate_input_model(state: &AppState) -> AlternateInputModel {
                 },
             },
         ),
-        Some(UiModalKind::Transcript) => state.transcript_viewer.as_ref().map_or_else(
+        Some(UiModalKind::Transcript) => view.transcript_viewer.as_ref().map_or_else(
             || alternate_placeholder("Search transcript", false),
             |viewer| AlternateInputModel {
                 text: viewer.search_query.text().to_owned(),
@@ -195,7 +195,7 @@ pub(crate) fn alternate_input_model(state: &AppState) -> AlternateInputModel {
                 secret: false,
             },
         ),
-        Some(UiModalKind::Auth) => match &state.auth_state {
+        Some(UiModalKind::Auth) => match &view.auth_state {
             AuthState::Selecting {
                 filter,
                 search_active,
@@ -243,8 +243,8 @@ fn alternate_placeholder(placeholder: &str, focused: bool) -> AlternateInputMode
     }
 }
 
-pub(crate) fn alternate_status(state: &AppState, input_focused: bool) -> &'static str {
-    if let Some(browser) = state.tree_browser.as_ref() {
+pub(crate) fn alternate_status(view: &SceneViewModel, input_focused: bool) -> &'static str {
+    if let Some(browser) = view.tree_browser.as_ref() {
         return match &browser.phase {
             TreePhase::EditLabel { .. } => "Esc cancel · Enter save label · ←→ edit",
             TreePhase::CustomSummary { .. } => "Esc back · Enter navigate · ←→ edit",
@@ -258,7 +258,7 @@ pub(crate) fn alternate_status(state: &AppState, input_focused: bool) -> &'stati
             _ => "/ search · Esc close · Tab/⇧Tab/Ctrl+N/P select · Enter",
         };
     }
-    if let AuthState::Running(flow) = &state.auth_state
+    if let AuthState::Running(flow) = &view.auth_state
         && flow
             .prompt
             .as_ref()
@@ -269,7 +269,7 @@ pub(crate) fn alternate_status(state: &AppState, input_focused: bool) -> &'stati
     if input_focused {
         return "Esc clear · Enter return to list · ←→ edit";
     }
-    if state.transcript_viewer.is_some() {
+    if view.transcript_viewer.is_some() {
         "/ search · Esc close · Tab/⇧Tab tools · Enter expand · ↑↓/PgUp/PgDn scroll"
     } else {
         "/ search · Esc close · Tab/⇧Tab/Ctrl+N/P select · Enter"

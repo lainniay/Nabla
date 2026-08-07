@@ -5,10 +5,21 @@ use serde::Deserialize;
 pub const REQUEST_VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxMode {
+    #[default]
+    Enforced,
+    Degraded,
+    Disabled,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxExecRequest {
     pub version: u32,
+    #[serde(default)]
+    pub mode: SandboxMode,
     pub cwd: PathBuf,
     pub command: String,
     pub timeout_ms: Option<u64>,
@@ -157,5 +168,24 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(profile.network, NetworkProfile::Deny);
+    }
+
+    #[test]
+    fn shared_exec_fixtures_parse_and_validate() {
+        for (fixture, expected) in [
+            (
+                include_str!("../../protocol-fixtures/sandbox/exec-enforced.json"),
+                SandboxMode::Enforced,
+            ),
+            (
+                include_str!("../../protocol-fixtures/sandbox/exec-degraded.json"),
+                SandboxMode::Degraded,
+            ),
+        ] {
+            let request: SandboxExecRequest =
+                serde_json::from_str(fixture).expect("fixture must parse");
+            request.validate().expect("fixture must validate");
+            assert_eq!(request.mode, expected);
+        }
     }
 }
