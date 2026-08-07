@@ -1,6 +1,8 @@
 use super::store::EditorCore;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::selection::{centered_visible_start, next_wrapped, previous_wrapped};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionNavigation {
     Previous,
@@ -69,19 +71,11 @@ impl<T> SelectorModel<T> {
     }
 
     pub fn select_previous(&mut self) {
-        self.selected = match self.items.len() {
-            0 => 0,
-            _ if self.selected == 0 => self.items.len() - 1,
-            _ => self.selected - 1,
-        };
+        self.selected = previous_wrapped(self.selected, self.items.len());
     }
 
     pub fn select_next(&mut self) {
-        self.selected = if self.items.is_empty() {
-            0
-        } else {
-            self.selected.saturating_add(1) % self.items.len()
-        };
+        self.selected = next_wrapped(self.selected, self.items.len());
     }
 }
 
@@ -97,10 +91,7 @@ impl VirtualList {
         if self.total == 0 || self.visible_rows == 0 {
             return 0..0;
         }
-        let selected = self.selected.min(self.total - 1);
-        let start = selected
-            .saturating_sub(self.visible_rows.saturating_sub(1) / 2)
-            .min(self.total.saturating_sub(self.visible_rows));
+        let start = centered_visible_start(self.total, self.selected, self.visible_rows);
         start..start.saturating_add(self.visible_rows).min(self.total)
     }
 }

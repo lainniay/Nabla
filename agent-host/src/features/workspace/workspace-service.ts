@@ -1,21 +1,23 @@
 import type {
   AgentSession,
-  AgentSessionRuntime,
   ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 
 import {
-  agentPermissionSummary,
   loadHarnessConfig,
-  modelReference,
-  saveWorkspaceTrust,
-  workspaceIsTrusted,
-  type AgentProfile,
   type HarnessConfig,
   type ResourceSnapshot,
-} from "../../harness.ts";
+} from "./config.ts";
+import {
+  saveWorkspaceTrust,
+  workspaceIsTrusted,
+} from "./trust.ts";
+import {
+  modelReference,
+  type AgentProfile,
+} from "../subagents/profile-model.ts";
+import { profileToolEffect } from "../permissions/policy/profile-compiler.ts";
 import type { RuntimeAccess } from "../../runtime/runtime-access.ts";
-import type { PlanModeService } from "../../runtime/plan-mode-service.ts";
 import type {
   ActiveAgentSnapshot,
   AgentsSnapshot,
@@ -24,9 +26,9 @@ import type { JsonObject } from "../../protocol/validation.ts";
 
 export class WorkspaceService {
   private readonly runtime: RuntimeAccess;
-  private readonly planMode: PlanModeService;
   private readonly modelRuntime: ModelRuntime;
   private readonly send: (event: JsonObject) => void;
+  private readonly onReload: ((session: AgentSession) => void) | undefined;
   private readonly agents: () => {
     active: ActiveAgentSnapshot[];
     pending: ActiveAgentSnapshot[];
@@ -38,17 +40,17 @@ export class WorkspaceService {
 
   constructor(
     runtime: RuntimeAccess,
-    planMode: PlanModeService,
     modelRuntime: ModelRuntime,
     send: (event: JsonObject) => void,
     initialConfig: HarnessConfig,
     agents: () => { active: ActiveAgentSnapshot[]; pending: ActiveAgentSnapshot[] },
     isConnected: () => boolean,
+    onReload?: (session: AgentSession) => void,
   ) {
     this.runtime = runtime;
-    this.planMode = planMode;
     this.modelRuntime = modelRuntime;
     this.send = send;
+    this.onReload = onReload;
     this.config = initialConfig;
     this.agents = agents;
     this.isConnected = isConnected;
@@ -131,8 +133,7 @@ export class WorkspaceService {
       runtime.session.sessionManager.getCwd(),
     );
     await runtime.session.reload();
-    this.planMode.apply(runtime.session);
-    this.sendPlanModeState(runtime);
+    this.onReload?.(runtime.session);
     const { resources } = this.publishWorkspaceState(
       runtime.session,
       this.agentsSnapshot(runtime.session),
@@ -150,8 +151,7 @@ export class WorkspaceService {
       resolveProjectTrust: async () => trusted,
     });
     await runtime.session.reload();
-    this.planMode.apply(runtime.session);
-    this.sendPlanModeState(runtime);
+    this.onReload?.(runtime.session);
     const { resources } = this.publishWorkspaceState(
       runtime.session,
       this.agentsSnapshot(runtime.session),
@@ -174,7 +174,9 @@ export class WorkspaceService {
         thinkingLevel: profile.thinkingLevel ?? null,
         skills: profile.skills,
         tools: profile.tools,
-        permission: agentPermissionSummary(profile),
+        permission: profile.tools
+          .map((tool) => `${tool}:${profileToolEffect(profile, tool)}`)
+          .join(","),
         maxParallel: profile.maxParallel,
         maxTurns: profile.maxTurns,
         isolation: profile.isolation,
@@ -258,11 +260,4 @@ export class WorkspaceService {
     return { resources, agents };
   }
 
-  private sendPlanModeState(runtime: AgentSessionRuntime): void {
-    this.send({
-      type: "plan_mode_state",
-      active: this.planMode.current(),
-      activeTools: runtime.session.getActiveToolNames(),
-    });
-  }
 }

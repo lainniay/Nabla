@@ -1,14 +1,19 @@
-import type { ContextSnapshot } from "../context-manager.ts";
+import type { ContextSnapshot } from "../features/context/model.ts";
 import type { ApprovalDecision } from "../approval.ts";
 import type {
   AgentConfigDiagnostic,
   AgentProfile,
+} from "../features/subagents/profile-model.ts";
+import type {
   ResourceSnapshot,
-} from "../harness.ts";
-import type { GrantProposal } from "../permissions/model.ts";
-import type { PlanArtifact } from "../plan.ts";
+} from "../features/workspace/config.ts";
+import type { GrantProposal } from "../features/permissions/model.ts";
+import type { PlanArtifact } from "../features/plans/model.ts";
 import type { PlanQuestion } from "../questions.ts";
-import type { IsolationBackend, IntegrationStatus } from "../worktree.ts";
+import type {
+  IsolationBackend,
+  IntegrationStatus,
+} from "../features/subagents/isolation/worktree.ts";
 import {
   isJsonObject,
   requireArray,

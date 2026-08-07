@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { workspaceRelativePath } from "../../policy/path-boundary.ts";
+import { workspaceRelativePath } from "./filesystem/path.ts";
 import {
   AppendAdapter,
   CreateAdapter,
@@ -12,19 +12,19 @@ import {
   RenameAdapter,
   WriteAdapter,
   type FileToolInput,
-} from "../../permissions/adapters/filesystem.ts";
+} from "./adapters/filesystem.ts";
 import {
   ShellAdapter,
   type ShellInput,
-} from "../../permissions/adapters/shell.ts";
-import { createIntent } from "../../permissions/adapters/tool-adapter.ts";
-import { AgentAdapter } from "../../permissions/adapters/agent.ts";
-import { McpAdapter } from "../../permissions/adapters/mcp.ts";
+} from "./adapters/shell.ts";
+import { createIntent } from "./adapters/tool-adapter.ts";
+import { AgentAdapter } from "./adapters/agent.ts";
+import { McpAdapter } from "./adapters/mcp.ts";
 import type {
   PermissionIntent,
   ToolContext,
-} from "../../permissions/model.ts";
-import { digestValue } from "../../permissions/shell/digest.ts";
+} from "./model.ts";
+import { digestValue } from "./shell/digest.ts";
 import { isJsonObject } from "../../protocol/validation.ts";
 
 export function permissionIntentForTool(

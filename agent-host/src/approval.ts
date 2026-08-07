@@ -1,4 +1,4 @@
-import type { GrantProposal } from "./permissions/model.ts";
+import type { GrantProposal } from "./features/permissions/model.ts";
 import { PendingRequestRegistry } from "./protocol/pending-request-registry.ts";
 
 export type ApprovalDecision =

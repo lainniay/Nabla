@@ -3,7 +3,7 @@ import {
   requestObject,
 } from "../command-definition.ts";
 import { enumField, stringField } from "../validation.ts";
-import { THINKING_LEVELS } from "../../policy/tool-policy.ts";
+import { THINKING_LEVELS } from "../../features/permissions/shell/rules.ts";
 import type { JsonObject } from "../validation.ts";
 
 export interface ModelCommandPort {

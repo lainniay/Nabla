@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ContextBudgetManager } from "../../context-manager.ts";
+import { ContextBudgetManager } from "./engine.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 import { ContextService } from "./context-service.ts";
 

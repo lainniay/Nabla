@@ -1,7 +1,5 @@
-import {
-  ContextBudgetManager,
-  type ContextSnapshot,
-} from "../../context-manager.ts";
+import { ContextBudgetManager } from "./engine.ts";
+import type { ContextSnapshot } from "./model.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 
 export class ContextService {

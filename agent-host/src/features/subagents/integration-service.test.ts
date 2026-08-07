@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { HarnessConfig } from "../../harness.ts";
-import type { WorktreeRecord } from "../../worktree.ts";
+import type { HarnessConfig } from "../workspace/config.ts";
+import type { WorktreeRecord } from "./isolation/worktree.ts";
 import { IntegrationService } from "./integration-service.ts";
 
 const config: HarnessConfig = {

@@ -3,8 +3,8 @@ import {
   requestObject,
 } from "../command-definition.ts";
 import { enumField } from "../validation.ts";
-import type { PlanArtifact } from "../../plan.ts";
-import type { PlanExecutionResult } from "../../plan-execution.ts";
+import type { PlanArtifact } from "../../features/plans/model.ts";
+import type { PlanExecutionResult } from "../../features/plans/execution.ts";
 
 export interface PlanCommandPort {
   setMode(active: boolean): {

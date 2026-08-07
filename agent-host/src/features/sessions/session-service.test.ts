@@ -2,8 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { RuntimeSupervisor } from "../../runtime/runtime-supervisor.ts";
-import { PlanModeService } from "../../runtime/plan-mode-service.ts";
+import type { PlanModePort } from "../plans/plan-controller.ts";
 import { SessionService } from "./session-service.ts";
+
+const planMode: PlanModePort = {
+  current: () => false,
+  set: () => ({ active: false, activeTools: [] }),
+};
 
 function stubSupervisor(
   overrides: Partial<RuntimeSupervisor> = {},
@@ -35,7 +40,7 @@ test("newSession rejects busy sessions", async () => {
         throw new Error("Cannot create a session while the agent is running");
       },
     }),
-    new PlanModeService(),
+    planMode,
     () => {},
     () => ({ ok: true }),
   );
@@ -46,7 +51,7 @@ test("newSession succeeds and invalidates browser catalogs", async () => {
   let transitions = 0;
   const service = new SessionService(
     stubSupervisor(),
-    new PlanModeService(),
+    planMode,
     () => {
       transitions += 1;
     },
@@ -66,7 +71,7 @@ test("resume failure propagates and does not invalidate", async () => {
         throw new Error("resume failed");
       },
     }),
-    new PlanModeService(),
+    planMode,
     () => {
       transitions += 1;
     },
@@ -82,7 +87,7 @@ test("resume failure propagates and does not invalidate", async () => {
 test("clearQueue joins steering and follow-up text", () => {
   const service = new SessionService(
     stubSupervisor(),
-    new PlanModeService(),
+    planMode,
     () => {},
     () => ({ ok: true }),
   );

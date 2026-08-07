@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { ShellAdapter } from "../../permissions/adapters/shell.ts";
-import type { ToolContext } from "../../permissions/model.ts";
+import { ShellAdapter } from "./adapters/shell.ts";
+import type { ToolContext } from "./model.ts";
 import { agentToolResource, permissionIntentForTool } from "./tool-intent.ts";
 
 const context: ToolContext = {

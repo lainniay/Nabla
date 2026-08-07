@@ -13,16 +13,21 @@ import {
 import {
   filterContextFilesByTrust,
   workspaceIsTrusted,
+} from "../workspace/trust.ts";
+import type { HarnessConfig } from "../workspace/config.ts";
+import {
   type AgentProfile,
-  type HarnessConfig,
-} from "../../harness.ts";
+} from "./profile-model.ts";
 import { parseSubagentOutput } from "../../protocol/subagent-output.ts";
 import { isJsonObject, type JsonObject } from "../../protocol/validation.ts";
 import type {
   ActiveAgentSnapshot,
   WorktreeIntegrationSnapshot,
 } from "../../protocol/contracts.ts";
-import type { WorktreeRecoveryState, WorktreeRecord } from "../../worktree.ts";
+import type {
+  WorktreeRecoveryState,
+  WorktreeRecord,
+} from "./isolation/worktree.ts";
 import type {
   ActiveSubagent,
   CompletedSubagent,

@@ -7,8 +7,8 @@ import test from "node:test";
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 
 import { InteractionBroker } from "../interactions/interaction-broker.ts";
-import type { AgentProfile } from "../../harness.ts";
-import type { SandboxCapability } from "../../permissions/execution/sandbox-capability.ts";
+import type { AgentProfile } from "../subagents/profile-model.ts";
+import type { SandboxCapability } from "./execution/sandbox-capability.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 import { PermissionService } from "./permission-service.ts";
 

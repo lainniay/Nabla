@@ -9,7 +9,7 @@ use nabla::{
     app::{App, AppEffect, AppEvent},
     config::UiConfig,
     event::RuntimeEvent,
-    pi_process::{PiProcessConfig, PiRuntime},
+    process::{PiProcessConfig, PiRuntime},
     runtime::{DispatchOutcome, EffectDispatcher},
     ui::{
         CanonicalReflowProjection, CommittedHistoryBlock, FrameCoordinator, SceneBuilder,

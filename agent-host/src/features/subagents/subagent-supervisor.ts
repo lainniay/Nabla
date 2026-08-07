@@ -5,12 +5,9 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 
-import {
-  modelReference,
-  type AgentProfile,
-  type HarnessConfig,
-} from "../../harness.ts";
-import { MUTATING_TOOL_NAMES } from "../../policy/tool-policy.ts";
+import { modelReference, type AgentProfile } from "./profile-model.ts";
+import type { HarnessConfig } from "../workspace/config.ts";
+import { MUTATING_TOOL_NAMES } from "../permissions/shell/rules.ts";
 import type {
   ActiveAgentSnapshot,
   PendingIntegrationSnapshot,
@@ -18,16 +15,19 @@ import type {
 } from "../../protocol/contracts.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 import type { RuntimeSupervisor } from "../../runtime/runtime-supervisor.ts";
-import type { PlanModeService } from "../../runtime/plan-mode-service.ts";
-import type { WorktreeRecord, WorktreeRecoveryState } from "../../worktree.ts";
+import type { PlanModePort } from "../plans/plan-controller.ts";
+import type {
+  WorktreeRecord,
+  WorktreeRecoveryState,
+} from "./isolation/worktree.ts";
 import type { WorkspaceService } from "../workspace/workspace-service.ts";
 import type { PermissionService } from "../permissions/permission-service.ts";
 import type { ToolAuthorizationContext } from "../permissions/permission-service.ts";
 import type { IntegrationService } from "./integration-service.ts";
-import type { RustSandboxBackend } from "../../permissions/execution/rust-sandbox-backend.ts";
+import type { RustSandboxBackend } from "../permissions/execution/rust-sandbox-backend.ts";
 import { createNablaBashTool } from "../../runtime/create-nabla-bash-tool.ts";
 import { buildWorkspaceContext } from "../../runtime/workspace-context.ts";
-import { normalizeToolInputPaths } from "../../runtime/tool-path-normalizer.ts";
+import { normalizeToolInputPaths } from "../permissions/filesystem/path.ts";
 import {
   SubagentRunner,
   type SubagentRunnerPort,
@@ -51,7 +51,7 @@ export class SubagentSupervisor implements SubagentRunnerPort {
   private readonly sandboxBackend: RustSandboxBackend;
   private readonly modelRuntime: ModelRuntime;
   private readonly runtime: RuntimeSupervisor;
-  private readonly planMode: PlanModeService;
+  private readonly planMode: PlanModePort;
   private readonly sendEvent: (event: JsonObject) => void;
   private readonly warn: (message: string) => void;
   private readonly onAgentsChanged: () => void;
@@ -63,7 +63,7 @@ export class SubagentSupervisor implements SubagentRunnerPort {
     sandboxBackend: RustSandboxBackend,
     modelRuntime: ModelRuntime,
     runtime: RuntimeSupervisor,
-    planMode: PlanModeService,
+    planMode: PlanModePort,
     sendEvent: (event: JsonObject) => void,
     warn: (message: string) => void,
     onAgentsChanged: () => void,

@@ -6,9 +6,7 @@ import test from "node:test";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
-import { PlanStore } from "../../plan.ts";
 import type { RuntimeAccess } from "../../runtime/runtime-access.ts";
-import { PlanModeService } from "../../runtime/plan-mode-service.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 import { TreeService } from "./tree-service.ts";
 
@@ -37,11 +35,16 @@ test("state, label, and abort delegate to the session", async () => {
       sessionGeneration: () => 1,
     } as unknown as RuntimeAccess;
     const events: JsonObject[] = [];
+    const plans = {
+      activateSession: () => {
+        events.push({ type: "plan_mode_state", active: false });
+        events.push({ type: "plan_state", artifact: null });
+        return { active: false, artifact: null };
+      },
+    };
     const service = new TreeService(
       runtime,
-      new PlanModeService(),
-      new PlanStore(),
-      (event) => events.push(event),
+      plans,
       () => ({ activation: true }),
       () => events.push({ type: "context_budget" }),
     );
@@ -100,9 +103,7 @@ test("stale generation completion is dropped", async () => {
     } as unknown as RuntimeAccess;
     const service = new TreeService(
       runtime,
-      new PlanModeService(),
-      new PlanStore(),
-      () => {},
+      { activateSession: () => ({ active: false, artifact: null }) },
       () => ({ ok: true }),
       () => {},
     );

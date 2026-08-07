@@ -3,15 +3,20 @@ import test from "node:test";
 
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
-import type { HarnessConfig } from "../../harness.ts";
+import type { HarnessConfig } from "../workspace/config.ts";
 import type { RuntimeSupervisor } from "../../runtime/runtime-supervisor.ts";
-import { PlanModeService } from "../../runtime/plan-mode-service.ts";
+import type { PlanModePort } from "../plans/plan-controller.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 import type { WorkspaceService } from "../workspace/workspace-service.ts";
 import type { PermissionService } from "../permissions/permission-service.ts";
 import type { IntegrationService } from "./integration-service.ts";
 import { SubagentSupervisor } from "./subagent-supervisor.ts";
-import type { RustSandboxBackend } from "../../permissions/execution/rust-sandbox-backend.ts";
+
+const planMode: PlanModePort = {
+  current: () => false,
+  set: () => ({ active: false, activeTools: [] }),
+};
+import type { RustSandboxBackend } from "../permissions/execution/rust-sandbox-backend.ts";
 
 const config: HarnessConfig = {
   schemaVersion: 2,
@@ -76,7 +81,7 @@ function build() {
         },
       }),
     } as unknown as RuntimeSupervisor,
-    new PlanModeService(),
+    planMode,
     (event) => events.push(event),
     () => {},
     () => {
@@ -101,7 +106,7 @@ test("start rejects unknown and disabled profiles", () => {
     {} as RustSandboxBackend,
     {} as ModelRuntime,
     {} as RuntimeSupervisor,
-    new PlanModeService(),
+    planMode,
     () => {},
     () => {},
     () => {},
@@ -147,7 +152,7 @@ test("concurrency limits reject additional starts", () => {
         },
       }),
     } as unknown as RuntimeSupervisor,
-    new PlanModeService(),
+    planMode,
     () => {},
     () => {},
     () => {},
@@ -242,7 +247,7 @@ function buildWithConfig(harness: HarnessConfig) {
         },
       }),
     } as unknown as RuntimeSupervisor,
-    new PlanModeService(),
+    planMode,
     (event) => events.push(event),
     () => {},
     () => {},

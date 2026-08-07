@@ -9,20 +9,20 @@ import {
   type ModelRuntime as ModelRuntimeType,
 } from "@earendil-works/pi-coding-agent";
 
-import { ContextBudgetManager } from "../context-manager.ts";
+import { ContextBudgetManager } from "../features/context/engine.ts";
+import { loadHarnessConfig } from "../features/workspace/config.ts";
 import {
   filterContextFilesByTrust,
-  loadHarnessConfig,
   workspaceIsTrusted,
-} from "../harness.ts";
-import { PlanStore, restorePlanMode } from "../plan.ts";
+} from "../features/workspace/trust.ts";
+import { PlanStore } from "../features/plans/store.ts";
+import { PlanController } from "../features/plans/plan-controller.ts";
 import { HostDiagnostics } from "../diagnostics/host-diagnostics.ts";
 import { ControlServer } from "../transport/control-server.ts";
 import { CommandRouter } from "../protocol/command-router.ts";
 import { HostEventPublisher } from "../protocol/host-event-publisher.ts";
 import type { HostEvent } from "../protocol/contracts.ts";
 import type { JsonObject } from "../protocol/validation.ts";
-import { PlanModeService } from "../runtime/plan-mode-service.ts";
 import { RuntimeSupervisor } from "../runtime/runtime-supervisor.ts";
 import { sessionActivation } from "../runtime/session-activation.ts";
 import { expandHomePath } from "../runtime/path-utils.ts";
@@ -37,11 +37,10 @@ import { PermissionService } from "../features/permissions/permission-service.ts
 import { SessionService } from "../features/sessions/session-service.ts";
 import { SessionBrowserService } from "../features/sessions/session-browser-service.ts";
 import { TreeService } from "../features/sessions/tree-service.ts";
-import { PlanService } from "../features/plans/plan-service.ts";
 import { ContextService } from "../features/context/context-service.ts";
 import { IntegrationService } from "../features/subagents/integration-service.ts";
 import { SubagentSupervisor } from "../features/subagents/subagent-supervisor.ts";
-import { RustSandboxBackend } from "../permissions/execution/rust-sandbox-backend.ts";
+import { RustSandboxBackend } from "../features/permissions/execution/rust-sandbox-backend.ts";
 import { createAgentCommands } from "../protocol/commands/agent-commands.ts";
 import { createAuthCommands } from "../protocol/commands/auth-commands.ts";
 import { createBootstrapCommands } from "../protocol/commands/bootstrap-commands.ts";
@@ -51,7 +50,7 @@ import { createModelCommands } from "../protocol/commands/model-commands.ts";
 import { createPermissionCommands } from "../protocol/commands/permission-commands.ts";
 import { createPlanCommands } from "../protocol/commands/plan-commands.ts";
 import { createSessionCommands } from "../protocol/commands/session-commands.ts";
-import { createStartupSessionManager } from "../session-navigation.ts";
+import { createStartupSessionManager } from "../features/sessions/startup.ts";
 import type { HostApp } from "./host-app.ts";
 import { HostAppImpl } from "./host-app.ts";
 
@@ -70,7 +69,6 @@ export async function createHostApp(
 ): Promise<HostApp> {
   const { socketPath, cwd, agentDir, env } = options;
   const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create());
-  const planMode = new PlanModeService();
   const planStore = new PlanStore();
   const contextBudget = new ContextBudgetManager();
   const startupSettings = SettingsManager.create(cwd, agentDir);
@@ -94,6 +92,7 @@ export async function createHostApp(
     events.publish(event as unknown as HostEvent);
 
   let workspace!: WorkspaceService;
+  let plans!: PlanController;
   let permissions!: PermissionService;
   let rustSandboxBackend!: RustSandboxBackend;
   let extensionFactory!: PiExtensionFactory;
@@ -155,9 +154,9 @@ export async function createHostApp(
             }),
           ],
         });
-        planMode.restore(
+        plans.activateSession(
+          result.session.sessionManager.getBranch(),
           result.session,
-          restorePlanMode(result.session.sessionManager.getBranch()),
         );
         workspace.activate(runtimeCwd, result.session);
         return {
@@ -168,6 +167,7 @@ export async function createHostApp(
       }) as CreateAgentSessionRuntimeFactory,
     );
 
+  plans = new PlanController(planStore, modelRuntime, runtime, send);
   const interactions = new InteractionBroker();
   const context = new ContextService(
     contextBudget,
@@ -180,7 +180,6 @@ export async function createHostApp(
   let subagents!: SubagentSupervisor;
   workspace = new WorkspaceService(
     runtime,
-    planMode,
     modelRuntime,
     send,
     startupConfig,
@@ -189,6 +188,7 @@ export async function createHostApp(
       pending: subagents.pendingSnapshots(),
     }),
     () => controlRef.current?.hasConnection() ?? false,
+    (session) => plans.reapply(session),
   );
   const integrations =
     options.integrations ??
@@ -200,7 +200,7 @@ export async function createHostApp(
   permissions = new PermissionService(
     interactions,
     send,
-    planMode,
+    plans,
     () => controlRef.current?.hasConnection() ?? false,
     {
       sessionId: () => runtime.current().session.sessionId,
@@ -214,26 +214,23 @@ export async function createHostApp(
     (providerId) => models.selectDefaultModel(providerId),
     send,
   );
-  const plans = new PlanService(planStore, modelRuntime, runtime, planMode, send);
   const browser = new SessionBrowserService(runtime, send);
   const activation = () =>
     sessionActivation(
       runtime.current(),
-      planMode,
+      plans,
       plans.snapshot(),
       () => context.scopedSnapshot(),
     );
   const sessions = new SessionService(
     runtime,
-    planMode,
+    plans,
     () => browser.closeAll(),
     activation,
   );
   const tree = new TreeService(
     runtime,
-    planMode,
-    planStore,
-    send,
+    plans,
     activation,
     () => context.publish(context.onTreeNavigation()),
   );
@@ -244,13 +241,13 @@ export async function createHostApp(
     rustSandboxBackend,
     modelRuntime,
     runtime,
-    planMode,
+    plans,
     send,
     (message) => diagnostics.warn(message),
     () => workspace.publishAgentsState(),
   );
   extensionFactory = new PiExtensionFactory({
-    planMode,
+    planMode: plans,
     plans,
     context,
     interactions,
@@ -263,7 +260,7 @@ export async function createHostApp(
     scopeId: runtime.current().session.sessionId,
     sandbox: rustSandboxBackend.status(),
     planMode: {
-      active: planMode.current(),
+      active: plans.current(),
       activeTools: runtime.current().session.getActiveToolNames(),
     },
     artifact: plans.snapshot(),

@@ -14,17 +14,18 @@ import { newFileDisplayDiff } from "../tool-diff.ts";
 import {
   type ContextBudgetManager,
   contextRemaining,
-  compactionRecordFromEntry,
-  type ContextSnapshot,
-} from "../context-manager.ts";
-import type { PlanArtifact, PlanContent } from "../plan.ts";
-import { PLAN_ENTRY_TYPE } from "../plan.ts";
+} from "../features/context/engine.ts";
+import { compactionRecordFromEntry } from "../features/context/checkpoint.ts";
+import type { ContextSnapshot } from "../features/context/model.ts";
+import type { PlanArtifact, PlanContent } from "../features/plans/model.ts";
+import { PLAN_ENTRY_TYPE } from "../features/plans/model.ts";
+import type { PlanModePort } from "../features/plans/plan-controller.ts";
 import type { PlanQuestion, QuestionAnswer } from "../questions.ts";
-import { TURN_METRICS_ENTRY_TYPE } from "../session-navigation.ts";
+import { TURN_METRICS_ENTRY_TYPE } from "../features/sessions/history.ts";
 import type { JsonObject } from "../protocol/validation.ts";
 import type { SubagentOptions } from "../features/subagents/subagent-types.ts";
 import { buildWorkspaceContext } from "./workspace-context.ts";
-import { normalizeToolInputPaths } from "./tool-path-normalizer.ts";
+import { normalizeToolInputPaths } from "../features/permissions/filesystem/path.ts";
 
 const STANDARD_INSTRUCTIONS = [
   "Follow Pi's normal interactive agent behavior and the user's direct request.",
@@ -38,7 +39,7 @@ const PATH_INSTRUCTIONS =
   "All shell and file tools start in the working directory shown below; use paths relative to it and never prefix commands with `cd` to that directory.";
 
 export interface PiExtensionPort {
-  planMode: { current(): boolean };
+  planMode: PlanModePort;
   plans: {
     submit(content: PlanContent, sessionId: string): PlanArtifact;
     snapshot(): PlanArtifact | null;

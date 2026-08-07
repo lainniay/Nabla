@@ -1,40 +1,41 @@
-import {
-  copyToClipboard,
-  type SessionManager,
-} from "@earendil-works/pi-coding-agent";
+import { copyToClipboard } from "@earendil-works/pi-coding-agent";
 
 import type { RuntimeAccess } from "../../runtime/runtime-access.ts";
-import type { PlanModeService } from "../../runtime/plan-mode-service.ts";
-import type { PlanStore } from "../../plan.ts";
 import {
   buildTreeSnapshot,
   copyTextForEntry,
   type TreeFilterMode,
   type TreeSnapshot,
-} from "../../session-navigation.ts";
-import { restorePlanMode } from "../../plan.ts";
+} from "./tree.ts";
+import type { PlanSnapshot } from "../plans/plan-controller.ts";
+import type { PlanSessionEntry } from "../plans/model.ts";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { JsonObject } from "../../protocol/validation.ts";
 
 export class TreeService {
   private readonly runtime: RuntimeAccess;
-  private readonly planMode: PlanModeService;
-  private readonly plans: PlanStore;
-  private readonly send: (event: JsonObject) => void;
+  private readonly plans: {
+    activateSession(
+      branch: readonly PlanSessionEntry[],
+      session: AgentSession,
+    ): PlanSnapshot;
+  };
   private readonly activation: () => JsonObject;
   private readonly onTreeNavigation: () => void;
 
   constructor(
     runtime: RuntimeAccess,
-    planMode: PlanModeService,
-    plans: PlanStore,
-    send: (event: JsonObject) => void,
+    plans: {
+      activateSession(
+        branch: readonly PlanSessionEntry[],
+        session: AgentSession,
+      ): PlanSnapshot;
+    },
     activation: () => JsonObject,
     onTreeNavigation: () => void,
   ) {
     this.runtime = runtime;
-    this.planMode = planMode;
     this.plans = plans;
-    this.send = send;
     this.activation = activation;
     this.onTreeNavigation = onTreeNavigation;
   }
@@ -86,7 +87,10 @@ export class TreeService {
     if (result.cancelled) {
       return { cancelled: true, aborted: result.aborted === true };
     }
-    this.restorePlanState(runtime.session.sessionManager);
+    this.plans.activateSession(
+      runtime.session.sessionManager.getBranch(),
+      runtime.session,
+    );
     this.onTreeNavigation();
     return {
       cancelled: false,
@@ -98,24 +102,6 @@ export class TreeService {
 
   abort(): void {
     this.runtime.current().session.abortBranchSummary();
-  }
-
-  private restorePlanState(sessionManager: SessionManager): void {
-    const restored = this.plans.restore(sessionManager.getBranch());
-    const restoredPlanMode = restorePlanMode(sessionManager.getBranch());
-    const session = this.runtime.current().session;
-    if (this.planMode.current() !== restoredPlanMode) {
-      this.planMode.set(session, restoredPlanMode);
-    }
-    this.send({
-      type: "plan_mode_state",
-      active: this.planMode.current(),
-      activeTools: session.getActiveToolNames(),
-    });
-    this.send({
-      type: "plan_state",
-      artifact: restored ?? null,
-    });
   }
 
 }

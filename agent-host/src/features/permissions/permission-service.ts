@@ -7,46 +7,34 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import type { ApprovalDecision } from "../../approval.ts";
-import {
-  agentPermissionEffect,
-  isCredentialPath,
-  type AgentProfile,
-} from "../../harness.ts";
-import { workspacePathError } from "../../workspace.ts";
-import { resolveWorkspaceIdentity } from "../../permissions/workspace-identity.ts";
-import { JsonlPermissionAuditLog } from "../../permissions/audit-log.ts";
-import { ApprovalBroker as PermissionApprovalBroker } from "../../permissions/approvals/broker.ts";
-import { PermissionKernel } from "../../permissions/kernel.ts";
-import type { Authorization } from "../../permissions/kernel.ts";
-import { ExecutionBroker } from "../../permissions/execution/broker.ts";
-import { DirectRunner } from "../../permissions/execution/direct-runner.ts";
-import { buildSandboxProfile } from "../../permissions/execution/sandbox-profile.ts";
-import type { SandboxExecutionProfile } from "../../permissions/execution/sandbox-profile.ts";
-import type { SandboxCapability } from "../../permissions/execution/sandbox-capability.ts";
+import { isCredentialPath } from "./filesystem/credential.ts";
+import type { AgentProfile } from "../subagents/profile-model.ts";
+import { workspacePathError } from "./filesystem/path.ts";
+import { resolveWorkspaceIdentity } from "./workspace-identity.ts";
+import { JsonlPermissionAuditLog } from "./audit-log.ts";
+import { ApprovalBroker as PermissionApprovalBroker } from "./approvals/broker.ts";
+import { PermissionKernel } from "./kernel.ts";
+import type { Authorization } from "./kernel.ts";
+import { buildSandboxProfile } from "./execution/sandbox-profile.ts";
+import type {
+  ExecutionPermit,
+  SandboxExecutionProfile,
+} from "./execution/sandbox-profile.ts";
+import type { SandboxCapability } from "./execution/sandbox-capability.ts";
 import type {
   ExecutionProfile,
   PermissionIntent,
   PermissionRule,
   ToolContext,
-} from "../../permissions/model.ts";
-import { mutatesManagedWorktree } from "../../permissions/managed-worktree.ts";
-import { PolicyStore } from "../../permissions/policy-store.ts";
-import { ShellAdapter } from "../../permissions/adapters/shell.ts";
-import type { WorkspaceGrantSnapshot } from "../../permissions/approvals/workspace-store.ts";
-import {
-  isBenignShellCommand,
-  isReadOnlyCdCommand,
-  isDangerousExecCommand,
-  isReadOnlyFindCommand,
-  isReadOnlyWorkspaceCommand,
-  isReadOnlyGitCommand,
-  isReadOnlyXargsCommand,
-} from "../../policy/tool-policy.ts";
+} from "./model.ts";
+import { mutatesManagedWorktree } from "./managed-worktree.ts";
+import { PolicyStore } from "./policy-store.ts";
+import { ShellAdapter } from "./adapters/shell.ts";
+import type { WorkspaceGrantSnapshot } from "./approvals/workspace-store.ts";
 import type { InteractionBroker } from "../interactions/interaction-broker.ts";
-import {
-  agentToolResource,
-  permissionIntentForTool,
-} from "./tool-intent.ts";
+import { permissionIntentForTool } from "./tool-intent.ts";
+import { compileAgentProfileRules } from "./policy/profile-compiler.ts";
+import { PLAN_MODE_POLICY } from "../plans/plan-controller.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 
 const EXTERNAL_TOOL_EXECUTION_PROFILE: ExecutionProfile = {
@@ -85,12 +73,9 @@ export interface AuthorizeBashInput {
   agent?: ToolAuthorizationContext["agent"];
 }
 
-export interface BashAuthorization {
-  authorizationId: string;
+export interface BashAuthorization extends ExecutionPermit {
   decision: "allow" | "deny";
   reason?: string;
-  commandDigest: string;
-  profile: SandboxExecutionProfile;
 }
 
 export class PermissionService {
@@ -100,10 +85,6 @@ export class PermissionService {
     this.policies,
     this.approvals,
     new JsonlPermissionAuditLog(),
-  );
-  private readonly execution = new ExecutionBroker(
-    this.kernel,
-    new DirectRunner(),
   );
   private readonly pending = new Map<string, Authorization>();
   private readonly pendingBash = new Map<
@@ -159,7 +140,7 @@ export class PermissionService {
       return { block: true, reason: core.reason };
     }
     if (
-      !this.execution.beginExternalTool(
+      !this.kernel.consumeForExecution(
         core.authorization,
         core.intent,
         EXTERNAL_TOOL_EXECUTION_PROFILE,
@@ -188,11 +169,15 @@ export class PermissionService {
     });
     if ("blocked" in core) {
       return {
-        authorizationId: `denied-${input.toolCallId}`,
+        id: `denied-${input.toolCallId}`,
         decision: "deny",
         reason: core.reason,
-        commandDigest: "",
-        profile: buildSandboxProfile(emptyIntent(input), input.cwd, this.sandboxCapability()),
+        intentDigest: "",
+        sandboxProfile: buildSandboxProfile(
+          emptyIntent(input),
+          input.cwd,
+          this.sandboxCapability(),
+        ),
       };
     }
     const profile = buildSandboxProfile(
@@ -201,18 +186,18 @@ export class PermissionService {
       this.sandboxCapability(),
     );
     if (
-      !this.execution.beginExternalTool(
+      !this.kernel.consumeForExecution(
         core.authorization,
         core.intent,
         toExecutionProfile(profile),
       )
     ) {
       return {
-        authorizationId: core.authorization.requestId,
+        id: core.authorization.requestId,
         decision: "deny",
         reason: "Tool input changed after approval",
-        commandDigest: core.intent.digest,
-        profile,
+        intentDigest: core.intent.digest,
+        sandboxProfile: profile,
       };
     }
     this.pendingBash.set(input.toolCallId, {
@@ -221,10 +206,10 @@ export class PermissionService {
       profile,
     });
     return {
-      authorizationId: core.authorization.requestId,
+      id: core.authorization.requestId,
       decision: "allow",
-      commandDigest: core.intent.digest,
-      profile,
+      intentDigest: core.intent.digest,
+      sandboxProfile: profile,
     };
   }
 
@@ -232,7 +217,7 @@ export class PermissionService {
     const entry = this.pendingBash.get(toolCallId);
     if (!entry) return;
     this.pendingBash.delete(toolCallId);
-    this.execution.finishExternalTool(
+    this.kernel.recordExecutionResult(
       entry.authorization,
       toExecutionProfile(entry.profile),
       succeeded,
@@ -249,8 +234,6 @@ export class PermissionService {
     const toolName = event.toolName;
     const input = event.input as Record<string, unknown>;
     const path = typeof input.path === "string" ? input.path : undefined;
-    const command =
-      typeof input.command === "string" ? input.command : undefined;
     const agent = context.agent ?? {};
     const profile = agent.profileConfig;
     if (profile && !profile.tools.includes(toolName)) {
@@ -259,13 +242,6 @@ export class PermissionService {
         reason: `Tool ${toolName} is not exposed to profile ${agent.profile}`,
       };
     }
-    const profileEffect = profile
-      ? agentPermissionEffect(
-          profile,
-          toolName,
-          agentToolResource(context.cwd, path, command),
-        )
-      : undefined;
     const sessionId = agent.sessionId ?? this.tryCurrentScopeId();
     if (!sessionId) {
       return { blocked: true, reason: "Permission scope is unavailable" };
@@ -286,6 +262,8 @@ export class PermissionService {
         this.shellAdapter,
       );
     const intent = normalize();
+    const shellAnalysis =
+      intent.tool === "bash" ? this.shellAdapter.analysis(intent) : undefined;
     const additionalRules: PermissionRule[] = [];
     const addToolRule = (
       id: string,
@@ -299,39 +277,14 @@ export class PermissionService {
         matcher: { kind: "tool", tool: toolName },
       });
     };
-    if (profileEffect === "deny") {
-      addToolRule(`profile-${agent.profile}-deny`, "deny", "managed");
-    } else if (profileEffect === "ask") {
-      addToolRule(`profile-${agent.profile}-ask`, "ask", "managed");
-    }
-    if (
-      agent.planReadOnly &&
-      intent.atoms.some(
-        (atom) =>
-          atom.kind === "exec" ||
-          (atom.kind === "file" &&
-            atom.operation !== "read" &&
-            atom.operation !== "list") ||
-          atom.kind === "opaque_code",
-      )
-    ) {
-      addToolRule("plan-read-only", "deny", "managed");
+    if (profile) {
+      additionalRules.push(...compileAgentProfileRules(profile, context.cwd));
     }
     if (agent.agentId && mutatesManagedWorktree(intent)) {
       addToolRule("managed-worktree-boundary", "deny", "managed");
     }
-    if (
-      !agent.agentId &&
-      this.planMode.current() &&
-      intent.atoms.some(
-        (atom) =>
-          atom.kind === "exec" ||
-          (atom.kind === "file" &&
-            atom.operation !== "read" &&
-            atom.operation !== "list"),
-      )
-    ) {
-      addToolRule("plan-mode-mutation", "deny", "managed");
+    if (agent.planReadOnly || (!agent.agentId && this.planMode.current())) {
+      additionalRules.push(...PLAN_MODE_POLICY.permissionRules);
     }
     const workspaceRoot = realpathSync(context.cwd);
     additionalRules.push(
@@ -376,42 +329,8 @@ export class PermissionService {
         });
       }
     }
-    let readOnlyBash = true;
-    for (const atom of intent.atoms) {
-      if (atom.kind !== "exec") continue;
-      const executable = atom.executable.split("/").at(-1)!;
-      if (executable === "git") {
-        if (!isReadOnlyGitCommand(atom.argv, atom.cwd)) {
-          readOnlyBash = false;
-          break;
-        }
-      } else if (executable === "cd") {
-        if (!isReadOnlyCdCommand(atom.argv, atom.cwd)) {
-          readOnlyBash = false;
-          break;
-        }
-      } else if (executable === "find") {
-        if (!isReadOnlyFindCommand(atom.argv, atom.cwd)) {
-          readOnlyBash = false;
-          break;
-        }
-      } else if (executable === "xargs") {
-        if (!isReadOnlyXargsCommand(atom.argv)) {
-          readOnlyBash = false;
-          break;
-        }
-      } else if (executable === "ls" || executable === "wc") {
-        if (!isReadOnlyWorkspaceCommand(atom.argv, atom.cwd)) {
-          readOnlyBash = false;
-          break;
-        }
-      } else if (!isBenignShellCommand(executable)) {
-        readOnlyBash = false;
-        break;
-      }
-    }
     if (
-      readOnlyBash &&
+      shellAnalysis?.safety.readOnly &&
       intent.atoms.some((atom) => atom.kind === "exec")
     ) {
       for (const atom of intent.atoms) {
@@ -448,20 +367,11 @@ export class PermissionService {
       this.sandboxCapability().mode === "enforced" &&
       intent.atoms.some((atom) => atom.kind === "exec")
     ) {
-      let sandboxAutoAllow = true;
-      for (const atom of intent.atoms) {
-        if (atom.kind === "opaque_code" || atom.kind === "network") {
-          sandboxAutoAllow = false;
-          break;
-        }
-        if (
-          atom.kind === "exec" &&
-          isDangerousExecCommand(atom.executable, atom.argv, atom.cwd)
-        ) {
-          sandboxAutoAllow = false;
-          break;
-        }
-      }
+      const sandboxAutoAllow =
+        shellAnalysis !== undefined &&
+        !shellAnalysis.safety.opaque &&
+        !shellAnalysis.safety.network &&
+        !shellAnalysis.safety.destructive;
       if (sandboxAutoAllow) {
         for (const atom of intent.atoms) {
           if (atom.kind === "exec") {
@@ -577,7 +487,7 @@ export class PermissionService {
     const authorization = this.pending.get(toolCallId);
     if (!authorization) return;
     this.pending.delete(toolCallId);
-    this.execution.finishExternalTool(
+    this.kernel.recordExecutionResult(
       authorization,
       EXTERNAL_TOOL_EXECUTION_PROFILE,
       succeeded,
@@ -617,8 +527,7 @@ export class PermissionService {
 function toExecutionProfile(
   profile: SandboxExecutionProfile,
 ): ExecutionProfile {
-  // The broker records Bash executions but never executes them itself, so the
-  // profile backend stays "none" to match the DirectRunner used by the broker.
+  // Audit-only profile; the Rust sandbox owns real execution.
   return {
     backend: "none",
     filesystem: { read: ["*"], write: profile.filesystem.readWrite },

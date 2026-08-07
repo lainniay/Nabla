@@ -32,7 +32,10 @@ function createFactory(overrides: Partial<PiExtensionPort> = {}) {
   const calls: string[] = [];
   const events: JsonObject[] = [];
   const port = {
-    planMode: { current: () => false },
+    planMode: {
+      current: () => false,
+      set: () => ({ active: false, activeTools: [] }),
+    },
     plans: {
       submit: () => {
         calls.push("plans.submit");
@@ -119,7 +122,10 @@ test("submit_plan is rejected outside plan mode", async () => {
 
 test("submit_plan submits, appends, and emits plan_ready in plan mode", async () => {
   const { calls, events, pi } = createFactory({
-    planMode: { current: () => true },
+    planMode: {
+      current: () => true,
+      set: () => ({ active: true, activeTools: [] }),
+    },
   });
   const submit = pi.tools.find((tool) => tool.name === "submit_plan")!;
   const result = (await submit.execute(

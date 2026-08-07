@@ -9,9 +9,12 @@ import {
   stringArrayField,
   stringField,
 } from "../validation.ts";
-import type { TreeFilterMode } from "../../session-navigation.ts";
-import type { SessionBrowserSnapshot, TreeSnapshot } from "../../session-navigation.ts";
-import type { ContextSnapshot } from "../../context-manager.ts";
+import type { SessionBrowserSnapshot } from "../../features/sessions/catalog.ts";
+import type {
+  TreeFilterMode,
+  TreeSnapshot,
+} from "../../features/sessions/tree.ts";
+import type { ContextSnapshot } from "../../features/context/model.ts";
 import type { JsonObject } from "../validation.ts";
 
 const FILTER_MODES = [

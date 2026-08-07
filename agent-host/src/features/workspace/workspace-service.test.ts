@@ -7,9 +7,8 @@ import type {
   ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 
-import type { HarnessConfig } from "../../harness.ts";
+import type { HarnessConfig } from "./config.ts";
 import type { RuntimeAccess } from "../../runtime/runtime-access.ts";
-import { PlanModeService } from "../../runtime/plan-mode-service.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 import { WorkspaceService } from "./workspace-service.ts";
 
@@ -70,7 +69,6 @@ test("resource snapshot revision grows monotonically and publishes", () => {
   const events: JsonObject[] = [];
   const service = new WorkspaceService(
     fakeRuntime(),
-    new PlanModeService(),
     {} as ModelRuntime,
     (event) => events.push(event),
     config,
@@ -90,7 +88,6 @@ test("resource snapshot revision grows monotonically and publishes", () => {
 test("profile catalog reports unavailable profiles and prompt text", () => {
   const service = new WorkspaceService(
     fakeRuntime(),
-    new PlanModeService(),
     {} as ModelRuntime,
     () => {},
     config,
@@ -106,7 +103,6 @@ test("profile catalog reports unavailable profiles and prompt text", () => {
 test("reloadConfig replaces the active harness config", () => {
   const service = new WorkspaceService(
     fakeRuntime(),
-    new PlanModeService(),
     {} as ModelRuntime,
     () => {},
     config,

@@ -12,43 +12,38 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 
-import { intersectGrantSets } from "./permissions/adapters/agent.ts";
+import { intersectGrantSets } from "./features/permissions/adapters/agent.ts";
 import {
   CreateAdapter,
   DeleteAdapter,
   RenameAdapter,
   WriteAdapter,
-} from "./permissions/adapters/filesystem.ts";
-import { ShellAdapter } from "./permissions/adapters/shell.ts";
-import { createIntent } from "./permissions/adapters/tool-adapter.ts";
-import { MemoryPermissionAuditLog } from "./permissions/audit-log.ts";
-import { ApprovalBroker } from "./permissions/approvals/broker.ts";
-import { OnceGrantStore } from "./permissions/approvals/once-store.ts";
-import { SessionGrantStore } from "./permissions/approvals/session-store.ts";
-import { WorkspaceGrantStore } from "./permissions/approvals/workspace-store.ts";
-import { evaluatePermission } from "./permissions/evaluator.ts";
-import { ExecutionBroker } from "./permissions/execution/broker.ts";
-import type {
-  ExecutionResult,
-  SandboxBackend,
-} from "./permissions/execution/sandbox-backend.ts";
-import { proposeGrantBundles } from "./permissions/grant-proposal.ts";
-import { PermissionKernel } from "./permissions/kernel.ts";
+} from "./features/permissions/adapters/filesystem.ts";
+import { ShellAdapter } from "./features/permissions/adapters/shell.ts";
+import { createIntent } from "./features/permissions/adapters/tool-adapter.ts";
+import { MemoryPermissionAuditLog } from "./features/permissions/audit-log.ts";
+import { ApprovalBroker } from "./features/permissions/approvals/broker.ts";
+import { OnceGrantStore } from "./features/permissions/approvals/once-store.ts";
+import { SessionGrantStore } from "./features/permissions/approvals/session-store.ts";
+import { WorkspaceGrantStore } from "./features/permissions/approvals/workspace-store.ts";
+import { evaluatePermission } from "./features/permissions/evaluator.ts";
+import { proposeGrantBundles } from "./features/permissions/grant-proposal.ts";
+import { PermissionKernel } from "./features/permissions/kernel.ts";
 import type {
   CapabilityMatcher,
   ExecutionProfile,
   PermissionIntent,
   PermissionRule,
   ToolContext,
-} from "./permissions/model.ts";
-import { PolicyStore } from "./permissions/policy-store.ts";
-import { planShell } from "./permissions/shell/planner.ts";
-import { digestValue } from "./permissions/shell/digest.ts";
+} from "./features/permissions/model.ts";
+import { PolicyStore } from "./features/permissions/policy-store.ts";
+import { planShell } from "./features/permissions/shell/planner.ts";
+import { digestValue } from "./features/permissions/shell/digest.ts";
 import {
   fileDigest,
   resolveWorkspaceIdentity,
-} from "./permissions/workspace-identity.ts";
-import { mutatesManagedWorktree } from "./permissions/managed-worktree.ts";
+} from "./features/permissions/workspace-identity.ts";
+import { mutatesManagedWorktree } from "./features/permissions/managed-worktree.ts";
 
 function context(workspace: string, sessionId = "session-1"): ToolContext {
   const identity = resolveWorkspaceIdentity(workspace);
@@ -646,7 +641,7 @@ test("execution rejects post-approval cwd, argv, and environment changes", async
   }
 });
 
-test("execution broker starts only an unchanged fully authorized plan", async () => {
+test("permit consumption and completion record the execution lifecycle", async () => {
   const value = fixture();
   try {
     const identity = resolveWorkspaceIdentity(value.workspace);
@@ -670,29 +665,25 @@ test("execution broker starts only an unchanged fully authorized plan", async ()
       identity,
       async () => "allow_once",
     );
-    const calls: string[] = [];
-    const backend: SandboxBackend = {
-      kind: "none",
-      async run(command): Promise<ExecutionResult> {
-        calls.push([command.executable, ...command.argv].join(" "));
-        return { exitCode: 0, stdout: "", stderr: "" };
-      },
-    };
     const profile: ExecutionProfile = {
       backend: "none",
       filesystem: { read: [], write: [] },
       network: { allow: [] },
       environment: { inherit: [], set: {} },
     };
-    const broker = new ExecutionBroker(kernel, backend);
-    await broker.executeShell(
-      authorization,
-      adapter,
-      ctx,
-      input,
-      profile,
+    assert.equal(
+      kernel.consumeForExecution(
+        authorization,
+        intent,
+        profile,
+      ),
+      true,
     );
-    assert.deepEqual(calls, ["tool argument"]);
+    kernel.recordExecutionResult(
+      authorization,
+      profile,
+      true,
+    );
     assert.equal(
       audit.entries.some((entry) =>
         entry.outcome === "execution_started" && entry.onceConsumed === true),
@@ -702,17 +693,14 @@ test("execution broker starts only an unchanged fully authorized plan", async ()
       audit.entries.some((entry) => entry.outcome === "executed"),
       true,
     );
-    await assert.rejects(
-      broker.executeShell(
+    assert.equal(
+      kernel.consumeForExecution(
         authorization,
-        adapter,
-        ctx,
-        input,
+        intent,
         profile,
       ),
-      /was not granted/u,
+      false,
     );
-    assert.deepEqual(calls, ["tool argument"]);
   } finally {
     value.cleanup();
   }

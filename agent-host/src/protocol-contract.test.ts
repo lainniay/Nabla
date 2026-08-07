@@ -4,8 +4,8 @@ import test from "node:test";
 
 import { parseBootstrapState } from "./protocol/contracts.ts";
 import { parseFileReferenceEnvelope } from "./protocol/message-content.ts";
-import type { SessionHistoryItem } from "./session-navigation.ts";
-import type { WorkspaceGrantSnapshot } from "./permissions/approvals/workspace-store.ts";
+import type { SessionHistoryItem } from "./features/sessions/history.ts";
+import type { WorkspaceGrantSnapshot } from "./features/permissions/approvals/workspace-store.ts";
 
 test("shared bootstrap fixture satisfies the TypeScript protocol contract", () => {
   const fixturePath = new URL(

@@ -2,7 +2,7 @@ import {
   type CommandDefinition,
   requestObject,
 } from "../command-definition.ts";
-import type { ResourceSnapshot } from "../../harness.ts";
+import type { ResourceSnapshot } from "../../features/workspace/config.ts";
 import type { AgentsSnapshot } from "../contracts.ts";
 
 export interface ConfigurationCommandPort {

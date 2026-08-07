@@ -1,6 +1,6 @@
-import type { ContextSnapshot } from "../../context-manager.ts";
-import type { ResourceSnapshot } from "../../harness.ts";
-import type { PlanArtifact } from "../../plan.ts";
+import type { ContextSnapshot } from "../context/model.ts";
+import type { ResourceSnapshot } from "../workspace/config.ts";
+import type { PlanArtifact } from "../plans/model.ts";
 import type {
   AgentsSnapshot,
   BootstrapState,

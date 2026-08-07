@@ -18,7 +18,7 @@ use crate::{
     event::CommandEvent,
     file_references::{FileReferenceService, PromptDelivery},
     host::HostClient,
-    pi_process::PiClient,
+    pi::PiClient,
 };
 
 #[derive(Clone)]

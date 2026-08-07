@@ -10,7 +10,7 @@ import {
   PLAN_ENTRY_TYPE,
   PLAN_MODE_ENTRY_TYPE,
   type PlanArtifact,
-} from "./plan.ts";
+} from "./features/plans/model.ts";
 
 const artifact: PlanArtifact = {
   id: "plan-1",

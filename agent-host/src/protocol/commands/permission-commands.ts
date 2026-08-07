@@ -3,7 +3,7 @@ import {
   requestObject,
 } from "../command-definition.ts";
 import { stringField } from "../validation.ts";
-import type { WorkspaceGrantSnapshot } from "../../permissions/approvals/workspace-store.ts";
+import type { WorkspaceGrantSnapshot } from "../../features/permissions/approvals/workspace-store.ts";
 
 export interface PermissionCommandPort {
   workspaceRules(): WorkspaceGrantSnapshot;

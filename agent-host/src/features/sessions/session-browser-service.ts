@@ -2,7 +2,7 @@ import type { RuntimeAccess } from "../../runtime/runtime-access.ts";
 import {
   SessionCatalog,
   type SessionBrowserSnapshot,
-} from "../../session-navigation.ts";
+} from "./catalog.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 
 export class SessionBrowserService {

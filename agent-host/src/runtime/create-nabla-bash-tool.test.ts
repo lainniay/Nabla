@@ -4,8 +4,8 @@ import test from "node:test";
 import type { BashOperations, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import type { PermissionService } from "../features/permissions/permission-service.ts";
-import type { RustSandboxBackend } from "../permissions/execution/rust-sandbox-backend.ts";
-import type { SandboxExecutionProfile } from "../permissions/execution/sandbox-profile.ts";
+import type { RustSandboxBackend } from "../features/permissions/execution/rust-sandbox-backend.ts";
+import type { SandboxExecutionProfile } from "../features/permissions/execution/sandbox-profile.ts";
 import { createNablaBashTool } from "./create-nabla-bash-tool.ts";
 
 const profile: SandboxExecutionProfile = {
@@ -21,10 +21,10 @@ test("bash tool authorizes once, runs through sandbox operations, and finishes o
     authorizeBash: async () => {
       calls.push("authorize");
       return {
-        authorizationId: "a1",
+        id: "a1",
         decision: "allow" as const,
-        commandDigest: "d",
-        profile,
+        intentDigest: "d",
+        sandboxProfile: profile,
       };
     },
     finishBash: (_toolCallId: string, succeeded: boolean) => {
@@ -72,11 +72,11 @@ test("bash tool authorizes once, runs through sandbox operations, and finishes o
 test("denied authorization throws and never executes", async () => {
   const permissions = {
     authorizeBash: async () => ({
-      authorizationId: "denied",
+      id: "denied",
       decision: "deny" as const,
       reason: "Denied by user",
-      commandDigest: "",
-      profile,
+      intentDigest: "",
+      sandboxProfile: profile,
     }),
     finishBash: () => {
       assert.fail("finishBash must not be called for a denied call");

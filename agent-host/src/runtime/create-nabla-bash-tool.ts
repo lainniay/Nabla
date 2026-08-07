@@ -9,7 +9,7 @@ import type {
   PermissionService,
   ToolAuthorizationContext,
 } from "../features/permissions/permission-service.ts";
-import type { RustSandboxBackend } from "../permissions/execution/rust-sandbox-backend.ts";
+import type { RustSandboxBackend } from "../features/permissions/execution/rust-sandbox-backend.ts";
 
 export interface CreateNablaBashToolOptions {
   shellPath?: string;
@@ -65,7 +65,7 @@ export function createNablaBashTool(
       let succeeded = false;
       try {
         const operations = deps.sandboxBackend.operationsFor(
-          authorization.profile,
+          authorization.sandboxProfile,
         );
         const result = await createBashToolDefinition(cwd, {
           ...options,

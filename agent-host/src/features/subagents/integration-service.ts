@@ -1,19 +1,17 @@
 import { resolve } from "node:path";
 
-import {
-  agentPermissionEffect,
-  isCredentialPath,
-  type AgentProfile,
-  type HarnessConfig,
-} from "../../harness.ts";
-import { workspaceRelativePath } from "../../policy/path-boundary.ts";
+import { isCredentialPath } from "../permissions/filesystem/credential.ts";
+import type { AgentProfile } from "./profile-model.ts";
+import type { HarnessConfig } from "../workspace/config.ts";
+import { profileToolEffect } from "../permissions/policy/profile-compiler.ts";
+import { workspaceRelativePath } from "../permissions/filesystem/path.ts";
 import { isJsonObject } from "../../protocol/validation.ts";
 import {
   WorktreeManager,
   type AgentIsolationPolicy,
   type WorktreeRecord,
   type WorktreeRecoveryState,
-} from "../../worktree.ts";
+} from "./isolation/worktree.ts";
 
 export interface RecoveredSubagent {
   record: WorktreeRecord;
@@ -158,7 +156,8 @@ export class IntegrationService {
         pathTools.length > 0 &&
         pathTools.every(
           (tool) =>
-            agentPermissionEffect(profile, tool, workspaceRelative) === "deny",
+            profileToolEffect(profile, tool, workspaceRelative, originCwd) ===
+            "deny",
         ) &&
         !profile.tools.includes("bash")
       ) {

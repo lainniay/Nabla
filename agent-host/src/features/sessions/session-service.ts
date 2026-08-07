@@ -1,16 +1,16 @@
 import type { RuntimeSupervisor } from "../../runtime/runtime-supervisor.ts";
-import type { PlanModeService } from "../../runtime/plan-mode-service.ts";
+import type { PlanModePort } from "../plans/plan-controller.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 
 export class SessionService {
   private readonly runtime: RuntimeSupervisor;
-  private readonly planMode: PlanModeService;
+  private readonly planMode: PlanModePort;
   private readonly onTransition: () => void;
   private readonly activation: () => JsonObject;
 
   constructor(
     runtime: RuntimeSupervisor,
-    planMode: PlanModeService,
+    planMode: PlanModePort,
     onTransition: () => void,
     activation: () => JsonObject,
   ) {
@@ -23,7 +23,7 @@ export class SessionService {
   async newSession(): Promise<{ cancelled: boolean; activation?: JsonObject }> {
     const runtime = this.runtime.requireIdle("Cannot create a session");
     if (this.planMode.current()) {
-      this.planMode.set(runtime.session, false);
+      this.planMode.set(false);
     }
     const result = await this.runtime.newSession();
     if (result.cancelled) return { cancelled: true };

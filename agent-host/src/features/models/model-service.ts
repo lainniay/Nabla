@@ -1,6 +1,6 @@
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
-import type { ThinkingLevel } from "../../policy/tool-policy.ts";
+import type { ThinkingLevel } from "../permissions/shell/rules.ts";
 import type { RuntimeAccess } from "../../runtime/runtime-access.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 
