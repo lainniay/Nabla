@@ -5,13 +5,11 @@ import type {
 
 import {
   loadHarnessConfig,
+  workspaceIsTrusted,
   type HarnessConfig,
   type ResourceSnapshot,
 } from "./config.ts";
-import {
-  saveWorkspaceTrust,
-  workspaceIsTrusted,
-} from "./trust.ts";
+import { saveWorkspaceTrust } from "./trust.ts";
 import {
   modelReference,
   type AgentProfile,

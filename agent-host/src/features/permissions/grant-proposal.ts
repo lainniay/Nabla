@@ -7,7 +7,7 @@ import type {
   InvalidationKey,
   PermissionIntent,
 } from "./model.ts";
-import { digestValue } from "./shell/digest.ts";
+import { digestValue, npmScriptDigest } from "./shell/digest.ts";
 import { fileDigest, workspaceInvalidationKeys, type WorkspaceIdentity } from "./workspace-identity.ts";
 
 const MANIFESTS_BY_EXECUTABLE: Record<string, string[]> = {
@@ -128,25 +128,6 @@ function npmScriptName(argv: readonly string[]): string | undefined {
     return argv[0];
   }
   return undefined;
-}
-
-function npmScriptDigest(path: string, script: string): string | undefined {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      !("scripts" in parsed) ||
-      typeof parsed.scripts !== "object" ||
-      parsed.scripts === null
-    ) {
-      return undefined;
-    }
-    const value = (parsed.scripts as Record<string, unknown>)[script];
-    return typeof value === "string" ? digestValue(value) : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function cargoInvalidationPaths(

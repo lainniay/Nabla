@@ -26,7 +26,7 @@ import type {
 } from "./model.ts";
 import { digestValue } from "./shell/digest.ts";
 import type { ShellAnalysis } from "./shell/planner.ts";
-import { isJsonObject } from "../../protocol/validation.ts";
+import { isJsonObject, isStringRecord } from "../../protocol/validation.ts";
 
 export function assessOpaqueRisk(
   intent: PermissionIntent,
@@ -120,11 +120,4 @@ export function agentToolResource(
   if (command) return command.trim().replace(/\s+/gu, " ");
   if (!path) return "*";
   return workspaceRelativePath(cwd, resolve(cwd, path));
-}
-
-function isStringRecord(value: unknown): value is Record<string, string> {
-  return (
-    isJsonObject(value) &&
-    Object.values(value).every((item) => typeof item === "string")
-  );
 }

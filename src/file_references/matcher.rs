@@ -23,6 +23,7 @@ pub(crate) fn match_score(candidate: &FileCandidate, query: &str) -> Option<u8> 
     }
 }
 
+// Keep in sync with agent-host/src/features/sessions/catalog.ts fuzzySubsequenceScore.
 pub(crate) fn is_subsequence(needle: &str, haystack: &str) -> bool {
     let mut chars = haystack.chars();
     needle

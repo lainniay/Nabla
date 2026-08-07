@@ -58,3 +58,26 @@ export function enumField<const T extends readonly string[]>(
   }
   return field as T[number];
 }
+
+export function validAgentName(name: string): boolean {
+  return /^[a-z0-9][a-z0-9_-]*$/u.test(name);
+}
+
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    isJsonObject(value) &&
+    Object.values(value).every((item) => typeof item === "string")
+  );
+}
+
+export function sanitizeLine(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f]+/gu, " ").trim();
+}
+
+export function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}

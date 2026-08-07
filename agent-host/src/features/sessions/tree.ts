@@ -5,7 +5,11 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import { messageContentText } from "../../protocol/message-content.ts";
-import { isJsonObject as isRecord } from "../../protocol/validation.ts";
+import {
+  isJsonObject as isRecord,
+  sanitizeLine,
+  stringValue,
+} from "../../protocol/validation.ts";
 
 export type TreeFilterMode =
   | "default"
@@ -378,12 +382,4 @@ function messageHasToolCallsOnly(message: unknown): boolean {
 function truncatePreview(value: string): string {
   const normalized = sanitizeLine(value);
   return normalized.length > 240 ? `${normalized.slice(0, 239)}…` : normalized;
-}
-
-function sanitizeLine(value: string): string {
-  return value.replace(/[\u0000-\u001f\u007f]+/gu, " ").trim();
-}
-
-function stringValue(value: unknown): string {
-  return typeof value === "string" ? value : "";
 }

@@ -1,10 +1,10 @@
-import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
 import { mkdir, readdir, readFile, realpath } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 
 import { writeAtomicJson } from "../../../persistence/atomic-json.ts";
 import { assertWorkspaceRelativePath } from "../../permissions/filesystem/path.ts";
+import { sha256Hex } from "../../permissions/shell/digest.ts";
 import type {
   WorktreeRecord,
   WorktreeRecoveryScan,
@@ -23,7 +23,7 @@ export class WorktreeArtifactStore {
   }
 
   patchHash(patch: string): string {
-    return createHash("sha256").update(patch).digest("hex");
+    return sha256Hex(patch);
   }
 
   async persist(record: WorktreeRecord): Promise<void> {

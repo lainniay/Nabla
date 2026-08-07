@@ -7,6 +7,8 @@ import { canonicalPath } from "../permissions/filesystem/path.ts";
 import {
   isJsonObject as isRecord,
   stringArray,
+  errorMessage,
+  validAgentName,
 } from "../../protocol/validation.ts";
 import {
   DEFAULT_CONFIG,
@@ -71,11 +73,9 @@ export function loadHarnessConfig(
     join(home, ".nabla", "agents"),
     diagnostics,
   );
-  const canonicalWorkspace = canonicalPath(cwd);
-  const trusted = globalConfig.trustedWorkspaces.some(
-    (workspace) => canonicalPath(workspace) === canonicalWorkspace,
-  );
-  if (!trusted) return { ...globalConfig, diagnostics };
+  if (!workspaceIsTrusted(cwd, globalConfig)) {
+    return { ...globalConfig, diagnostics };
+  }
   const projectPath = join(cwd, ".nabla", "config.json");
   const projectValue = readJsonObject(projectPath, diagnostics);
   let projectConfig = mergeConfig(
@@ -91,6 +91,16 @@ export function loadHarnessConfig(
     diagnostics,
   );
   return restrictProjectPermissions(globalConfig, projectConfig, diagnostics);
+}
+
+export function workspaceIsTrusted(
+  cwd: string,
+  config: HarnessConfig,
+): boolean {
+  const canonical = canonicalPath(cwd);
+  return config.trustedWorkspaces.some(
+    (workspace) => canonicalPath(workspace) === canonical,
+  );
 }
 
 export function readConfigJson(
@@ -239,12 +249,4 @@ function readJsonObject(
 
 function cloneHarnessConfig(config: HarnessConfig): HarnessConfig {
   return structuredClone(config);
-}
-
-function validAgentName(name: string): boolean {
-  return /^[a-z0-9][a-z0-9_-]*$/u.test(name);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

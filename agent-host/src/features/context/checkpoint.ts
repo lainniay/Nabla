@@ -8,6 +8,7 @@ import {
   messageContentText,
 } from "../../protocol/message-content.ts";
 import { isJsonObject as isObject } from "../../protocol/validation.ts";
+import { messageRole } from "./estimator.ts";
 import type {
   AgentMessage,
   CompactionRecord,
@@ -106,10 +107,4 @@ function containsPlanRevision(
   // the Plan body as "present"; acceptable because the token is namespaced and
   // only the implementation prompt emits it.
   return text.includes(planRevisionMarker(plan.id, plan.revision));
-}
-
-function messageRole(message: AgentMessage): string | undefined {
-  return isObject(message) && typeof message.role === "string"
-    ? message.role
-    : undefined;
 }

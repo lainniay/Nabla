@@ -87,7 +87,7 @@ export function matcherMatches(
         matcher.inputDigest === digestValue(intent.normalizedInput))
     );
   }
-  if (matcher.kind === "shell_digest") {
+  if (matcher.kind === "shell_digest" || matcher.kind === "shell_command") {
     if (
       !intent ||
       intent.tool !== "bash" ||
@@ -97,24 +97,13 @@ export function matcherMatches(
       return false;
     }
     const command = (intent.normalizedInput as { command?: unknown }).command;
-    return typeof command === "string" &&
-      digestValue({ command }) === matcher.digest;
-  }
-  if (matcher.kind === "shell_command") {
-    if (
-      !intent ||
-      intent.tool !== "bash" ||
-      typeof intent.normalizedInput !== "object" ||
-      intent.normalizedInput === null
-    ) {
-      return false;
-    }
-    const command = (intent.normalizedInput as { command?: unknown }).command;
-    return typeof command === "string" &&
-      patternMatches(
-        matcher.pattern,
-        command.trim().replace(/\s+/gu, " "),
-      );
+    if (typeof command !== "string") return false;
+    return matcher.kind === "shell_digest"
+      ? digestValue({ command }) === matcher.digest
+      : patternMatches(
+          matcher.pattern,
+          command.trim().replace(/\s+/gu, " "),
+        );
   }
   if (matcher.kind !== atom.kind) return false;
   switch (matcher.kind) {

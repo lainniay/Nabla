@@ -1,5 +1,12 @@
 use super::*;
 
+fn usage_error(state: &mut AppState, usage: &str) -> Vec<AppEffect> {
+    state
+        .transcript
+        .push(TranscriptItem::Error(format!("Usage: {usage}")));
+    Vec::new()
+}
+
 // INFO: User intents are translated into declarative effects here. I/O remains
 // in adapters, keeping command routing and error transitions deterministic.
 impl App {
@@ -88,10 +95,7 @@ impl App {
             }
             LocalCommand::New(argument) => {
                 if argument.is_some() {
-                    self.state
-                        .transcript
-                        .push(TranscriptItem::Error("Usage: /new".to_owned()));
-                    return Vec::new();
+                    return usage_error(&mut self.state, "/new");
                 }
                 self.state.run_state = RunState::SwitchingSession;
                 self.state.last_error = None;
@@ -99,10 +103,7 @@ impl App {
             }
             LocalCommand::Resume(argument) => {
                 if argument.is_some() {
-                    self.state
-                        .transcript
-                        .push(TranscriptItem::Error("Usage: /resume".to_owned()));
-                    return Vec::new();
+                    return usage_error(&mut self.state, "/resume");
                 }
                 self.state.session_browser = Some(SessionBrowserState::loading());
                 self.state.last_error = None;
@@ -110,10 +111,7 @@ impl App {
             }
             LocalCommand::Tree(argument) => {
                 if argument.is_some() {
-                    self.state
-                        .transcript
-                        .push(TranscriptItem::Error("Usage: /tree".to_owned()));
-                    return Vec::new();
+                    return usage_error(&mut self.state, "/tree");
                 }
                 self.state.tree_browser = Some(TreeBrowserState::loading());
                 self.state.last_error = None;

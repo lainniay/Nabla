@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import type {
@@ -24,6 +23,7 @@ import { TURN_METRICS_ENTRY_TYPE } from "../features/sessions/history.ts";
 import type { JsonObject } from "../protocol/validation.ts";
 import type { SubagentOptions } from "../features/subagents/subagent-types.ts";
 import { buildWorkspaceContext } from "./workspace-context.ts";
+import { expandHomePath } from "./path-utils.ts";
 import { normalizeToolInputPaths } from "../features/permissions/filesystem/path.ts";
 import type { ExecutionPermit } from "../features/permissions/execution/sandbox-profile.ts";
 import type { ToolAuthorizationResult } from "../features/permissions/permission-service.ts";
@@ -378,10 +378,4 @@ function buildPlanInstructions(snapshot: ContextSnapshot): string {
     "Include critical decisions, relevant files, constraints, and unresolved risks in the artifact.",
     "Keep handoffMarkdown concise and implementation-oriented.",
   ].join("\n");
-}
-
-function expandHomePath(value: string): string {
-  if (value === "~") return homedir();
-  if (value.startsWith("~/")) return resolve(homedir(), value.slice(2));
-  return value;
 }

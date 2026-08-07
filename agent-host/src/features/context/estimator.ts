@@ -162,7 +162,7 @@ export function normalizeArguments(value: unknown, key?: string): unknown {
       key !== undefined &&
       ["path", "file", "directory", "cwd"].includes(key)
     ) {
-      return normalizePath(value);
+      return normalizeSlashes(value);
     }
     return value;
   }
@@ -176,16 +176,13 @@ export function normalizeArguments(value: unknown, key?: string): unknown {
   );
 }
 
-function normalizePath(value: string): string {
+function normalizeSlashes(value: string): string {
   const normalized = value.replaceAll("\\", "/").replace(/\/+/gu, "/");
   if (normalized === "/") return normalized;
   return normalized.replace(/\/$/u, "");
 }
 
-export function canonicalJson(value: unknown): string {
-  return JSON.stringify(value);
-}
-
+// Keep path/query key lists in sync with Rust src/state/tool_diff.rs `tool_path`.
 export function firstString(object: JsonObject, keys: string[]): string | undefined {
   for (const key of keys) {
     const value = object[key];
@@ -304,7 +301,8 @@ export function collectToolCalls(messages: AgentMessage[]): Map<string, ToolCall
         name,
         normalizedName,
         arguments: argumentsValue,
-        canonicalArguments: canonicalJson(normalizeArguments(argumentsValue)),
+        // normalizeArguments sorts object keys, so plain JSON.stringify is stable.
+        canonicalArguments: JSON.stringify(normalizeArguments(argumentsValue)),
         sequence,
         mutationGeneration,
       });

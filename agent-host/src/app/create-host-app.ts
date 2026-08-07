@@ -5,8 +5,10 @@ import {
 
 import { ContextBudgetManager } from "../features/context/engine.ts";
 import type { ContextSnapshot } from "../features/context/model.ts";
-import { loadHarnessConfig } from "../features/workspace/config.ts";
-import { workspaceIsTrusted } from "../features/workspace/trust.ts";
+import {
+  loadHarnessConfig,
+  workspaceIsTrusted,
+} from "../features/workspace/config.ts";
 import { PlanStore } from "../features/plans/store.ts";
 import { PlanController } from "../features/plans/plan-controller.ts";
 import { HostDiagnostics } from "../diagnostics/host-diagnostics.ts";

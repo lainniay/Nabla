@@ -178,14 +178,10 @@ impl App {
 
     pub(super) fn update_tree_browser_key(&mut self, key: KeyEvent) -> Vec<AppEffect> {
         let page_rows = self.state.selection_page_size;
-        let phase = self
-            .state
-            .tree_browser
-            .as_ref()
-            .map(|browser| browser.phase.clone());
-        let Some(phase) = phase else {
+        let Some(browser) = self.state.tree_browser.as_mut() else {
             return Vec::new();
         };
+        let phase = browser.phase.clone();
 
         match phase {
             TreePhase::EditLabel {
@@ -194,15 +190,11 @@ impl App {
             } => {
                 match key.code {
                     KeyCode::Esc => {
-                        if let Some(browser) = self.state.tree_browser.as_mut() {
-                            browser.phase = TreePhase::Browse;
-                        }
+                        browser.phase = TreePhase::Browse;
                     }
                     KeyCode::Enter => {
                         let label = editor.text().trim().to_owned();
-                        if let Some(browser) = self.state.tree_browser.as_mut() {
-                            browser.phase = TreePhase::Browse;
-                        }
+                        browser.phase = TreePhase::Browse;
                         return vec![AppEffect::SetTreeLabel {
                             entry_id,
                             label: (!label.is_empty()).then_some(label),
@@ -223,9 +215,7 @@ impl App {
                     }
                     _ => {}
                 }
-                if let Some(browser) = self.state.tree_browser.as_mut()
-                    && matches!(browser.phase, TreePhase::EditLabel { .. })
-                {
+                if matches!(browser.phase, TreePhase::EditLabel { .. }) {
                     browser.phase = TreePhase::EditLabel { entry_id, editor };
                 }
                 return Vec::new();
@@ -241,9 +231,7 @@ impl App {
                 } else {
                     match key.code {
                         KeyCode::Esc => {
-                            if let Some(browser) = self.state.tree_browser.as_mut() {
-                                browser.phase = TreePhase::Browse;
-                            }
+                            browser.phase = TreePhase::Browse;
                             return Vec::new();
                         }
                         KeyCode::Char('1' | '2' | '3') => {
@@ -255,12 +243,10 @@ impl App {
                         }
                         KeyCode::Enter => {
                             if selected == 2 {
-                                if let Some(browser) = self.state.tree_browser.as_mut() {
-                                    browser.phase = TreePhase::CustomSummary {
-                                        entry_id,
-                                        editor: EditorState::default(),
-                                    };
-                                }
+                                browser.phase = TreePhase::CustomSummary {
+                                    entry_id,
+                                    editor: EditorState::default(),
+                                };
                                 return Vec::new();
                             }
                             return self.start_tree_navigation(entry_id, selected == 1, None);
@@ -268,9 +254,7 @@ impl App {
                         _ => {}
                     }
                 }
-                if let Some(browser) = self.state.tree_browser.as_mut() {
-                    browser.phase = TreePhase::ChooseSummary { entry_id, selected };
-                }
+                browser.phase = TreePhase::ChooseSummary { entry_id, selected };
                 return Vec::new();
             }
             TreePhase::CustomSummary {
@@ -279,12 +263,10 @@ impl App {
             } => {
                 match key.code {
                     KeyCode::Esc => {
-                        if let Some(browser) = self.state.tree_browser.as_mut() {
-                            browser.phase = TreePhase::ChooseSummary {
-                                entry_id,
-                                selected: 2,
-                            };
-                        }
+                        browser.phase = TreePhase::ChooseSummary {
+                            entry_id,
+                            selected: 2,
+                        };
                         return Vec::new();
                     }
                     KeyCode::Enter => {
@@ -309,9 +291,7 @@ impl App {
                     }
                     _ => {}
                 }
-                if let Some(browser) = self.state.tree_browser.as_mut() {
-                    browser.phase = TreePhase::CustomSummary { entry_id, editor };
-                }
+                browser.phase = TreePhase::CustomSummary { entry_id, editor };
                 return Vec::new();
             }
             TreePhase::Navigating {
@@ -320,13 +300,11 @@ impl App {
                 aborting,
             } => {
                 if matches!(key.code, KeyCode::Esc) && summarizing && !aborting {
-                    if let Some(browser) = self.state.tree_browser.as_mut() {
-                        browser.phase = TreePhase::Navigating {
-                            entry_id,
-                            summarizing,
-                            aborting: true,
-                        };
-                    }
+                    browser.phase = TreePhase::Navigating {
+                        entry_id,
+                        summarizing,
+                        aborting: true,
+                    };
                     return vec![AppEffect::AbortTreeNavigation];
                 }
                 return Vec::new();
@@ -334,9 +312,6 @@ impl App {
             TreePhase::Browse => {}
         }
 
-        let Some(browser) = self.state.tree_browser.as_mut() else {
-            return Vec::new();
-        };
         if browser.search_active {
             let mut refresh = false;
             match key.code {

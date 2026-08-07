@@ -1,10 +1,9 @@
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { writeAtomicJsonSync } from "../../../persistence/atomic-json.ts";
-import { isJsonObject } from "../../../protocol/validation.ts";
+import { isJsonObject, isStringRecord } from "../../../protocol/validation.ts";
 import type { GrantBundle } from "../model.ts";
 import type { CapabilityMatcher, InvalidationKey } from "../model.ts";
 import {
@@ -14,7 +13,11 @@ import {
   workspaceInvalidationKeys,
   type WorkspaceIdentity,
 } from "../workspace-identity.ts";
-import { digestValue } from "../shell/digest.ts";
+import {
+  canonicalJson,
+  digestValue,
+  sha256Hex,
+} from "../shell/digest.ts";
 
 interface WorkspaceGrantDocument {
   schemaVersion: 3;
@@ -237,13 +240,13 @@ function emptyDocument(identity: WorkspaceIdentity): WorkspaceGrantDocument {
 }
 
 function documentIdentityId(document: WorkspaceGrantDocument): string {
-  return createHash("sha256").update(JSON.stringify({
+  return sha256Hex(JSON.stringify({
     canonicalPath: document.identity.canonicalRoot,
     generationId: document.identity.generationId,
     gitCommonDirectory: document.identity.gitCommonDirectory,
     gitCommonDirectoryIdentity:
       document.identity.gitCommonDirectoryIdentity,
-  })).digest("hex");
+  }));
 }
 
 function legacyCommandInvalidationKeys(
@@ -280,7 +283,7 @@ function legacyMatcher(
     return {
       kind: "tool",
       tool,
-      inputDigest: createHash("sha256").update(value).digest("hex"),
+      inputDigest: sha256Hex(value),
     };
   }
   if (kind !== "path") return undefined;
@@ -380,17 +383,12 @@ function isInvalidationKey(value: unknown): value is InvalidationKey {
   ) {
     return false;
   }
-  return value.kind !== "npm_script_digest" ||
-    typeof value.path === "string" && typeof value.selector === "string";
-}
-
-function isStringRecord(value: unknown): value is Record<string, string> {
   return (
-    isJsonObject(value) &&
-    Object.values(value).every((item) => typeof item === "string")
+    value.kind !== "npm_script_digest" ||
+    (typeof value.path === "string" && typeof value.selector === "string")
   );
 }
 
 function sameGrant(left: GrantBundle, right: GrantBundle): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return canonicalJson(left) === canonicalJson(right);
 }

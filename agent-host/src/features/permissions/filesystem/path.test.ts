@@ -12,11 +12,20 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  assertWorkspaceRelativePath,
   canonicalizePath,
   normalizePath,
   normalizeToolInputPaths,
   workspacePathError,
 } from "./path.ts";
+
+test("assertWorkspaceRelativePath rejects escapes and accepts relative paths", () => {
+  assert.throws(() => assertWorkspaceRelativePath(""), /must not be empty/u);
+  assert.throws(() => assertWorkspaceRelativePath("/abs"), /must be relative/u);
+  assert.throws(() => assertWorkspaceRelativePath("a/../b"), /escapes/u);
+  assert.throws(() => assertWorkspaceRelativePath("../b"), /escapes/u);
+  assert.doesNotThrow(() => assertWorkspaceRelativePath("a/b.ts"));
+});
 
 test("workspace path guard allows workspace files and rejects escapes", async () => {
   const root = mkdtempSync(join(tmpdir(), "nabla-path-"));

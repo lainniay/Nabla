@@ -10,11 +10,11 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 
+import { filterContextFilesByTrust } from "../workspace/trust.ts";
 import {
-  filterContextFilesByTrust,
   workspaceIsTrusted,
-} from "../workspace/trust.ts";
-import type { HarnessConfig } from "../workspace/config.ts";
+  type HarnessConfig,
+} from "../workspace/config.ts";
 import {
   type AgentProfile,
 } from "./profile-model.ts";

@@ -15,16 +15,6 @@ interface HarnessConfigOptions {
   homeDir?: string;
 }
 
-export function workspaceIsTrusted(
-  cwd: string,
-  config: HarnessConfig,
-): boolean {
-  const canonical = canonicalPath(cwd);
-  return config.trustedWorkspaces.some(
-    (workspace) => canonicalPath(workspace) === canonical,
-  );
-}
-
 export function saveWorkspaceTrust(
   cwd: string,
   trusted: boolean,

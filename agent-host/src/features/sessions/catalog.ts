@@ -6,6 +6,8 @@ import {
   type SessionInfo,
 } from "@earendil-works/pi-coding-agent";
 
+import { sanitizeLine } from "../../protocol/validation.ts";
+
 export type SessionScope = "current" | "all";
 export type SessionSortMode = "threaded" | "recent" | "relevance";
 
@@ -313,6 +315,7 @@ function searchScore(text: string, parsed: ParsedSearch): number {
   }, 0);
 }
 
+// Keep in sync with Rust src/file_references/matcher.rs is_subsequence/match_score.
 function fuzzySubsequenceScore(needle: string, haystack: string): number {
   if (!needle) return 0;
   let score = 0;
@@ -326,10 +329,6 @@ function fuzzySubsequenceScore(needle: string, haystack: string): number {
     from = index + character.length;
   }
   return score;
-}
-
-function sanitizeLine(value: string): string {
-  return value.replace(/[\u0000-\u001f\u007f]+/gu, " ").trim();
 }
 
 function samePath(left: string, right?: string): boolean {

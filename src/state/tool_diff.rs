@@ -54,6 +54,7 @@ pub fn parse_tool_diff(args: &Value, details: &Value) -> Option<ToolDiff> {
     parsed_patch
 }
 
+// Keep key list in sync with agent-host/src/features/context/estimator.ts firstString.
 fn tool_path(args: &Value) -> Option<String> {
     let args = args.as_object()?;
     ["path", "filePath", "file_path", "file", "target"]

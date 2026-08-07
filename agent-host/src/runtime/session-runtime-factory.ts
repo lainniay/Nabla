@@ -7,11 +7,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { resolve } from "node:path";
 
-import { loadHarnessConfig } from "../features/workspace/config.ts";
 import {
-  filterContextFilesByTrust,
+  loadHarnessConfig,
   workspaceIsTrusted,
-} from "../features/workspace/trust.ts";
+} from "../features/workspace/config.ts";
+import { filterContextFilesByTrust } from "../features/workspace/trust.ts";
 import type { WorkspaceService } from "../features/workspace/workspace-service.ts";
 import type { PlanController } from "../features/plans/plan-controller.ts";
 import type { PermissionService } from "../features/permissions/permission-service.ts";

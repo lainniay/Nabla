@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   lstatSync,
@@ -10,7 +10,11 @@ import {
 import { dirname, join, resolve } from "node:path";
 
 import type { InvalidationKey } from "./model.ts";
-import { digestValue } from "./shell/digest.ts";
+import {
+  digestValue,
+  npmScriptDigest,
+  sha256Hex,
+} from "./shell/digest.ts";
 import { canonicalPath as canonical } from "./filesystem/path.ts";
 
 export interface WorkspaceIdentity {
@@ -65,7 +69,7 @@ export function workspaceInvalidationKeys(
 
 export function fileDigest(path: string): string | undefined {
   try {
-    return createHash("sha256").update(readFileSync(path)).digest("hex");
+    return sha256Hex(readFileSync(path));
   } catch {
     return undefined;
   }
@@ -89,25 +93,6 @@ export function invalidationKeysValid(
     }
     return key.path !== undefined && fileDigest(key.path) === key.value;
   });
-}
-
-function npmScriptDigest(path: string, script: string): string | undefined {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      !("scripts" in parsed) ||
-      typeof parsed.scripts !== "object" ||
-      parsed.scripts === null
-    ) {
-      return undefined;
-    }
-    const value = (parsed.scripts as Record<string, unknown>)[script];
-    return typeof value === "string" ? digestValue(value) : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function findGitCommonDirectory(workspace: string): string | undefined {
@@ -159,5 +144,5 @@ function persistentGeneration(path: string): string {
 }
 
 function digest(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  return sha256Hex(JSON.stringify(value));
 }

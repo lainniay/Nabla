@@ -5,7 +5,10 @@ import {
   displayMessageText,
   messageContentText,
 } from "../../protocol/message-content.ts";
-import { isJsonObject as isRecord } from "../../protocol/validation.ts";
+import {
+  isJsonObject as isRecord,
+  stringValue,
+} from "../../protocol/validation.ts";
 
 export const TURN_METRICS_ENTRY_TYPE = "nabla.turn-metrics.v1";
 
@@ -248,8 +251,4 @@ function projectMessage(message: unknown, result: SessionHistoryItem[]): void {
       isError: message.exitCode !== 0 && message.exitCode !== undefined,
     });
   }
-}
-
-function stringValue(value: unknown): string {
-  return typeof value === "string" ? value : "";
 }

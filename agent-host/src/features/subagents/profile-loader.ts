@@ -13,6 +13,8 @@ import type { HarnessConfig } from "../workspace/config.ts";
 import {
   isJsonObject as isRecord,
   stringArray,
+  errorMessage,
+  validAgentName,
 } from "../../protocol/validation.ts";
 import {
   readOnlyPermissions,
@@ -414,10 +416,6 @@ function normalizeIsolationPolicy(
   return unknownFields.length === 0 ? { mode, integration } : undefined;
 }
 
-function validAgentName(name: string): boolean {
-  return /^[a-z0-9][a-z0-9_-]*$/u.test(name);
-}
-
 function validModelReference(value: string): boolean {
   const slash = value.trim().indexOf("/");
   return slash > 0 && slash < value.trim().length - 1;
@@ -447,10 +445,6 @@ function configFieldError(
     path,
     profile,
   });
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function normalizeStrings(values: readonly string[]): string[] {

@@ -13,10 +13,6 @@ export function isPathWithin(root: string, target: string): boolean {
 export function assertWorkspaceRelativePath(path: string): void {
   if (path.length === 0) throw new Error("Path must not be empty");
   if (isAbsolute(path)) throw new Error(`Path must be relative: ${path}`);
-  const normalized = resolve("/", path);
-  if (!isPathWithin("/", normalized)) {
-    throw new Error(`Path escapes its workspace: ${path}`);
-  }
   const segments = path.split(/[\\/]/u);
   if (segments.includes("..")) {
     throw new Error(`Path escapes its workspace: ${path}`);

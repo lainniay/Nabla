@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -8,6 +8,7 @@ import {
   assertWorkspaceRelativePath,
   isPathWithin,
 } from "../../permissions/filesystem/path.ts";
+import { sha256Hex } from "../../permissions/shell/digest.ts";
 import { WorktreeArtifactStore } from "./artifact-store.ts";
 import { GitClient, type GitResult } from "./git.ts";
 import { listRecoverable, pruneTerminalArtifacts } from "./recovery.ts";
@@ -84,10 +85,7 @@ export class WorktreeIsolation {
     ) {
       throw new Error("Workspace is outside the discovered Git repository");
     }
-    const workspaceHash = createHash("sha256")
-      .update(repoRoot)
-      .digest("hex")
-      .slice(0, 16);
+    const workspaceHash = sha256Hex(repoRoot).slice(0, 16);
     const id = `${agentId}-${randomUUID()}`;
     const artifactDirectory = join(this.store.rootDir, workspaceHash, id);
     const checkoutPath = join(artifactDirectory, "checkout");
