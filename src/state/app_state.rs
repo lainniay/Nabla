@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::host::SandboxStatusData;
+
 /// Complete state managed by the application reducer.
 // INFO: This aggregate owns data only; protocol handling and side effects stay
 // in `App`, which keeps state serialization and transitions independently testable.
@@ -17,6 +19,7 @@ pub struct AppState {
     pub command_catalog: CommandCatalog,
     pub auth_state: AuthState,
     pub plan_mode_active: bool,
+    pub sandbox_status: SandboxStatusData,
     pub pending_plan_mode: Option<bool>,
     pub pending_plan_prompt: Option<String>,
     pub approval: Option<ApprovalState>,
@@ -72,6 +75,7 @@ impl AppState {
             command_catalog: CommandCatalog::new(commands),
             auth_state: AuthState::Inactive,
             plan_mode_active: false,
+            sandbox_status: SandboxStatusData::default(),
             pending_plan_mode: None,
             pending_plan_prompt: None,
             approval: None,

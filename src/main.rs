@@ -74,6 +74,18 @@ impl ResizeDebouncer {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    match std::env::args().nth(1).as_deref() {
+        Some("__sandbox-probe") => {
+            nabla::sandbox::run_probe().map_err(std::io::Error::other)?;
+            return Ok(());
+        }
+        Some("__sandbox-exec") => {
+            nabla::sandbox::run_exec().map_err(std::io::Error::other)?;
+            return Ok(());
+        }
+        _ => {}
+    }
+
     let cwd = std::env::current_dir()?.canonicalize()?;
     let mut runtime = PiRuntime::spawn(PiProcessConfig::local(cwd.clone())).await?;
     let (session, bootstrap) =

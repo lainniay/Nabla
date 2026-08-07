@@ -24,7 +24,7 @@ impl App {
                 self.state.file_completion = None;
                 self.push_user(message, UserMessageStatus::Failed);
                 let suggestion = if suggestions.is_empty() {
-                    " Use /help to list available commands.".to_owned()
+                    String::new()
                 } else {
                     format!(
                         " Did you mean {}?",
@@ -279,11 +279,6 @@ impl App {
                     profile: profile.to_owned(),
                     task: task.to_owned(),
                 }]
-            }
-            LocalCommand::Help => {
-                let help = self.state.command_catalog.help_text();
-                self.state.transcript.push(TranscriptItem::Notice(help));
-                Vec::new()
             }
         }
     }

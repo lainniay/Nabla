@@ -58,6 +58,11 @@ export function permissionIntentForTool(
         : {}),
     } satisfies ShellInput);
   }
+  if (toolName === "find" || toolName === "grep" || toolName === "ls") {
+    const path = typeof value.path === "string" ? value.path : ".";
+    const adapter = toolName === "grep" ? ReadAdapter : ListAdapter;
+    return adapter.normalize(context, { ...value, path } as FileToolInput);
+  }
   if (typeof value.path === "string") {
     const adapter = (() => {
       switch (toolName) {

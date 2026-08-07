@@ -8,6 +8,12 @@
       "delegate_task"
     ]
   },
+  "sandbox": {
+    "mode": "enforced",
+    "backend": "seatbelt",
+    "filesystem": "workspace-write",
+    "network": "blocked"
+  },
   "plan": {
     "artifact": {
       "id": "plan-contract",

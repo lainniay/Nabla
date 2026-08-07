@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 import type {
@@ -19,8 +20,12 @@ import { PermissionKernel } from "../../permissions/kernel.ts";
 import type { Authorization } from "../../permissions/kernel.ts";
 import { ExecutionBroker } from "../../permissions/execution/broker.ts";
 import { DirectRunner } from "../../permissions/execution/direct-runner.ts";
+import { buildSandboxProfile } from "../../permissions/execution/sandbox-profile.ts";
+import type { SandboxExecutionProfile } from "../../permissions/execution/sandbox-profile.ts";
+import type { SandboxCapability } from "../../permissions/execution/sandbox-capability.ts";
 import type {
   ExecutionProfile,
+  PermissionIntent,
   PermissionRule,
   ToolContext,
 } from "../../permissions/model.ts";
@@ -28,6 +33,15 @@ import { mutatesManagedWorktree } from "../../permissions/managed-worktree.ts";
 import { PolicyStore } from "../../permissions/policy-store.ts";
 import { ShellAdapter } from "../../permissions/adapters/shell.ts";
 import type { WorkspaceGrantSnapshot } from "../../permissions/approvals/workspace-store.ts";
+import {
+  isBenignShellCommand,
+  isReadOnlyCdCommand,
+  isDangerousExecCommand,
+  isReadOnlyFindCommand,
+  isReadOnlyWorkspaceCommand,
+  isReadOnlyGitCommand,
+  isReadOnlyXargsCommand,
+} from "../../policy/tool-policy.ts";
 import type { InteractionBroker } from "../interactions/interaction-broker.ts";
 import {
   agentToolResource,
@@ -40,6 +54,13 @@ const EXTERNAL_TOOL_EXECUTION_PROFILE: ExecutionProfile = {
   filesystem: { read: ["*"], write: ["*"] },
   network: { allow: [{ host: "*" }] },
   environment: { inherit: [], set: {} },
+};
+
+const DEGRADED_CAPABILITY: SandboxCapability = {
+  mode: "degraded",
+  backend: "none",
+  supportsFilesystemIsolation: false,
+  supportsNetworkIsolation: false,
 };
 
 export interface ToolAuthorizationContext {
@@ -55,6 +76,23 @@ export interface ToolAuthorizationContext {
   };
 }
 
+export interface AuthorizeBashInput {
+  toolCallId: string;
+  command: string;
+  timeout?: number;
+  cwd: string;
+  signal?: AbortSignal;
+  agent?: ToolAuthorizationContext["agent"];
+}
+
+export interface BashAuthorization {
+  authorizationId: string;
+  decision: "allow" | "deny";
+  reason?: string;
+  commandDigest: string;
+  profile: SandboxExecutionProfile;
+}
+
 export class PermissionService {
   private readonly policies = new PolicyStore();
   private readonly approvals = new PermissionApprovalBroker();
@@ -68,9 +106,18 @@ export class PermissionService {
     new DirectRunner(),
   );
   private readonly pending = new Map<string, Authorization>();
+  private readonly pendingBash = new Map<
+    string,
+    {
+      authorization: Authorization;
+      intent: PermissionIntent;
+      profile: SandboxExecutionProfile;
+    }
+  >();
   private readonly shellAdapter = new ShellAdapter();
   private readonly sessionIdProvider: () => string;
   private readonly cwdProvider: () => string;
+  private readonly sandboxCapability: () => SandboxCapability;
   private readonly interactions: InteractionBroker;
   private readonly send: (event: JsonObject) => void;
   private readonly planMode: { current(): boolean };
@@ -82,6 +129,7 @@ export class PermissionService {
     planMode: { current(): boolean },
     isConnected: () => boolean,
     scope: { sessionId(): string; cwd(): string },
+    sandbox?: { capability(): SandboxCapability },
   ) {
     this.interactions = interactions;
     this.send = send;
@@ -89,6 +137,7 @@ export class PermissionService {
     this.isConnected = isConnected;
     this.sessionIdProvider = scope.sessionId;
     this.cwdProvider = scope.cwd;
+    this.sandboxCapability = sandbox?.capability ?? (() => DEGRADED_CAPABILITY);
     this.policies.setBuiltin(
       ["ask_user", "submit_plan"].map(
         (tool): PermissionRule => ({
@@ -105,6 +154,98 @@ export class PermissionService {
     event: ToolCallEvent,
     context: ToolAuthorizationContext,
   ): Promise<ToolCallEventResult | undefined> {
+    const core = await this.authorizeCore(event, context);
+    if ("blocked" in core) {
+      return { block: true, reason: core.reason };
+    }
+    if (
+      !this.execution.beginExternalTool(
+        core.authorization,
+        core.intent,
+        EXTERNAL_TOOL_EXECUTION_PROFILE,
+      )
+    ) {
+      return { block: true, reason: "Tool input changed after approval" };
+    }
+    this.pending.set(event.toolCallId, core.authorization);
+    return undefined;
+  }
+
+  async authorizeBash(input: AuthorizeBashInput): Promise<BashAuthorization> {
+    const event: ToolCallEvent = {
+      type: "tool_call",
+      toolCallId: input.toolCallId,
+      toolName: "bash",
+      input: {
+        command: input.command,
+        ...(input.timeout === undefined ? {} : { timeout: input.timeout }),
+      },
+    };
+    const core = await this.authorizeCore(event, {
+      cwd: input.cwd,
+      signal: input.signal,
+      agent: input.agent,
+    });
+    if ("blocked" in core) {
+      return {
+        authorizationId: `denied-${input.toolCallId}`,
+        decision: "deny",
+        reason: core.reason,
+        commandDigest: "",
+        profile: buildSandboxProfile(emptyIntent(input), input.cwd, this.sandboxCapability()),
+      };
+    }
+    const profile = buildSandboxProfile(
+      core.intent,
+      input.cwd,
+      this.sandboxCapability(),
+    );
+    if (
+      !this.execution.beginExternalTool(
+        core.authorization,
+        core.intent,
+        toExecutionProfile(profile),
+      )
+    ) {
+      return {
+        authorizationId: core.authorization.requestId,
+        decision: "deny",
+        reason: "Tool input changed after approval",
+        commandDigest: core.intent.digest,
+        profile,
+      };
+    }
+    this.pendingBash.set(input.toolCallId, {
+      authorization: core.authorization,
+      intent: core.intent,
+      profile,
+    });
+    return {
+      authorizationId: core.authorization.requestId,
+      decision: "allow",
+      commandDigest: core.intent.digest,
+      profile,
+    };
+  }
+
+  finishBash(toolCallId: string, succeeded: boolean): void {
+    const entry = this.pendingBash.get(toolCallId);
+    if (!entry) return;
+    this.pendingBash.delete(toolCallId);
+    this.execution.finishExternalTool(
+      entry.authorization,
+      toExecutionProfile(entry.profile),
+      succeeded,
+    );
+  }
+
+  private async authorizeCore(
+    event: ToolCallEvent,
+    context: ToolAuthorizationContext,
+  ): Promise<
+    | { authorization: Authorization; intent: PermissionIntent }
+    | { blocked: true; reason: string }
+  > {
     const toolName = event.toolName;
     const input = event.input as Record<string, unknown>;
     const path = typeof input.path === "string" ? input.path : undefined;
@@ -114,7 +255,7 @@ export class PermissionService {
     const profile = agent.profileConfig;
     if (profile && !profile.tools.includes(toolName)) {
       return {
-        block: true,
+        blocked: true,
         reason: `Tool ${toolName} is not exposed to profile ${agent.profile}`,
       };
     }
@@ -127,7 +268,7 @@ export class PermissionService {
       : undefined;
     const sessionId = agent.sessionId ?? this.tryCurrentScopeId();
     if (!sessionId) {
-      return { block: true, reason: "Permission scope is unavailable" };
+      return { blocked: true, reason: "Permission scope is unavailable" };
     }
     const identity = resolveWorkspaceIdentity(context.cwd);
     const permissionContext: ToolContext = {
@@ -191,6 +332,167 @@ export class PermissionService {
       )
     ) {
       addToolRule("plan-mode-mutation", "deny", "managed");
+    }
+    const workspaceRoot = realpathSync(context.cwd);
+    additionalRules.push(
+      {
+        id: "builtin-workspace-read",
+        effect: "allow",
+        source: "builtin",
+        matcher: {
+          kind: "file",
+          operation: "read",
+          path: workspaceRoot,
+          recursive: true,
+        },
+      },
+      {
+        id: "builtin-workspace-list",
+        effect: "allow",
+        source: "builtin",
+        matcher: {
+          kind: "file",
+          operation: "list",
+          path: workspaceRoot,
+          recursive: true,
+        },
+      },
+    );
+    for (const atom of intent.atoms) {
+      if (
+        atom.kind === "file" &&
+        (atom.operation === "read" || atom.operation === "list") &&
+        isCredentialPath(atom.path)
+      ) {
+        additionalRules.push({
+          id: `builtin-credential-deny-${atom.operation}-${atom.path}`,
+          effect: "deny",
+          source: "builtin",
+          matcher: {
+            kind: "file",
+            operation: atom.operation,
+            path: atom.path,
+          },
+        });
+      }
+    }
+    let readOnlyBash = true;
+    for (const atom of intent.atoms) {
+      if (atom.kind !== "exec") continue;
+      const executable = atom.executable.split("/").at(-1)!;
+      if (executable === "git") {
+        if (!isReadOnlyGitCommand(atom.argv, atom.cwd)) {
+          readOnlyBash = false;
+          break;
+        }
+      } else if (executable === "cd") {
+        if (!isReadOnlyCdCommand(atom.argv, atom.cwd)) {
+          readOnlyBash = false;
+          break;
+        }
+      } else if (executable === "find") {
+        if (!isReadOnlyFindCommand(atom.argv, atom.cwd)) {
+          readOnlyBash = false;
+          break;
+        }
+      } else if (executable === "xargs") {
+        if (!isReadOnlyXargsCommand(atom.argv)) {
+          readOnlyBash = false;
+          break;
+        }
+      } else if (executable === "ls" || executable === "wc") {
+        if (!isReadOnlyWorkspaceCommand(atom.argv, atom.cwd)) {
+          readOnlyBash = false;
+          break;
+        }
+      } else if (!isBenignShellCommand(executable)) {
+        readOnlyBash = false;
+        break;
+      }
+    }
+    if (
+      readOnlyBash &&
+      intent.atoms.some((atom) => atom.kind === "exec")
+    ) {
+      for (const atom of intent.atoms) {
+        if (atom.kind === "exec") {
+          additionalRules.push({
+            id: `builtin-readonly-bash-${additionalRules.length}`,
+            effect: "allow",
+            source: "builtin",
+            matcher: {
+              kind: "exec",
+              executable: atom.executable,
+              argv: atom.argv,
+              cwd: atom.cwd,
+            },
+          });
+        } else if (
+          atom.kind === "file" &&
+          atom.path === "/dev/null"
+        ) {
+          additionalRules.push({
+            id: `builtin-readonly-bash-${additionalRules.length}`,
+            effect: "allow",
+            source: "builtin",
+            matcher: {
+              kind: "file",
+              operation: atom.operation,
+              path: atom.path,
+            },
+          });
+        }
+      }
+    }
+    if (
+      this.sandboxCapability().mode === "enforced" &&
+      intent.atoms.some((atom) => atom.kind === "exec")
+    ) {
+      let sandboxAutoAllow = true;
+      for (const atom of intent.atoms) {
+        if (atom.kind === "opaque_code" || atom.kind === "network") {
+          sandboxAutoAllow = false;
+          break;
+        }
+        if (
+          atom.kind === "exec" &&
+          isDangerousExecCommand(atom.executable, atom.argv, atom.cwd)
+        ) {
+          sandboxAutoAllow = false;
+          break;
+        }
+      }
+      if (sandboxAutoAllow) {
+        for (const atom of intent.atoms) {
+          if (atom.kind === "exec") {
+            additionalRules.push({
+              id: `builtin-sandbox-bash-${additionalRules.length}`,
+              effect: "allow",
+              source: "builtin",
+              matcher: {
+                kind: "exec",
+                executable: atom.executable,
+                argv: atom.argv,
+                cwd: atom.cwd,
+              },
+            });
+          } else if (atom.kind === "file") {
+            additionalRules.push({
+              id: `builtin-sandbox-bash-${additionalRules.length}`,
+              effect: "allow",
+              source: "builtin",
+              matcher: {
+                kind: "file",
+                operation: atom.operation,
+                path: atom.path,
+                ...(atom.destination === undefined
+                  ? {}
+                  : { destination: atom.destination }),
+              },
+            });
+          }
+        }
+      }
     }
 
     let risk: "normal" | "high" | "credential" | "outside_workspace" =
@@ -261,24 +563,14 @@ export class PermissionService {
       authorization.decision === "deny"
     ) {
       return {
-        block: true,
+        blocked: true,
         reason:
           authorization.evaluation.effect === "deny"
             ? "Denied by permission policy"
             : "Denied by user",
       };
     }
-    if (
-      !this.execution.beginExternalTool(
-        authorization,
-        normalize(),
-        EXTERNAL_TOOL_EXECUTION_PROFILE,
-      )
-    ) {
-      return { block: true, reason: "Tool input changed after approval" };
-    }
-    this.pending.set(event.toolCallId, authorization);
-    return undefined;
+    return { authorization, intent: normalize() };
   }
 
   finishTool(toolCallId: string, succeeded: boolean): void {
@@ -320,4 +612,30 @@ export class PermissionService {
     return resolveWorkspaceIdentity(this.cwdProvider());
   }
 
+}
+
+function toExecutionProfile(
+  profile: SandboxExecutionProfile,
+): ExecutionProfile {
+  // The broker records Bash executions but never executes them itself, so the
+  // profile backend stays "none" to match the DirectRunner used by the broker.
+  return {
+    backend: "none",
+    filesystem: { read: ["*"], write: profile.filesystem.readWrite },
+    network: { allow: profile.network === "allowed" ? [{ host: "*" }] : [] },
+    environment: { inherit: [], set: {} },
+  };
+}
+
+function emptyIntent(input: AuthorizeBashInput): PermissionIntent {
+  return {
+    id: `denied-${input.toolCallId}`,
+    toolCallId: input.toolCallId,
+    sessionId: "",
+    workspaceId: "",
+    tool: "bash",
+    normalizedInput: { command: input.command },
+    atoms: [],
+    digest: "",
+  };
 }

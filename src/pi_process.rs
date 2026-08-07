@@ -58,7 +58,7 @@ impl PiProcessConfig {
             .file_stem()
             .and_then(|name| name.to_str())
             .unwrap_or("nabla-smoke");
-        config.session_dir = Some(PathBuf::from("/tmp").join(format!("{socket_name}-sessions")));
+        config.session_dir = Some(std::env::temp_dir().join(format!("{socket_name}-sessions")));
         config
     }
 
@@ -69,7 +69,7 @@ impl PiProcessConfig {
             .join("main.ts");
         let socket_id = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
         let control_socket =
-            PathBuf::from("/tmp").join(format!("nabla-{}-{socket_id}.sock", std::process::id()));
+            std::env::temp_dir().join(format!("nabla-{}-{socket_id}.sock", std::process::id()));
 
         Self {
             executable: PathBuf::from("node"),
@@ -96,10 +96,13 @@ pub struct PiRuntime {
 impl PiRuntime {
     pub async fn spawn(config: PiProcessConfig) -> Result<Self, RpcError> {
         let mut command = Command::new(&config.executable);
+        let nabla_executable =
+            std::env::current_exe().map_err(|error| RpcError::Spawn(error.to_string()))?;
         command
             .args(&config.args)
             .current_dir(&config.cwd)
             .env("NABLA_CONTROL_SOCKET", &config.control_socket)
+            .env("NABLA_EXECUTABLE", &nabla_executable)
             // Node reads this switch during process startup. Setting it here
             // makes Pi's global fetch honor HTTP_PROXY/HTTPS_PROXY/NO_PROXY.
             .env("NODE_USE_ENV_PROXY", "1")
@@ -392,7 +395,7 @@ mod tests {
                 .is_some_and(|arg| arg.ends_with("agent-host/src/main.ts"))
         );
         assert_eq!(local.cwd, PathBuf::from("/tmp/project"));
-        assert!(local.control_socket.starts_with("/tmp"));
+        assert!(local.control_socket.starts_with(std::env::temp_dir()));
         assert_ne!(local.control_socket, smoke.control_socket);
         assert!(local.session_dir.is_none());
         assert!(smoke.session_dir.is_some());

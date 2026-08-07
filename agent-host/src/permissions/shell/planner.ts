@@ -11,6 +11,63 @@ import type { ShellCommand, ShellScript } from "./ast.ts";
 import { digestValue } from "./digest.ts";
 import { parseShell } from "./parser.ts";
 
+const OPAQUE_SHELL_WORDS = new Set([
+  "if",
+  "then",
+  "else",
+  "elif",
+  "fi",
+  "for",
+  "while",
+  "until",
+  "do",
+  "done",
+  "case",
+  "esac",
+  "function",
+  "time",
+  "!",
+  "eval",
+  "source",
+  ".",
+  "exec",
+]);
+
+const ALWAYS_NETWORK_COMMANDS = new Set([
+  "curl",
+  "wget",
+  "nc",
+  "ssh",
+  "scp",
+  "rsync",
+]);
+
+const GIT_NETWORK_SUBCOMMANDS = new Set([
+  "push",
+  "fetch",
+  "clone",
+  "pull",
+  "ls-remote",
+  "remote",
+]);
+
+const NPM_NETWORK_SUBCOMMANDS = new Set([
+  "install",
+  "add",
+  "publish",
+  "update",
+  "ci",
+]);
+
+const CARGO_NETWORK_SUBCOMMANDS = new Set([
+  "publish",
+  "install",
+  "update",
+  "add",
+]);
+
+const PIP_NETWORK_SUBCOMMANDS = new Set(["install", "download"]);
+
 export interface ExecutionPlan {
   source: string;
   cwd: string;
@@ -115,6 +172,14 @@ function planCommand(
     );
     opaque = true;
   } else {
+    const executableName = command.argv[0]!.split("/").at(-1)!;
+    if (OPAQUE_SHELL_WORDS.has(executableName)) {
+      atoms.push(
+        opaqueAtom(executableName, command.source, "shell control keyword is opaque"),
+      );
+      opaque = true;
+      return { atoms, commands, globExpansions, opaque };
+    }
     const exec: ExecCapability = {
       kind: "exec",
       executable: command.argv[0]!,
@@ -124,6 +189,8 @@ function planCommand(
     };
     atoms.push(exec);
     commands.push(exec);
+    const network = networkCapability(executableName, command.argv.slice(1));
+    if (network) atoms.push(network);
     for (const operand of fileReadOperands(command)) {
       const expanded = expandOperand(operand, cwd);
       if (expanded.pattern) {
@@ -188,6 +255,36 @@ function planCommand(
     opaque ||= nested.opaque;
   }
   return { atoms, commands, globExpansions, opaque };
+}
+
+function networkCapability(
+  executable: string,
+  argv: string[],
+): { kind: "network"; operation: "connect"; host: string } | undefined {
+  if (ALWAYS_NETWORK_COMMANDS.has(executable)) {
+    return { kind: "network", operation: "connect", host: "*" };
+  }
+  const subcommand = argv[0];
+  if (subcommand === undefined) return undefined;
+  if (executable === "git" && GIT_NETWORK_SUBCOMMANDS.has(subcommand)) {
+    return { kind: "network", operation: "connect", host: "*" };
+  }
+  if (
+    (executable === "npm" || executable === "pnpm" || executable === "yarn") &&
+    NPM_NETWORK_SUBCOMMANDS.has(subcommand)
+  ) {
+    return { kind: "network", operation: "connect", host: "*" };
+  }
+  if (executable === "cargo" && CARGO_NETWORK_SUBCOMMANDS.has(subcommand)) {
+    return { kind: "network", operation: "connect", host: "*" };
+  }
+  if (
+    (executable === "pip" || executable === "pip3") &&
+    PIP_NETWORK_SUBCOMMANDS.has(subcommand)
+  ) {
+    return { kind: "network", operation: "connect", host: "*" };
+  }
+  return undefined;
 }
 
 function fileReadOperands(command: ShellCommand): string[] {

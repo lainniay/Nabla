@@ -11,6 +11,12 @@ test("bootstrap aggregates the read-only snapshot shape", () => {
     resources: { revision: 1 } as never,
     agents: { revision: 1 } as never,
     context: { revision: 1 } as never,
+    sandbox: {
+      mode: "degraded",
+      backend: "none",
+      filesystem: "full-access",
+      network: "allowed",
+    },
     pendingIntegrations: [],
     warnings: ["w"],
   }));

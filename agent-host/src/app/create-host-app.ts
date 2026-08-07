@@ -27,6 +27,7 @@ import { RuntimeSupervisor } from "../runtime/runtime-supervisor.ts";
 import { sessionActivation } from "../runtime/session-activation.ts";
 import { expandHomePath } from "../runtime/path-utils.ts";
 import { PiExtensionFactory } from "../runtime/pi-extension-factory.ts";
+import { createNablaBashTool } from "../runtime/create-nabla-bash-tool.ts";
 import { InteractionBroker } from "../features/interactions/interaction-broker.ts";
 import { ModelService } from "../features/models/model-service.ts";
 import { AuthService } from "../features/auth/auth-service.ts";
@@ -40,6 +41,7 @@ import { PlanService } from "../features/plans/plan-service.ts";
 import { ContextService } from "../features/context/context-service.ts";
 import { IntegrationService } from "../features/subagents/integration-service.ts";
 import { SubagentSupervisor } from "../features/subagents/subagent-supervisor.ts";
+import { RustSandboxBackend } from "../permissions/execution/rust-sandbox-backend.ts";
 import { createAgentCommands } from "../protocol/commands/agent-commands.ts";
 import { createAuthCommands } from "../protocol/commands/auth-commands.ts";
 import { createBootstrapCommands } from "../protocol/commands/bootstrap-commands.ts";
@@ -92,6 +94,8 @@ export async function createHostApp(
     events.publish(event as unknown as HostEvent);
 
   let workspace!: WorkspaceService;
+  let permissions!: PermissionService;
+  let rustSandboxBackend!: RustSandboxBackend;
   let extensionFactory!: PiExtensionFactory;
   const runtime =
     options.supervisor ??
@@ -140,6 +144,16 @@ export async function createHostApp(
           services,
           sessionManager,
           sessionStartEvent,
+          customTools: [
+            createNablaBashTool(runtimeCwd, {
+              permissions,
+              sandboxBackend: rustSandboxBackend,
+              options: {
+                shellPath: startupSettings.getShellPath(),
+                commandPrefix: startupSettings.getShellCommandPrefix(),
+              },
+            }),
+          ],
         });
         planMode.restore(
           result.session,
@@ -182,7 +196,8 @@ export async function createHostApp(
       (message) => diagnostics.warn(message),
       () => workspace.configValue(),
     );
-  const permissions = new PermissionService(
+  rustSandboxBackend = await RustSandboxBackend.probe();
+  permissions = new PermissionService(
     interactions,
     send,
     planMode,
@@ -191,6 +206,7 @@ export async function createHostApp(
       sessionId: () => runtime.current().session.sessionId,
       cwd: () => runtime.current().session.sessionManager.getCwd(),
     },
+    { capability: () => rustSandboxBackend.capability },
   );
   const models = new ModelService(modelRuntime, runtime);
   const auth = new AuthService(
@@ -225,6 +241,7 @@ export async function createHostApp(
     workspace,
     integrations,
     permissions,
+    rustSandboxBackend,
     modelRuntime,
     runtime,
     planMode,
@@ -244,6 +261,7 @@ export async function createHostApp(
   });
   const bootstrap = new BootstrapService(() => ({
     scopeId: runtime.current().session.sessionId,
+    sandbox: rustSandboxBackend.status(),
     planMode: {
       active: planMode.current(),
       activeTools: runtime.current().session.getActiveToolNames(),

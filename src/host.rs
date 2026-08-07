@@ -72,6 +72,29 @@ pub struct HostPlanModeData {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxStatusData {
+    pub mode: String,
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub filesystem: String,
+    pub network: String,
+}
+
+impl Default for SandboxStatusData {
+    fn default() -> Self {
+        Self {
+            mode: "disabled".to_owned(),
+            backend: "none".to_owned(),
+            reason: None,
+            filesystem: "full-access".to_owned(),
+            network: "allowed".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PlanStateData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_id: Option<String>,
@@ -91,6 +114,8 @@ pub struct PendingIntegrationData {
 pub struct BootstrapStateData {
     pub scope_id: String,
     pub plan_mode: HostPlanModeData,
+    #[serde(default)]
+    pub sandbox: SandboxStatusData,
     pub plan: PlanStateData,
     pub resources: ResourceSnapshot,
     pub agents: AgentsSnapshot,

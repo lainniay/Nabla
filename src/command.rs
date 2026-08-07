@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub const COMMAND_MENU_VISIBLE_ROWS: usize = 7;
 
-const LOCAL_COMMANDS: [LocalCommandDefinition; 16] = [
+const LOCAL_COMMANDS: [LocalCommandDefinition; 15] = [
     LocalCommandDefinition::new(
         "login",
         "Show how to authenticate Pi",
@@ -57,7 +57,6 @@ const LOCAL_COMMANDS: [LocalCommandDefinition; 16] = [
         "Enter Plan mode and optionally submit a planning prompt",
         LocalCommandKind::Plan,
     ),
-    LocalCommandDefinition::new("help", "List available commands", LocalCommandKind::Help),
     LocalCommandDefinition::new("new", "Start a new session", LocalCommandKind::New),
     LocalCommandDefinition::new(
         "resume",
@@ -88,7 +87,6 @@ enum LocalCommandKind {
     Thinking,
     Agents,
     Agent,
-    Help,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -126,7 +124,6 @@ impl LocalCommandKind {
             Self::Thinking => LocalCommand::Thinking(argument),
             Self::Agents => LocalCommand::Agents(argument),
             Self::Agent => LocalCommand::Agent(argument),
-            Self::Help => LocalCommand::Help,
         }
     }
 }
@@ -184,7 +181,6 @@ pub enum LocalCommand {
     Thinking(Option<String>),
     Agents(Option<String>),
     Agent(Option<String>),
-    Help,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,21 +307,6 @@ impl CommandCatalog {
     pub fn completion(&self, input: &str, cursor: usize) -> Option<String> {
         let command = self.suggestion(input, cursor)?;
         Some(format!("/{} ", command.name))
-    }
-
-    pub fn help_text(&self) -> String {
-        self.commands
-            .iter()
-            .map(|command| {
-                format!(
-                    "/{:<18} {}  [{}]",
-                    command.name,
-                    command.description,
-                    command.source.label()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }
 

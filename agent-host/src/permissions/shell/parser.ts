@@ -38,6 +38,7 @@ function splitTopLevel(source: string): Segment[] {
   const result: Segment[] = [];
   let start = 0;
   let quote: "'" | "\"" | undefined;
+  let backtick = false;
   let depth = 0;
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index]!;
@@ -50,7 +51,11 @@ function splitTopLevel(source: string): Segment[] {
       else if (!quote) quote = character;
       continue;
     }
-    if (quote) continue;
+    if (character === "`" && !quote) {
+      backtick = !backtick;
+      continue;
+    }
+    if (quote || backtick) continue;
     if (character === "(") {
       depth += 1;
       continue;
@@ -61,6 +66,11 @@ function splitTopLevel(source: string): Segment[] {
       continue;
     }
     if (depth > 0) continue;
+    const heredocEnd = readHeredocEnd(source, index);
+    if (heredocEnd !== undefined) {
+      index = heredocEnd;
+      continue;
+    }
     const operator = readOperator(source, index);
     if (!operator) continue;
     const text = source.slice(start, index).trim();
@@ -89,8 +99,51 @@ function readOperator(
   if (character === "|") return { connector: "pipe", length: 1 };
   if (character === ";") return { connector: "sequence", length: 1 };
   if (character === "\n") return { connector: "sequence", length: 1 };
-  if (character === "&") return { connector: "background", length: 1 };
+  if (character === "&" && !isRedirectionAmpersand(source, index)) {
+    return { connector: "background", length: 1 };
+  }
   return undefined;
+}
+
+function isRedirectionAmpersand(source: string, index: number): boolean {
+  if (source[index + 1] === ">") return true;
+  let previous = index - 1;
+  while (previous >= 0 && /\s/u.test(source[previous]!)) previous -= 1;
+  if (previous < 0) return false;
+  return (
+    source[previous] === ">" ||
+    source[previous] === "<" ||
+    /[0-9]/u.test(source[previous]!)
+  );
+}
+
+function readHeredocEnd(source: string, index: number): number | undefined {
+  if (source[index] !== "<" || source[index + 1] !== "<") return undefined;
+  if (source[index + 2] === "<") return undefined;
+  let cursor = index + 2;
+  while (/\s/u.test(source[cursor] ?? "")) cursor += 1;
+  if (source[cursor] === "-") cursor += 1;
+  const delimiterStart = cursor;
+  while (
+    cursor < source.length &&
+    !/\s/u.test(source[cursor]!) &&
+    !";|&<>".includes(source[cursor]!)
+  ) {
+    cursor += 1;
+  }
+  const delimiter = source.slice(delimiterStart, cursor).replace(/^['"]|['"]$/gu, "");
+  if (!delimiter) return undefined;
+  let lineStart = cursor;
+  while (lineStart < source.length) {
+    const lineEnd = source.indexOf("\n", lineStart);
+    const end = lineEnd === -1 ? source.length : lineEnd;
+    if (source.slice(lineStart, end).trim() === delimiter) {
+      return end;
+    }
+    if (lineEnd === -1) return source.length;
+    lineStart = lineEnd + 1;
+  }
+  return source.length;
 }
 
 function parseNode(source: string): ShellCommand | ShellGroup {
@@ -108,6 +161,7 @@ function parseNode(source: string): ShellCommand | ShellGroup {
 function matchingOuterParentheses(source: string): boolean {
   let depth = 0;
   let quote: "'" | "\"" | undefined;
+  let backtick = false;
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index]!;
     if (character === "\\" && quote !== "'") {
@@ -119,7 +173,11 @@ function matchingOuterParentheses(source: string): boolean {
       else if (!quote) quote = character;
       continue;
     }
-    if (quote) continue;
+    if (character === "`" && !quote) {
+      backtick = !backtick;
+      continue;
+    }
+    if (quote || backtick) continue;
     if (character === "(") depth += 1;
     if (character === ")") {
       depth -= 1;
@@ -189,6 +247,17 @@ function lexWords(source: string): {
       started = true;
       continue;
     }
+    if (
+      quote !== "'" &&
+      character === "$" &&
+      source[index + 1] === "(" &&
+      source[index + 2] === "("
+    ) {
+      opaqueReason = "arithmetic expansion is opaque";
+      current += character;
+      started = true;
+      continue;
+    }
     if (quote !== "'" && character === "$" && source[index + 1] === "(") {
       const end = findClosingParenthesis(source, index + 1);
       if (end < 0) {
@@ -211,6 +280,38 @@ function lexWords(source: string): {
       started = true;
       continue;
     }
+    if (
+      !quote &&
+      (character === "<" || character === ">") &&
+      source[index + 1] === "("
+    ) {
+      opaqueReason = "process substitution is opaque";
+      current += character;
+      started = true;
+      continue;
+    }
+    if (!quote && character === "<" && source[index + 1] === "<") {
+      opaqueReason = "heredoc or herestring is opaque";
+      current += character;
+      started = true;
+      continue;
+    }
+    if (!quote && character === "&" && source[index + 1] === ">") {
+      push();
+      let targetStart = index + 2;
+      while (/\s/u.test(source[targetStart] ?? "")) targetStart += 1;
+      const target = readRedirectionTarget(source, targetStart);
+      if (!target.value) {
+        opaqueReason = "redirection target is dynamic or missing";
+        break;
+      }
+      redirections.push({
+        operation: "write",
+        target: target.value,
+      });
+      index = target.end;
+      continue;
+    }
     if (!quote && /\s/u.test(character)) {
       push();
       continue;
@@ -221,6 +322,23 @@ function lexWords(source: string): {
       const fd = /[0-9]/u.test(character) ? Number(character) : undefined;
       if (fd !== undefined) index += 1;
       const symbol = source[index]!;
+      if (symbol === ">" && source[index + 1] === "&") {
+        let targetStart = index + 2;
+        while (/\s/u.test(source[targetStart] ?? "")) targetStart += 1;
+        const target = readRedirectionTarget(source, targetStart);
+        if (!target.value) {
+          opaqueReason = "redirection target is dynamic or missing";
+          break;
+        }
+        if (!/^[0-9]+$/u.test(target.value)) {
+          redirections.push({
+            operation: "write",
+            target: target.value,
+          });
+        }
+        index = target.end;
+        continue;
+      }
       const append = symbol === ">" && source[index + 1] === ">";
       if (append) index += 1;
       while (/\s/u.test(source[index + 1] ?? "")) index += 1;
@@ -252,6 +370,7 @@ function lexWords(source: string): {
 function findClosingParenthesis(source: string, opening: number): number {
   let depth = 0;
   let quote: "'" | "\"" | undefined;
+  let backtick = false;
   for (let index = opening; index < source.length; index += 1) {
     const character = source[index]!;
     if (character === "\\" && quote !== "'") {
@@ -263,7 +382,11 @@ function findClosingParenthesis(source: string, opening: number): number {
       else if (!quote) quote = character;
       continue;
     }
-    if (quote) continue;
+    if (character === "`" && !quote) {
+      backtick = !backtick;
+      continue;
+    }
+    if (quote || backtick) continue;
     if (character === "(") depth += 1;
     if (character === ")" && --depth === 0) return index;
   }

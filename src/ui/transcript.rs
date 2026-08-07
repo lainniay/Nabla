@@ -1609,7 +1609,7 @@ fn clip_cells(cells: Vec<StyledCell>, width: u16) -> Vec<StyledCell> {
         .collect()
 }
 
-fn row_from_cells(id: &str, cells: Vec<StyledCell>, width: u16) -> VisualRow {
+pub(crate) fn row_from_cells(id: &str, cells: Vec<StyledCell>, width: u16) -> VisualRow {
     VisualRow {
         component_id: id.to_owned(),
         logical_line: 0,

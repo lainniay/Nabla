@@ -25,6 +25,14 @@ export interface HostPlanModeSnapshot {
   activeTools: string[];
 }
 
+export interface SandboxStatus {
+  mode: "enforced" | "degraded" | "disabled";
+  backend: "bubblewrap" | "seatbelt" | "none";
+  filesystem: "workspace-write" | "full-access";
+  network: "blocked" | "allowed";
+  reason?: string;
+}
+
 export interface AgentProfileSnapshot {
   name: string;
   description: string;
@@ -85,6 +93,7 @@ export interface PendingIntegrationSnapshot {
 export interface BootstrapState {
   scopeId: string;
   planMode: HostPlanModeSnapshot;
+  sandbox: SandboxStatus;
   plan: { artifact: PlanArtifact | null };
   resources: ResourceSnapshot;
   agents: AgentsSnapshot;
@@ -241,7 +250,46 @@ export function parseBootstrapState(value: unknown): BootstrapState {
     );
   }
   requireStringArray(value, "warnings", "bootstrap");
-  return value as unknown as BootstrapState;
+  const sandboxValue: unknown = value.sandbox;
+  const sandbox: SandboxStatus =
+    sandboxValue === undefined
+      ? {
+          mode: "disabled",
+          backend: "none",
+          filesystem: "full-access",
+          network: "allowed",
+        }
+      : (() => {
+          if (!isJsonObject(sandboxValue)) {
+            throw new Error("bootstrap.sandbox must be an object");
+          }
+          return {
+            mode: requireString(
+              sandboxValue,
+              "mode",
+              "bootstrap.sandbox",
+            ) as SandboxStatus["mode"],
+            backend: requireString(
+              sandboxValue,
+              "backend",
+              "bootstrap.sandbox",
+            ) as SandboxStatus["backend"],
+            filesystem: requireString(
+              sandboxValue,
+              "filesystem",
+              "bootstrap.sandbox",
+            ) as SandboxStatus["filesystem"],
+            network: requireString(
+              sandboxValue,
+              "network",
+              "bootstrap.sandbox",
+            ) as SandboxStatus["network"],
+            ...(typeof sandboxValue.reason === "string"
+              ? { reason: sandboxValue.reason }
+              : {}),
+          };
+        })();
+  return { ...(value as unknown as BootstrapState), sandbox };
 }
 
 function validatePlanArtifact(value: unknown): void {

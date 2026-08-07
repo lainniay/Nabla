@@ -684,7 +684,7 @@ test("unknown messages fail open once and disabled pruning returns the original 
 
   const first = manager.filter(unknown, undefined, active);
   assert.equal(first.messages, unknown);
-  assert.match(manager.takeWarning() ?? "", /not recognized/);
+  assert.equal(manager.takeWarning(), undefined);
 
   manager.filter(unknown, undefined, active);
   assert.equal(manager.takeWarning(), undefined);

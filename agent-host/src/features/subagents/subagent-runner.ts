@@ -7,6 +7,7 @@ import {
   type AgentSession,
   type InlineExtension,
   type ModelRuntime,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -28,6 +29,7 @@ import type {
   SubagentOptions,
 } from "./subagent-types.ts";
 import type { IntegrationService } from "./integration-service.ts";
+import type { ToolAuthorizationContext } from "../permissions/permission-service.ts";
 
 export interface SubagentRunnerPort {
   send(event: JsonObject): void;
@@ -70,6 +72,10 @@ export interface SubagentRunnerPort {
   ): WorktreeRecoveryState;
   reportHostWarning(message: string): void;
   workspaceConfig(): HarnessConfig;
+  createBashTool(
+    cwd: string,
+    agent: ToolAuthorizationContext["agent"],
+  ): ToolDefinition;
 }
 
 export class SubagentRunner {
@@ -142,6 +148,15 @@ export class SubagentRunner {
       resourceLoader: loader,
       sessionManager: SessionManager.inMemory(cwd),
       settingsManager: settings,
+      customTools: [
+        this.port.createBashTool(cwd, {
+          agentId: active.id,
+          profile: options.profile,
+          model: `${model.provider}/${model.id}`,
+          profileConfig: profile,
+          planReadOnly: active.planReadOnly,
+        }),
+      ],
     });
     const session = result.session;
     active.session = session;

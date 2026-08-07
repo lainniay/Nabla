@@ -1661,7 +1661,7 @@ fn mutation_tool_waits_for_approval_and_resumes_after_allow() {
         }))
     ));
 
-    let effects = app.update(press(KeyCode::Char('y')));
+    let effects = app.update(press(KeyCode::Enter));
     assert_eq!(
         effects,
         vec![AppEffect::ReplyApproval {
@@ -1785,16 +1785,19 @@ fn approval_scope_follows_available_decisions_instead_of_risk() {
         ],
         ..ApprovalState::default()
     });
+    app.update(press(KeyCode::Tab));
+    app.update(press(KeyCode::Tab));
     assert_eq!(
-        app.update(press(KeyCode::Char('a'))),
+        app.update(press(KeyCode::Enter)),
         vec![AppEffect::ReplyApproval {
             approval_id: "approval-forever".to_owned(),
             decision: ApprovalDecision::AllowWorkspace,
         }]
     );
     app.state.approval.as_mut().unwrap().replying = false;
+    app.update(press(KeyCode::BackTab));
     assert_eq!(
-        app.update(press(KeyCode::Char('s'))),
+        app.update(press(KeyCode::Enter)),
         vec![AppEffect::ReplyApproval {
             approval_id: "approval-forever".to_owned(),
             decision: ApprovalDecision::AllowSession,
@@ -1820,8 +1823,9 @@ fn approval_scope_follows_available_decisions_instead_of_risk() {
         ],
         ..ApprovalState::default()
     });
+    app.update(press(KeyCode::Tab));
     assert_eq!(
-        app.update(press(KeyCode::Char('a'))),
+        app.update(press(KeyCode::Enter)),
         vec![AppEffect::ReplyApproval {
             approval_id: "approval-high".to_owned(),
             decision: ApprovalDecision::AllowWorkspace,
@@ -2028,6 +2032,17 @@ fn discovered_commands_are_passed_through_and_unknown_commands_are_rejected() {
 }
 
 #[test]
+fn help_command_is_treated_as_unknown() {
+    let mut app = App::new(state());
+    app.state.editor.insert_text("/help");
+    app.update(press(KeyCode::Enter));
+    assert!(app.state().transcript.iter().any(|item| matches!(
+        item,
+        TranscriptItem::Notice(message) if message.contains("Unknown command /help")
+    )));
+}
+
+#[test]
 fn tab_shift_tab_and_ctrl_np_navigate_command_candidates() {
     let mut app = App::with_commands(
         state(),
@@ -2082,8 +2097,8 @@ fn command_navigation_reaches_candidates_beyond_the_visible_window() {
     let mut app = App::new(state());
     app.state.editor.insert_text("/");
 
-    assert_eq!(app.state().command_candidates().len(), 16);
-    for _ in 0..15 {
+    assert_eq!(app.state().command_candidates().len(), 15);
+    for _ in 0..14 {
         app.update(press(KeyCode::Tab));
     }
     assert_eq!(

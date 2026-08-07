@@ -2,6 +2,7 @@ import type {
   AgentSessionRuntime,
   InlineExtension,
   ModelRuntime,
+  ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -21,7 +22,12 @@ import type { PlanModeService } from "../../runtime/plan-mode-service.ts";
 import type { WorktreeRecord, WorktreeRecoveryState } from "../../worktree.ts";
 import type { WorkspaceService } from "../workspace/workspace-service.ts";
 import type { PermissionService } from "../permissions/permission-service.ts";
+import type { ToolAuthorizationContext } from "../permissions/permission-service.ts";
 import type { IntegrationService } from "./integration-service.ts";
+import type { RustSandboxBackend } from "../../permissions/execution/rust-sandbox-backend.ts";
+import { createNablaBashTool } from "../../runtime/create-nabla-bash-tool.ts";
+import { buildWorkspaceContext } from "../../runtime/workspace-context.ts";
+import { normalizeToolInputPaths } from "../../runtime/tool-path-normalizer.ts";
 import {
   SubagentRunner,
   type SubagentRunnerPort,
@@ -42,6 +48,7 @@ export class SubagentSupervisor implements SubagentRunnerPort {
   private readonly workspace: WorkspaceService;
   private readonly integrations: IntegrationService;
   private readonly permissions: PermissionService;
+  private readonly sandboxBackend: RustSandboxBackend;
   private readonly modelRuntime: ModelRuntime;
   private readonly runtime: RuntimeSupervisor;
   private readonly planMode: PlanModeService;
@@ -53,6 +60,7 @@ export class SubagentSupervisor implements SubagentRunnerPort {
     workspace: WorkspaceService,
     integrations: IntegrationService,
     permissions: PermissionService,
+    sandboxBackend: RustSandboxBackend,
     modelRuntime: ModelRuntime,
     runtime: RuntimeSupervisor,
     planMode: PlanModeService,
@@ -63,6 +71,7 @@ export class SubagentSupervisor implements SubagentRunnerPort {
     this.workspace = workspace;
     this.integrations = integrations;
     this.permissions = permissions;
+    this.sandboxBackend = sandboxBackend;
     this.modelRuntime = modelRuntime;
     this.runtime = runtime;
     this.planMode = planMode;
@@ -548,16 +557,22 @@ export class SubagentSupervisor implements SubagentRunnerPort {
     return {
       name: `nabla-subagent-${agentId}`,
       factory: (pi) => {
-        pi.on("before_agent_start", (event) => ({
+        pi.on("before_agent_start", (event, context) => ({
           systemPrompt: [
             event.systemPrompt,
+            buildWorkspaceContext(context.cwd),
             `This is independent subagent ${agentId} (${profileName}).`,
             ...profile.instructions,
             "Do not ask the user directly. Return structured results to the parent agent.",
           ].join("\n\n"),
         }));
-        pi.on("tool_call", (event, context) =>
-          this.permissions.authorizeTool(event, {
+        pi.on("tool_call", (event, context) => {
+          if (event.toolName === "bash") return;
+          normalizeToolInputPaths(
+            event.input as Record<string, unknown>,
+            context.cwd,
+          );
+          return this.permissions.authorizeTool(event, {
             cwd: context.cwd,
             signal: context.signal,
             agent: {
@@ -569,9 +584,10 @@ export class SubagentSupervisor implements SubagentRunnerPort {
                 this.subagents.get(agentId)?.planReadOnly === true,
               sessionId: context.sessionManager.getSessionId(),
             },
-          }),
-        );
+          });
+        });
         pi.on("tool_result", (event) => {
+          if (event.toolName === "bash") return;
           this.permissions.finishTool(event.toolCallId, !event.isError);
         });
       },
@@ -631,5 +647,16 @@ export class SubagentSupervisor implements SubagentRunnerPort {
 
   workspaceConfig(): HarnessConfig {
     return this.workspace.configValue();
+  }
+
+  createBashTool(
+    cwd: string,
+    agent: ToolAuthorizationContext["agent"],
+  ): ToolDefinition {
+    return createNablaBashTool(cwd, {
+      permissions: this.permissions,
+      sandboxBackend: this.sandboxBackend,
+      agent,
+    });
   }
 }

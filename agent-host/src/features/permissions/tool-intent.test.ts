@@ -82,6 +82,47 @@ test("write distinguishes existing files from new files", () => {
   }
 });
 
+test("find, grep, and ls default missing paths to the workspace root", () => {
+  const find = permissionIntentForTool(
+    context,
+    "find",
+    { pattern: "*.md" },
+    new ShellAdapter(),
+  );
+  assert.deepEqual(
+    find.atoms.map((atom) =>
+      atom.kind === "file" ? [atom.operation, atom.path] : null,
+    ),
+    [["list", "/workspace"]],
+  );
+
+  const grep = permissionIntentForTool(
+    context,
+    "grep",
+    { pattern: "TODO" },
+    new ShellAdapter(),
+  );
+  assert.deepEqual(
+    grep.atoms.map((atom) =>
+      atom.kind === "file" ? [atom.operation, atom.path] : null,
+    ),
+    [["read", "/workspace"]],
+  );
+
+  const ls = permissionIntentForTool(
+    context,
+    "ls",
+    {},
+    new ShellAdapter(),
+  );
+  assert.deepEqual(
+    ls.atoms.map((atom) =>
+      atom.kind === "file" ? [atom.operation, atom.path] : null,
+    ),
+    [["list", "/workspace"]],
+  );
+});
+
 test("mcp, delegate_task, and unknown tools keep their opaque fallbacks", () => {
   const mcp = permissionIntentForTool(
     context,

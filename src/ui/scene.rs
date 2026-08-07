@@ -18,11 +18,12 @@ use super::{
     palette,
     panel::PanelRequest,
     selector::VirtualList,
+    shell,
     store::UiState,
     text::{
         GraphemeIndex, cursor_geometry, display_width, truncate, wrap_file_references, wrap_text,
     },
-    transcript::{render_viewer_item, tool_operation_summary},
+    transcript::{render_viewer_item, row_from_cells, tool_operation_summary},
     types::{
         CellStyle, Color, ComponentId, CursorPosition, HitRegion, HitTarget, MainLayout,
         PanelFrame, Rect, RowRange, StyledCell, SurfaceKind, VisualFrame, VisualRow,
@@ -770,12 +771,18 @@ fn status_row(state: &AppState, width: u16, animation_frame: u8) -> VisualRow {
     if state.plan_mode_active {
         right_parts.push("PLAN".to_owned());
     }
+    match state.sandbox_status.mode.as_str() {
+        "enforced" => right_parts.push("sandbox".to_owned()),
+        "degraded" => right_parts.push("sandbox:degraded".to_owned()),
+        _ => right_parts.push("sandbox:off".to_owned()),
+    }
     let right = right_parts.join(" · ");
     let left_width = display_width(&left);
     let right_width = display_width(&right);
-    let available = usize::from(width);
+    let margin = 1usize;
+    let available = usize::from(width).saturating_sub(margin * 2);
     let muted = CellStyle::foreground(Color::Gray).dim();
-    let mut cells = Vec::new();
+    let mut cells = vec![StyledCell::new(" ".repeat(margin), margin as u16, muted)];
     if left_width.saturating_add(right_width).saturating_add(2) <= available {
         append_text_cells(&mut cells, &left, CellStyle::foreground(Color::Cyan));
         let padding = available.saturating_sub(left_width + right_width);
@@ -789,6 +796,7 @@ fn status_row(state: &AppState, width: u16, animation_frame: u8) -> VisualRow {
             cells.push(StyledCell::new(" ".repeat(padding), padding as u16, muted));
         }
     }
+    cells.push(StyledCell::new(" ".repeat(margin), margin as u16, muted));
     VisualRow {
         component_id: "status".to_owned(),
         logical_line: 0,
@@ -1082,9 +1090,10 @@ fn approval_panel_request(
         CellStyle::foreground(palette::LAVENDER).bold(),
         width,
     )];
+    rows.push(VisualRow::blank("approval-spacing"));
     rows.push(text_row(
         "approval-summary",
-        approval_summary(approval),
+        &format!("• {}", approval_summary(approval)),
         match risk {
             "high" | "credential" | "outside_workspace" => CellStyle::foreground(Color::Red),
             "elevated" => CellStyle::foreground(Color::Yellow),
@@ -1092,69 +1101,26 @@ fn approval_panel_request(
         },
         width,
     ));
-    if risk != "normal"
-        && !approval.summary.is_empty()
-        && approval.summary != approval_summary(approval)
-    {
-        rows.push(text_row(
-            "approval-summary-detail",
-            &approval.summary,
-            CellStyle::foreground(palette::SUBTEXT_0),
-            width,
-        ));
-    }
     rows.push(approval_operation_row(approval, width));
-
-    if approval
-        .available_decisions
-        .contains(&ApprovalDecision::AllowSession)
-        && let Some(proposal) = approval.session_grant.as_ref()
-    {
-        rows.push(text_row(
-            "approval-session-grant",
-            &format!("Session saves: {}", grant_proposal_summary(proposal)),
-            CellStyle::foreground(palette::SUBTEXT_0).dim(),
-            width,
-        ));
-    }
-    if approval
-        .available_decisions
-        .contains(&ApprovalDecision::AllowWorkspace)
-        && let Some(proposal) = approval.workspace_grant.as_ref()
-    {
-        rows.push(text_row(
-            "approval-workspace-grant",
-            &format!("Workspace saves: {}", grant_proposal_summary(proposal)),
-            CellStyle::foreground(palette::SUBTEXT_0).dim(),
-            width,
-        ));
-    }
+    rows.push(VisualRow::blank("approval-spacing"));
 
     let actions = approval
         .available_decisions
         .iter()
         .map(|decision| match decision {
             ApprovalDecision::AllowOnce => (
-                "[Y] Allow once".to_owned(),
+                "Allow once".to_owned(),
                 "Approve only this request".to_owned(),
             ),
             ApprovalDecision::AllowSession => (
-                "[S] Allow for Session".to_owned(),
-                approval.session_grant.as_ref().map_or_else(
-                    || "No session grant was proposed".to_owned(),
-                    grant_proposal_summary,
-                ),
+                "Allow for Session".to_owned(),
+                "Remember for this session".to_owned(),
             ),
             ApprovalDecision::AllowWorkspace => (
-                "[A] Allow for Workspace".to_owned(),
-                approval.workspace_grant.as_ref().map_or_else(
-                    || "No workspace grant was proposed".to_owned(),
-                    grant_proposal_summary,
-                ),
+                "Allow for Workspace".to_owned(),
+                "Remember for this workspace".to_owned(),
             ),
-            ApprovalDecision::Deny => {
-                ("[N] Deny".to_owned(), "Reject this tool request".to_owned())
-            }
+            ApprovalDecision::Deny => ("Deny".to_owned(), "Reject this tool request".to_owned()),
         })
         .collect::<Vec<_>>();
     let action_offset = rows.len();
@@ -1260,13 +1226,17 @@ fn approval_operation_row(approval: &crate::state::ApprovalState, width: u16) ->
     } else {
         tool_operation_summary(&approval.tool_name, &approval.input)
     };
-    let available = usize::from(width.saturating_sub(4));
-    text_row(
-        "approval-input",
-        &format!("    {}", truncate(&operation, available)),
-        CellStyle::foreground(Color::Gray).dim(),
-        width,
-    )
+    let mut cells = shell::highlight(&operation)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    let mut prefixed = vec![StyledCell::new(
+        "  └ ",
+        4,
+        CellStyle::foreground(Color::Cyan).bold(),
+    )];
+    prefixed.append(&mut cells);
+    row_from_cells("approval-input", prefixed, width)
 }
 
 fn input_string<'a>(input: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
@@ -2524,26 +2494,31 @@ mod tests {
         assert!(panel.area.height >= 4);
         assert!(text.contains("Ask for Approval"));
         assert!(text.contains("run tests"));
+        assert!(text.contains("• run tests"));
         assert!(text.contains("cargo test"));
+        assert!(text.contains("  └ cargo test"));
         let command_row = panel
             .rows
             .iter()
-            .find(|row| row.plain_text().contains("cargo test"))
-            .expect("indented command");
-        assert!(command_row.plain_text().contains("    cargo test"));
+            .find(|row| row.plain_text().contains("  └ cargo test"))
+            .expect("command row");
         assert!(
             command_row
                 .cells
                 .iter()
-                .filter(|cell| !cell.symbol.trim().is_empty() && cell.symbol != "│")
-                .all(|cell| cell.style.foreground == Color::Gray && cell.style.dim)
+                .any(|cell| cell.style.foreground == Color::Cyan && cell.style.bold)
         );
+        assert!(command_row.cells.len() > 1);
         assert!(text.contains("Allow once"));
         assert!(text.contains("Allow for Session"));
         assert!(text.contains("Allow for Workspace"));
-        assert!(text.contains("Session saves: exec cargo test @ /workspace"));
-        assert!(text.contains("Workspace saves: exec cargo test @ /workspace"));
-        assert!(text.contains("file_digest /workspace/Cargo.toml=manifest-digest"));
+        assert!(!text.contains("Session saves"));
+        assert!(!text.contains("Workspace saves"));
+        assert!(!text.contains("file_digest"));
+        assert!(!text.contains("[Y]"));
+        assert!(!text.contains("[S]"));
+        assert!(!text.contains("[A]"));
+        assert!(!text.contains("[N]"));
         assert!(text.contains("Deny"));
         assert!(
             panel
@@ -2603,7 +2578,7 @@ mod tests {
             .join("\n");
 
         assert_eq!(panel.area.width, size.width);
-        assert_eq!(panel.rows.len(), 7);
+        assert_eq!(panel.rows.len(), 9);
         assert!(text.contains("Ask for Approval"));
         assert!(text.contains("May access sensitive credentials"));
         assert!(text.contains("printenv SECRET_TOKEN"));
@@ -2668,7 +2643,8 @@ mod tests {
         assert!(!all_text.contains("Workspace boundary"));
         assert!(!all_text.contains("Apply a requested change"));
         assert!(!all_text.contains("replacement"));
-        assert!(all_text.contains("[N] Deny"));
+        assert!(all_text.contains("Deny"));
+        assert!(!all_text.contains("[N]"));
         assert!(!all_text.contains("agent-1"));
         assert!(!all_text.contains("provider/model"));
 
@@ -2677,7 +2653,7 @@ mod tests {
             selected
                 .rows
                 .iter()
-                .any(|row| row.plain_text().contains("[N] Deny"))
+                .any(|row| row.plain_text().contains("Deny"))
         );
     }
 
@@ -2685,14 +2661,14 @@ mod tests {
     fn narrow_panel_rows_preserve_action_and_shortcut_before_description() {
         let row = panel_choice_row(
             "approval",
-            "[Y] Allow once",
+            "Allow once",
             "Approve only this request",
             true,
             true,
             12,
         );
         assert_eq!(row.display_width(), 12);
-        assert!(row.plain_text().contains("[Y]"));
+        assert!(row.plain_text().contains("Allow once"));
         assert!(!row.plain_text().contains("Approve"));
     }
 
@@ -3014,11 +2990,11 @@ mod tests {
         assert_eq!(busy.rows.len(), idle.rows.len());
         let busy_status = busy.rows.last().unwrap().plain_text();
         let idle_status = idle.rows.last().unwrap().plain_text();
-        assert!(busy_status.starts_with("model · thinking off"));
+        assert!(busy_status.starts_with(" model · thinking off"));
         assert!(busy_status.contains("⠋ · ctx"));
         assert!(!busy_status.contains("running"));
         assert!(!busy_status.contains("connected"));
-        assert!(idle_status.starts_with("model · thinking off"));
+        assert!(idle_status.starts_with(" model · thinking off"));
         assert!(!idle_status.contains('⠋'));
         assert!(!idle_status.contains("idle"));
         assert!(!idle_status.contains("connected"));
@@ -3073,6 +3049,8 @@ mod tests {
         let frame = SceneBuilder.build(&domain, store.state(), SurfaceKind::Primary);
         let status = frame.rows.last().expect("status row");
         assert_eq!(status.display_width(), size.width);
+        assert!(status.plain_text().starts_with(' '));
+        assert!(status.plain_text().ends_with(' '));
         assert!(
             status
                 .cells

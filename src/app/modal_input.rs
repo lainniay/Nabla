@@ -23,11 +23,9 @@ impl App {
                 self.state.selection_panel = None;
                 match action {
                     Some(SelectionPanelAction::SetModel { provider, model_id }) => {
-                        self.begin_local_command_timing(LocalCommandCompletion::ModelSet);
                         vec![AppEffect::SetModel { provider, model_id }]
                     }
                     Some(SelectionPanelAction::SetThinking(level)) => {
-                        self.begin_local_command_timing(LocalCommandCompletion::ThinkingSet);
                         vec![AppEffect::SetThinking(level)]
                     }
                     None => Vec::new(),

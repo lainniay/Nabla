@@ -377,13 +377,7 @@ export class ContextBudgetManager {
           prunedThisRequest > 0 ||
           filtered.length !== messages.length,
       };
-    } catch (error) {
-      this.warnOnce(
-        "filter-fail-open",
-        `Context pruning was skipped because the message view was not recognized: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+    } catch {
       const estimatedUnfilteredTokens = safeEstimateMessages(messages);
       const categories = safeEstimateCategories(messages);
       this.lastRequestEstimate = estimatedUnfilteredTokens;

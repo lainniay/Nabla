@@ -8,6 +8,7 @@ pub mod host;
 pub mod pi_process;
 pub mod rpc;
 pub mod runtime;
+pub mod sandbox;
 pub mod selection;
 pub mod state;
 pub mod ui;

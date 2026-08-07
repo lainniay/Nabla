@@ -11,6 +11,7 @@ import type { WorkspaceService } from "../workspace/workspace-service.ts";
 import type { PermissionService } from "../permissions/permission-service.ts";
 import type { IntegrationService } from "./integration-service.ts";
 import { SubagentSupervisor } from "./subagent-supervisor.ts";
+import type { RustSandboxBackend } from "../../permissions/execution/rust-sandbox-backend.ts";
 
 const config: HarnessConfig = {
   schemaVersion: 2,
@@ -59,6 +60,7 @@ function build() {
       annotate: async (record: never) => record,
     } as unknown as IntegrationService,
     {} as PermissionService,
+    {} as RustSandboxBackend,
     {
       getModel: (provider: string, id: string) =>
         provider === "fake" && id === "model-a"
@@ -96,6 +98,7 @@ test("start rejects unknown and disabled profiles", () => {
     { configValue: () => disabled } as unknown as WorkspaceService,
     {} as IntegrationService,
     {} as PermissionService,
+    {} as RustSandboxBackend,
     {} as ModelRuntime,
     {} as RuntimeSupervisor,
     new PlanModeService(),
@@ -131,6 +134,7 @@ test("concurrency limits reject additional starts", () => {
     } as unknown as WorkspaceService,
     {} as IntegrationService,
     {} as PermissionService,
+    {} as RustSandboxBackend,
     {
       getModel: () => ({ provider: "fake", id: "model-a" }),
     } as unknown as ModelRuntime,
@@ -222,6 +226,7 @@ function buildWithConfig(harness: HarnessConfig) {
       annotate: async (record: never) => record,
     } as unknown as IntegrationService,
     {} as PermissionService,
+    {} as RustSandboxBackend,
     {
       getModel: (provider: string, id: string) =>
         provider === "fake" && id === "model-a"

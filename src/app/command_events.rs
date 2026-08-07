@@ -206,9 +206,6 @@ impl App {
             CommandEvent::ModelSetFinished(result) => match result {
                 Ok(model) => {
                     self.state.session.model = Some(model);
-                    self.state
-                        .transcript
-                        .push(TranscriptItem::Notice("Model updated.".to_owned()));
                 }
                 Err(error) => self.set_error(format!("Unable to set model: {error}")),
             },
@@ -217,10 +214,6 @@ impl App {
                     if let Some(level) = data.get("level").and_then(Value::as_str) {
                         self.state.session.thinking_level = level.to_owned();
                     }
-                    self.state.transcript.push(TranscriptItem::Notice(format!(
-                        "Thinking level: {}",
-                        self.state.session.thinking_level
-                    )));
                 }
                 Err(error) => self.set_error(format!("Unable to set thinking level: {error}")),
             },

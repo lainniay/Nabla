@@ -250,6 +250,7 @@ impl App {
         self.state.command_catalog =
             crate::command::CommandCatalog::new(bootstrap.resources.commands.clone());
         self.state.plan_mode_active = bootstrap.plan_mode.active;
+        self.state.sandbox_status = bootstrap.sandbox;
         self.state.plan = bootstrap.plan.artifact;
         self.state.resources = bootstrap.resources;
         self.state.agents = bootstrap.agents;

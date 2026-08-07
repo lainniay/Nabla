@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import type { JsonObject } from "../protocol/validation.ts";
@@ -163,11 +166,11 @@ test("session, context, and permission hooks route to service ports", () => {
     { getContextUsage: () => undefined },
   );
   pi.handlers.get("tool_call")?.(
-    { toolCallId: "t1", toolName: "bash", input: {} },
+    { toolCallId: "t1", toolName: "read", input: { path: "a.ts" } },
     { cwd: "/workspace", signal: undefined },
   );
   pi.handlers.get("tool_result")?.(
-    { toolCallId: "t1", toolName: "bash", isError: false, input: {} },
+    { toolCallId: "t1", toolName: "read", isError: false, input: { path: "a.ts" } },
   );
   assert.ok(calls.includes("context.onRuntimeSessionStart"));
   assert.ok(calls.includes("plans.onSessionActivated"));
@@ -187,10 +190,40 @@ test("turn timing hooks emit events and append metrics", () => {
 });
 
 test("before_agent_start augments the system prompt", () => {
-  const { pi } = createFactory();
-  const result = pi.handlers
-    .get("before_agent_start")
-    ?.({ systemPrompt: "base" }) as { systemPrompt?: string } | undefined;
-  assert.match(String(result?.systemPrompt), /Follow Pi's normal interactive agent behavior/u);
-  assert.match(String(result?.systemPrompt), /profiles/u);
+  const root = mkdtempSync(join(tmpdir(), "nabla-extension-context-"));
+  try {
+    writeFileSync(join(root, "a.ts"), "x");
+    const { pi } = createFactory();
+    const result = pi.handlers
+      .get("before_agent_start")
+      ?.({ systemPrompt: "base" }, { cwd: root }) as
+      | { systemPrompt?: string }
+      | undefined;
+    assert.match(String(result?.systemPrompt), /Follow Pi's normal interactive agent behavior/u);
+    assert.match(String(result?.systemPrompt), /profiles/u);
+    assert.match(
+      String(result?.systemPrompt),
+      new RegExp(`Current working directory: ${root.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`),
+    );
+    assert.match(String(result?.systemPrompt), /Working directory tree:/u);
+    assert.match(String(result?.systemPrompt), /- a\.ts/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("tool_call normalizes workspace absolute paths to relative", () => {
+  const root = mkdtempSync(join(tmpdir(), "nabla-extension-normalize-"));
+  try {
+    const { calls, pi } = createFactory();
+    const input = { path: join(root, "a.ts") };
+    pi.handlers.get("tool_call")?.(
+      { toolCallId: "t1", toolName: "read", input },
+      { cwd: root, signal: undefined },
+    );
+    assert.equal(input.path, "a.ts");
+    assert.ok(calls.includes("permissions.authorizeTool"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -5,6 +5,7 @@ import type {
   AgentsSnapshot,
   BootstrapState,
   PendingIntegrationSnapshot,
+  SandboxStatus,
 } from "../../protocol/contracts.ts";
 
 export interface BootstrapInput {
@@ -14,6 +15,7 @@ export interface BootstrapInput {
   resources: ResourceSnapshot;
   agents: AgentsSnapshot;
   context: ContextSnapshot;
+  sandbox: SandboxStatus;
   pendingIntegrations: PendingIntegrationSnapshot[];
   warnings: string[];
 }
@@ -34,6 +36,7 @@ export class BootstrapService {
       resources: input.resources,
       agents: input.agents,
       context: input.context,
+      sandbox: input.sandbox,
       pendingIntegrations: input.pendingIntegrations,
       warnings: input.warnings,
     };

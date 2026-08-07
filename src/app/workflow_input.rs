@@ -184,60 +184,18 @@ impl App {
             self.state.run_state = RunState::Aborting;
             return vec![AppEffect::AbortAndClearQueue];
         }
-        let plain_character = !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
-        let direct_decision = match key.code {
-            KeyCode::Char('y' | 'Y')
-                if plain_character
-                    && approval
-                        .available_decisions
-                        .contains(&ApprovalDecision::AllowOnce) =>
-            {
-                Some(ApprovalDecision::AllowOnce)
-            }
-            KeyCode::Char('s' | 'S')
-                if plain_character
-                    && approval
-                        .available_decisions
-                        .contains(&ApprovalDecision::AllowSession) =>
-            {
-                Some(ApprovalDecision::AllowSession)
-            }
-            KeyCode::Char('a' | 'A')
-                if plain_character
-                    && approval
-                        .available_decisions
-                        .contains(&ApprovalDecision::AllowWorkspace) =>
-            {
-                Some(ApprovalDecision::AllowWorkspace)
-            }
-            KeyCode::Char('n' | 'N')
-                if plain_character
-                    && approval
-                        .available_decisions
-                        .contains(&ApprovalDecision::Deny) =>
-            {
-                Some(ApprovalDecision::Deny)
-            }
-            _ => None,
-        };
         let enabled = vec![true; approval.available_decisions.len()];
-        let decision = if let Some(decision) = direct_decision {
-            Some(decision)
-        } else {
-            match update_choice_navigation(key, &mut approval.selected, &enabled) {
-                ChoiceNavAction::Handled => return Vec::new(),
-                ChoiceNavAction::Confirm(selected) => {
-                    approval.available_decisions.get(selected).copied()
-                }
-                ChoiceNavAction::Cancel => {
-                    approval.replying = true;
-                    self.state.run_state = RunState::Aborting;
-                    return vec![AppEffect::AbortAndClearQueue];
-                }
-                ChoiceNavAction::Unhandled => None,
+        let decision = match update_choice_navigation(key, &mut approval.selected, &enabled) {
+            ChoiceNavAction::Handled => return Vec::new(),
+            ChoiceNavAction::Confirm(selected) => {
+                approval.available_decisions.get(selected).copied()
             }
+            ChoiceNavAction::Cancel => {
+                approval.replying = true;
+                self.state.run_state = RunState::Aborting;
+                return vec![AppEffect::AbortAndClearQueue];
+            }
+            ChoiceNavAction::Unhandled => None,
         };
         let Some(decision) = decision else {
             return Vec::new();
