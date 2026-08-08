@@ -264,6 +264,11 @@ fn project_assistant_content(
     if source.is_empty() {
         return;
     }
+    // Normalize LLM-style split table fragments before scanning so the
+    // incremental scanner, the final sealed parse, and the renderer all agree
+    // that the fragments form one table and can enter scrollback contiguously.
+    let normalized_source = markdown::normalize_table_continuations(source);
+    let source = normalized_source.as_ref();
     let key = (epoch, message_id, content_kind);
     active_keys.insert(key);
     let scanner = scans.entry(key).or_default();

@@ -60,6 +60,20 @@ fn press_with(code: KeyCode, modifiers: KeyModifiers) -> AppEvent {
     AppEvent::Terminal(TerminalEvent::Key(KeyEvent::new(code, modifiers)))
 }
 
+fn pi_event(kind: &str, payload: serde_json::Value) -> AppEvent {
+    AppEvent::Pi(RpcEvent {
+        kind: kind.to_owned(),
+        payload,
+    })
+}
+
+fn host_event(kind: &str, payload: serde_json::Value) -> AppEvent {
+    AppEvent::Host(RpcEvent {
+        kind: kind.to_owned(),
+        payload,
+    })
+}
+
 fn plan() -> PlanArtifact {
     PlanArtifact {
         id: "plan-1".to_owned(),
@@ -1193,40 +1207,107 @@ fn workspace_state_updates_resources_and_agents_atomically() {
 }
 
 #[test]
-fn prompt_acceptance_does_not_finish_the_agent_run() {
+fn prompt_acceptance_stays_running_until_agent_settled() {
     let mut app = App::new(state());
     app.state.run_state = RunState::Submitting;
     app.update(AppEvent::Command(CommandEvent::PromptFinished(Ok(()))));
     assert_eq!(app.state().run_state, RunState::Submitting);
 
-    app.update(AppEvent::Pi(RpcEvent {
-        kind: "agent_start".to_owned(),
-        payload: json!({"type": "agent_start"}),
-    }));
+    app.update(pi_event("agent_start", json!({"type": "agent_start"})));
     assert_eq!(app.state().run_state, RunState::Running);
     assert!(app.state().session.is_streaming);
 
-    app.update(AppEvent::Pi(RpcEvent {
-        kind: "agent_end".to_owned(),
-        payload: json!({"type": "agent_end", "messages": []}),
-    }));
+    app.update(pi_event(
+        "agent_end",
+        json!({"type": "agent_end", "messages": [], "willRetry": false}),
+    ));
+    assert_eq!(app.state().run_state, RunState::Running);
+    assert!(app.state().session.is_streaming);
+
+    app.update(pi_event("agent_settled", json!({"type": "agent_settled"})));
     assert_eq!(app.state().run_state, RunState::Idle);
     assert!(!app.state().session.is_streaming);
 }
 
 #[test]
-fn completed_turn_timing_is_idempotent_and_correlated_by_turn_id() {
+fn host_turn_timing_does_not_create_or_move_separators() {
     let mut app = App::new(state());
-    app.update(AppEvent::Host(RpcEvent {
-        kind: "turn_timing".to_owned(),
-        payload: json!({
+    app.update(host_event(
+        "turn_timing",
+        json!({
             "type": "turn_timing",
             "phase": "started",
             "scopeId": "session-1",
             "turnId": "turn-1",
             "startedAt": "2026-08-04T01:00:00.000Z"
         }),
-    }));
+    ));
+    app.update(host_event(
+        "turn_timing",
+        json!({
+            "type": "turn_timing",
+            "phase": "completed",
+            "scopeId": "session-1",
+            "turnId": "turn-1",
+            "startedAt": "2026-08-04T01:00:00.000Z",
+            "endedAt": "2026-08-04T01:00:02.000Z",
+            "durationMs": 2_000,
+            "unknownFutureField": true
+        }),
+    ));
+    assert!(
+        app.state()
+            .transcript
+            .iter()
+            .all(|item| !matches!(item, TranscriptItem::TurnSeparator(_)))
+    );
+}
+
+#[test]
+fn agent_settled_pushes_one_separator_after_streamed_content() {
+    let mut app = App::new(state());
+    app.update(pi_event("agent_start", json!({"type": "agent_start"})));
+    app.update(pi_event(
+        "message_start",
+        json!({"type": "message_start", "message": {"role": "assistant"}}),
+    ));
+    app.update(pi_event(
+        "message_update",
+        json!({
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "delta": "**"}
+        }),
+    ));
+    app.update(pi_event(
+        "message_end",
+        json!({"type": "message_end", "message": {"role": "assistant"}}),
+    ));
+    app.update(pi_event(
+        "tool_execution_start",
+        json!({
+            "type": "tool_execution_start",
+            "toolCallId": "tool-1",
+            "toolName": "read",
+            "args": {"path": "src/a.rs"}
+        }),
+    ));
+    app.update(pi_event(
+        "tool_execution_end",
+        json!({
+            "type": "tool_execution_end",
+            "toolCallId": "tool-1",
+            "toolName": "read",
+            "result": {"content": [{"type": "text", "text": "ok"}]},
+            "isError": false
+        }),
+    ));
+    app.update(pi_event(
+        "agent_end",
+        json!({"type": "agent_end", "messages": [], "willRetry": false}),
+    ));
+
+    assert_eq!(app.state().run_state, RunState::Running);
+    assert!(app.state().session.is_streaming);
     assert!(
         app.state()
             .transcript
@@ -1234,21 +1315,7 @@ fn completed_turn_timing_is_idempotent_and_correlated_by_turn_id() {
             .all(|item| !matches!(item, TranscriptItem::TurnSeparator(_)))
     );
 
-    for duration_ms in [1_000, 2_000] {
-        app.update(AppEvent::Host(RpcEvent {
-            kind: "turn_timing".to_owned(),
-            payload: json!({
-                "type": "turn_timing",
-                "phase": "completed",
-                "scopeId": "session-1",
-                "turnId": "turn-1",
-                "startedAt": "2026-08-04T01:00:00.000Z",
-                "endedAt": "2026-08-04T01:00:02.000Z",
-                "durationMs": duration_ms,
-                "unknownFutureField": true
-            }),
-        }));
-    }
+    app.update(pi_event("agent_settled", json!({"type": "agent_settled"})));
 
     let separators = app
         .state()
@@ -1260,29 +1327,234 @@ fn completed_turn_timing_is_idempotent_and_correlated_by_turn_id() {
         })
         .collect::<Vec<_>>();
     assert_eq!(separators.len(), 1);
-    assert_eq!(separators[0].turn_id, "turn-1");
-    assert_eq!(separators[0].duration_ms, 2_000);
+    assert!(separators[0].turn_id.starts_with("pi-agent-"));
     assert!(!separators[0].estimated);
+    assert!(matches!(
+        app.state().transcript.last(),
+        Some(TranscriptItem::TurnSeparator(_))
+    ));
+    assert_eq!(app.state().run_state, RunState::Idle);
+    assert!(!app.state().session.is_streaming);
+}
 
-    app.update(AppEvent::Host(RpcEvent {
-        kind: "turn_timing".to_owned(),
-        payload: json!({
+#[test]
+fn retry_runs_get_one_separator_only_after_agent_settled() {
+    let mut app = App::new(state());
+    app.update(pi_event("agent_start", json!({"type": "agent_start"})));
+    app.update(pi_event(
+        "message_start",
+        json!({"type": "message_start", "message": {"role": "assistant"}}),
+    ));
+    app.update(pi_event(
+        "message_end",
+        json!({"type": "message_end", "message": {"role": "assistant"}}),
+    ));
+    // Host timing races ahead of the stream; it must not create a boundary.
+    app.update(host_event(
+        "turn_timing",
+        json!({
+            "type": "turn_timing",
             "phase": "completed",
             "scopeId": "session-1",
-            "turnId": "turn-2",
-            "startedAt": "2026-08-04T01:01:00.000Z",
-            "endedAt": "2026-08-04T01:01:00.500Z",
-            "durationMs": 500
+            "turnId": "turn-1",
+            "startedAt": "2026-08-04T01:00:00.000Z",
+            "endedAt": "2026-08-04T01:00:02.000Z",
+            "durationMs": 2_000
         }),
-    }));
-    assert_eq!(
+    ));
+    app.update(pi_event(
+        "agent_end",
+        json!({"type": "agent_end", "messages": [], "willRetry": true}),
+    ));
+    app.update(pi_event(
+        "auto_retry_start",
+        json!({
+            "type": "auto_retry_start",
+            "attempt": 1,
+            "maxAttempts": 2,
+            "delayMs": 0,
+            "errorMessage": "stream dropped"
+        }),
+    ));
+    app.update(pi_event("agent_start", json!({"type": "agent_start"})));
+    app.update(pi_event(
+        "message_start",
+        json!({"type": "message_start", "message": {"role": "assistant"}}),
+    ));
+    app.update(pi_event(
+        "message_update",
+        json!({
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "delta": "retried"}
+        }),
+    ));
+    app.update(pi_event(
+        "message_end",
+        json!({"type": "message_end", "message": {"role": "assistant"}}),
+    ));
+    app.update(pi_event(
+        "agent_end",
+        json!({"type": "agent_end", "messages": [], "willRetry": false}),
+    ));
+
+    assert_eq!(app.state().run_state, RunState::Running);
+    assert!(
         app.state()
             .transcript
             .iter()
-            .filter(|item| matches!(item, TranscriptItem::TurnSeparator(_)))
-            .count(),
-        2
+            .all(|item| !matches!(item, TranscriptItem::TurnSeparator(_)))
     );
+
+    app.update(pi_event("agent_settled", json!({"type": "agent_settled"})));
+    let separators = app
+        .state()
+        .transcript
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::TurnSeparator(separator) => Some(separator),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(separators.len(), 1);
+    assert!(matches!(
+        app.state().transcript.last(),
+        Some(TranscriptItem::TurnSeparator(_))
+    ));
+    let duration_before = separators[0].duration_ms;
+    assert_eq!(app.state().run_state, RunState::Idle);
+    assert!(!app.state().session.is_streaming);
+
+    // A host completed arriving after settled must not add or move a boundary.
+    app.update(host_event(
+        "turn_timing",
+        json!({
+            "type": "turn_timing",
+            "phase": "completed",
+            "scopeId": "session-1",
+            "turnId": "turn-1",
+            "startedAt": "2026-08-04T01:00:00.000Z",
+            "endedAt": "2026-08-04T01:00:09.000Z",
+            "durationMs": 9_000
+        }),
+    ));
+    let separators = app
+        .state()
+        .transcript
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::TurnSeparator(separator) => Some(separator),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(separators.len(), 1);
+    assert_eq!(separators[0].duration_ms, duration_before);
+}
+
+#[test]
+fn unmatched_settled_without_a_tracked_run_is_ignored() {
+    let mut app = App::new(state());
+    app.update(pi_event("agent_settled", json!({"type": "agent_settled"})));
+    app.update(pi_event("agent_settled", json!({"type": "agent_settled"})));
+    assert!(
+        app.state()
+            .transcript
+            .iter()
+            .all(|item| !matches!(item, TranscriptItem::TurnSeparator(_)))
+    );
+    assert_eq!(app.state().run_state, RunState::Idle);
+}
+
+#[test]
+fn attached_mid_run_settled_emits_an_estimated_boundary() {
+    let mut session = state();
+    session.is_streaming = true;
+    let mut app = App::new(session);
+    app.update(pi_event(
+        "agent_end",
+        json!({"type": "agent_end", "messages": [], "willRetry": false}),
+    ));
+    app.update(pi_event("agent_settled", json!({"type": "agent_settled"})));
+
+    let separators = app
+        .state()
+        .transcript
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::TurnSeparator(separator) => Some(separator),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(separators.len(), 1);
+    assert!(separators[0].estimated);
+    assert_eq!(separators[0].duration_ms, 0);
+    assert_eq!(app.state().run_state, RunState::Idle);
+    assert!(!app.state().session.is_streaming);
+}
+
+#[test]
+fn session_activation_resets_pi_turn_state_and_attached_flag() {
+    let mut app = App::new(state());
+    app.update(pi_event("agent_start", json!({"type": "agent_start"})));
+    app.apply_activation("resumed", activation("session-b"));
+
+    // The old run's settled must be ignored after switching to an idle session.
+    app.update(pi_event("agent_settled", json!({"type": "agent_settled"})));
+    assert!(
+        app.state()
+            .transcript
+            .iter()
+            .all(|item| !matches!(item, TranscriptItem::TurnSeparator(_)))
+    );
+
+    // Activating into a streaming session marks attached-mid-run again.
+    let mut streaming = activation("session-c");
+    streaming.state.is_streaming = true;
+    app.apply_activation("resumed", streaming);
+    app.update(pi_event("agent_settled", json!({"type": "agent_settled"})));
+    let separators = app
+        .state()
+        .transcript
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::TurnSeparator(separator) => Some(separator),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(separators.len(), 1);
+    assert!(separators[0].estimated);
+}
+
+#[test]
+fn in_run_compaction_stays_running_until_agent_settled() {
+    let mut app = App::new(state());
+    app.update(pi_event("agent_start", json!({"type": "agent_start"})));
+    app.update(pi_event(
+        "compaction_start",
+        json!({"type": "compaction_start", "reason": "overflow"}),
+    ));
+    app.update(pi_event(
+        "compaction_end",
+        json!({
+            "type": "compaction_end",
+            "reason": "overflow",
+            "aborted": false,
+            "willRetry": true,
+            "result": {
+                "summary": "compacted",
+                "firstKeptEntryId": "entry-4",
+                "tokensBefore": 82_000,
+                "estimatedTokensAfter": 31_000,
+                "details": {
+                    "readFiles": ["src/a.rs"],
+                    "modifiedFiles": ["src/b.rs"]
+                }
+            }
+        }),
+    ));
+    assert_eq!(app.state().run_state, RunState::Running);
+
+    app.update(pi_event("agent_settled", json!({"type": "agent_settled"})));
+    assert_eq!(app.state().run_state, RunState::Idle);
 }
 
 #[test]

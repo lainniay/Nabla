@@ -276,12 +276,14 @@ export class PiExtensionFactory {
           );
         });
         pi.on("agent_start", () => {
-          const startedAtMs = Date.now();
-          activeTurn = {
-            turnId: randomUUID(),
-            startedAt: new Date(startedAtMs).toISOString(),
-            startedAtMs,
-          };
+          if (!activeTurn) {
+            const startedAtMs = Date.now();
+            activeTurn = {
+              turnId: randomUUID(),
+              startedAt: new Date(startedAtMs).toISOString(),
+              startedAtMs,
+            };
+          }
           this.port.send({
             type: "turn_timing",
             phase: "started",
@@ -290,6 +292,11 @@ export class PiExtensionFactory {
           });
         });
         pi.on("agent_end", () => {
+          // INFO: `agent_end` only ends one low-level run; retry, compaction
+          // continuation, or queued messages may still follow. Timing is
+          // finalized on `agent_settled` so live and resumed history agree.
+        });
+        pi.on("agent_settled", () => {
           const endedAtMs = Date.now();
           const started =
             activeTurn ??

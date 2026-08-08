@@ -281,13 +281,33 @@ test("session, context, and permission hooks route to service ports", async () =
   assert.ok(calls.includes("permissions.finishTool"));
 });
 
-test("turn timing hooks emit events and append metrics", () => {
+test("turn timing finalizes only on agent_settled", () => {
   const { events, pi } = createFactory();
   pi.handlers.get("agent_start")?.();
   pi.handlers.get("agent_end")?.();
   assert.ok(events.some((event) => event.type === "turn_timing" && event.phase === "started"));
+  assert.ok(!events.some((event) => event.type === "turn_timing" && event.phase === "completed"));
+  assert.equal(pi.entries.length, 0);
+
+  pi.handlers.get("agent_settled")?.();
   assert.ok(events.some((event) => event.type === "turn_timing" && event.phase === "completed"));
   assert.equal(pi.entries.length, 1);
+});
+
+test("retry runs share one turn timing finalized at agent_settled", () => {
+  const { events, pi } = createFactory();
+  pi.handlers.get("agent_start")?.();
+  pi.handlers.get("agent_end")?.();
+  pi.handlers.get("agent_start")?.();
+  pi.handlers.get("agent_end")?.();
+  assert.equal(pi.entries.length, 0);
+
+  pi.handlers.get("agent_settled")?.();
+  assert.equal(pi.entries.length, 1);
+  assert.equal(
+    events.filter((event) => event.type === "turn_timing" && event.phase === "completed").length,
+    1,
+  );
 });
 
 test("before_agent_start augments the system prompt", () => {

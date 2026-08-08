@@ -224,47 +224,62 @@ fn render_todo_tool(
     ));
     let mut rows = vec![row_from_cells(id, title_cells, width)];
 
-    let item_width = width.saturating_sub(4).max(1);
-    let logical_lines = items
-        .iter()
-        .map(|item| {
-            let (glyph, marker_style, content_style) = match item.status.as_str() {
-                "pending" => (
-                    "○",
-                    CellStyle::foreground(Color::Gray).dim(),
-                    CellStyle::foreground(Color::White),
-                ),
-                "in_progress" => (
-                    "◐",
-                    CellStyle::foreground(palette::SAPPHIRE),
-                    CellStyle::foreground(Color::White),
-                ),
-                _ => (
-                    "●",
-                    CellStyle::foreground(palette::MAUVE),
-                    CellStyle::foreground(Color::Gray).dim().crossed_out(),
-                ),
+    if items.is_empty() {
+        let mut placeholder = styled_cells("  └ ", CellStyle::foreground(Color::Gray).dim());
+        placeholder.extend(styled_cells(
+            "(empty)",
+            CellStyle::foreground(Color::Gray).dim(),
+        ));
+        rows.push(row_from_cells(id, placeholder, width));
+    } else {
+        let item_width = width.saturating_sub(4).max(1);
+        let logical_lines = items
+            .iter()
+            .map(|item| {
+                let (glyph, marker_style, content_style) = match item.status.as_str() {
+                    "pending" => (
+                        "◦",
+                        CellStyle::foreground(Color::Gray).dim(),
+                        CellStyle::foreground(Color::White),
+                    ),
+                    "in_progress" => (
+                        "◦",
+                        CellStyle::foreground(palette::SAPPHIRE),
+                        CellStyle::foreground(Color::White),
+                    ),
+                    _ => (
+                        "•",
+                        CellStyle::foreground(palette::MAUVE),
+                        CellStyle::foreground(Color::Gray).dim().crossed_out(),
+                    ),
+                };
+                let mut cells = vec![
+                    StyledCell::new(glyph, 1, marker_style),
+                    StyledCell::new(" ", 1, CellStyle::default()),
+                ];
+                cells.extend(styled_cells(&item.content, content_style));
+                cells
+            })
+            .collect::<Vec<_>>();
+        let wrapped = wrap_styled_breaking(id, &logical_lines, item_width);
+        let last_line = items.len() - 1;
+        let mut previous_line = usize::MAX;
+        for row in wrapped {
+            let prefix = if row.logical_line == previous_line {
+                styled_cells("    ", CellStyle::default())
+            } else {
+                previous_line = row.logical_line;
+                let branch = if row.logical_line == last_line {
+                    "  └ "
+                } else {
+                    "  ├ "
+                };
+                styled_cells(branch, CellStyle::foreground(Color::Gray).dim())
             };
-            let mut cells = vec![
-                StyledCell::new(glyph, 1, marker_style),
-                StyledCell::new(" ", 1, CellStyle::default()),
-            ];
-            cells.extend(styled_cells(&item.content, content_style));
-            cells
-        })
-        .collect::<Vec<_>>();
-    let wrapped = wrap_styled_breaking(id, &logical_lines, item_width);
-    let mut previous_line = usize::MAX;
-    for row in wrapped {
-        let prefix = if row.logical_line == previous_line {
-            "    "
-        } else {
-            previous_line = row.logical_line;
-            "  "
-        };
-        let mut cells = styled_cells(prefix, CellStyle::default());
-        cells.extend(row.cells);
-        rows.push(row_from_cells(id, cells, width));
+            let mut cells = prefix;
+            cells.extend(row.cells);
+            rows.push(row_from_cells(id, cells, width));
+        }
     }
 
     if matches!(tool.status, ToolStatus::Failed | ToolStatus::Denied) {

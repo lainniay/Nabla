@@ -1,7 +1,8 @@
 use crate::state::ConnectionState;
 use crate::ui::{
+    palette,
     text::{display_width, truncate},
-    types::{CellStyle, Color, StyledCell, VisualRow},
+    types::{CellStyle, StyledCell, VisualRow},
 };
 
 use super::{append_text_cells, view_model::SceneViewModel};
@@ -34,10 +35,10 @@ pub(crate) fn status_row(view: &SceneViewModel, width: u16, animation_frame: u8)
     let right_width = display_width(&right);
     let margin = 1usize;
     let available = usize::from(width).saturating_sub(margin * 2);
-    let muted = CellStyle::foreground(Color::Gray).dim();
+    let muted = CellStyle::foreground(palette::GRAY_MUTED).dim();
     let mut cells = vec![StyledCell::new(" ".repeat(margin), margin as u16, muted)];
     if left_width.saturating_add(right_width).saturating_add(2) <= available {
-        append_text_cells(&mut cells, &left, CellStyle::foreground(Color::Cyan));
+        append_text_cells(&mut cells, &left, CellStyle::foreground(palette::GRAY_TEXT));
         let padding = available.saturating_sub(left_width + right_width);
         cells.push(StyledCell::new(" ".repeat(padding), padding as u16, muted));
         append_text_cells(&mut cells, &right, muted);

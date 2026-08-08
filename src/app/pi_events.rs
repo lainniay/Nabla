@@ -20,10 +20,14 @@ impl App {
             "agent_start" => {
                 self.state.run_state = RunState::Running;
                 self.state.session.is_streaming = true;
+                if !matches!(self.pi_turn, PiTurnState::Active { .. }) {
+                    self.begin_pi_turn_timing();
+                }
             }
             "agent_end" => {
-                self.state.run_state = RunState::Idle;
-                self.state.session.is_streaming = false;
+                // INFO: A low-level agent run may be followed by retry, compaction
+                // continuation, or queued messages. The session stays Running and
+                // the turn separator is emitted by `agent_settled` (Pi FIFO order).
                 if let Some(approval) = self.state.approval.take()
                     && let Some(tool) = self.find_tool_mut(Some(&approval.tool_call_id))
                     && tool.status == ToolStatus::WaitingApproval
@@ -38,6 +42,42 @@ impl App {
                 {
                     self.state.question = None;
                 }
+            }
+            "agent_settled" => {
+                let pi_turn = std::mem::replace(&mut self.pi_turn, PiTurnState::Inactive);
+                match pi_turn {
+                    PiTurnState::Active {
+                        turn_id,
+                        started_at,
+                        started,
+                    } => {
+                        let duration_ms =
+                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        self.push_turn_separator(turn_id, started_at, duration_ms, false);
+                    }
+                    PiTurnState::AttachedUnknown => {
+                        // Attached mid-run: the start time is unknown, so this is an
+                        // estimated <1s boundary rather than a fabricated duration.
+                        let wall_clock_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis();
+                        let turn_id = format!("pi-agent-{}", self.next_pi_turn_id);
+                        self.next_pi_turn_id = self.next_pi_turn_id.saturating_add(1);
+                        self.push_turn_separator(
+                            turn_id,
+                            format!("unix-ms:{wall_clock_ms}"),
+                            0,
+                            true,
+                        );
+                    }
+                    PiTurnState::Inactive => {
+                        // Stale or duplicate settled without a tracked run: ignore.
+                        return;
+                    }
+                }
+                self.state.run_state = RunState::Idle;
+                self.state.session.is_streaming = false;
             }
             "queue_update" => {
                 let steering = event.payload["steering"].as_array().map_or(0, Vec::len);
@@ -120,9 +160,12 @@ impl App {
                 let reason =
                     string_field(&event.payload, "reason").unwrap_or_else(|| "unknown".to_owned());
                 let aborted = event.payload["aborted"].as_bool().unwrap_or(false);
-                let will_retry = event.payload["willRetry"].as_bool().unwrap_or(false);
                 if aborted {
-                    self.state.run_state = RunState::Idle;
+                    self.state.run_state = if self.state.session.is_streaming {
+                        RunState::Running
+                    } else {
+                        RunState::Idle
+                    };
                     self.state.transcript.push(TranscriptItem::Error(format!(
                         "{} compaction was aborted.",
                         compaction_reason_label(&reason)
@@ -144,7 +187,7 @@ impl App {
                             self.state.context.usage_state = ContextUsageState::Recalculating;
                             self.state.context.actual_tokens = None;
                             self.state.context.actual_percent = None;
-                            self.state.run_state = if will_retry {
+                            self.state.run_state = if self.state.session.is_streaming {
                                 RunState::Running
                             } else {
                                 RunState::Idle

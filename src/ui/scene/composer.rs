@@ -42,7 +42,7 @@ pub(crate) fn composer_rows(
         rows.truncate(usize::from(height.max(1)));
         for row in &mut rows {
             let mut cells = vec![
-                StyledCell::new("›", 1, accent.bold()),
+                StyledCell::new("›", 1, accent),
                 StyledCell::new(" ", 1, accent),
             ];
             cells.extend(std::mem::take(&mut row.cells));
@@ -81,7 +81,7 @@ pub(crate) fn composer_rows(
     for (visible_index, row) in visible_content.iter().enumerate() {
         let mut cells = vec![StyledCell::new("│", 1, border)];
         if first_content_row + visible_index == 0 {
-            cells.push(StyledCell::new("›", 1, accent.bold()));
+            cells.push(StyledCell::new("›", 1, accent));
             cells.push(StyledCell::new(" ", 1, accent));
         } else {
             cells.push(StyledCell::new("  ", 2, text_style));

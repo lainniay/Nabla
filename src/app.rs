@@ -176,6 +176,8 @@ pub struct App {
     state: AppState,
     local_command_timing: Option<LocalCommandTiming>,
     next_local_turn_id: u64,
+    pi_turn: PiTurnState,
+    next_pi_turn_id: u64,
 }
 
 struct LocalCommandTiming {
@@ -183,6 +185,19 @@ struct LocalCommandTiming {
     started_at: String,
     started: Instant,
     completion: LocalCommandCompletion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PiTurnState {
+    Inactive,
+    Active {
+        turn_id: String,
+        started_at: String,
+        started: Instant,
+    },
+    /// Attached while Pi was already streaming; the in-flight turn has no
+    /// known start time, so its settled boundary is an estimated marker.
+    AttachedUnknown,
 }
 
 #[derive(Clone, Copy)]
@@ -223,18 +238,32 @@ impl LocalCommandCompletion {
 
 impl App {
     pub fn new(session: PiState) -> Self {
+        let pi_turn = if session.is_streaming {
+            PiTurnState::AttachedUnknown
+        } else {
+            PiTurnState::Inactive
+        };
         Self {
             state: AppState::new(session),
             local_command_timing: None,
             next_local_turn_id: 1,
+            pi_turn,
+            next_pi_turn_id: 1,
         }
     }
 
     pub fn with_commands(session: PiState, commands: Vec<DiscoveredCommand>) -> Self {
+        let pi_turn = if session.is_streaming {
+            PiTurnState::AttachedUnknown
+        } else {
+            PiTurnState::Inactive
+        };
         Self {
             state: AppState::with_commands(session, commands),
             local_command_timing: None,
             next_local_turn_id: 1,
+            pi_turn,
+            next_pi_turn_id: 1,
         }
     }
 
@@ -385,6 +414,30 @@ impl App {
     }
 
     fn push_local_turn_separator(&mut self, turn_id: String, started_at: String, duration_ms: u64) {
+        self.push_turn_separator(turn_id, started_at, duration_ms, false);
+    }
+
+    fn begin_pi_turn_timing(&mut self) {
+        let wall_clock_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let turn_id = format!("pi-agent-{}", self.next_pi_turn_id);
+        self.next_pi_turn_id = self.next_pi_turn_id.saturating_add(1);
+        self.pi_turn = PiTurnState::Active {
+            turn_id,
+            started_at: format!("unix-ms:{wall_clock_ms}"),
+            started: Instant::now(),
+        };
+    }
+
+    fn push_turn_separator(
+        &mut self,
+        turn_id: String,
+        started_at: String,
+        duration_ms: u64,
+        estimated: bool,
+    ) {
         let ended_at_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -396,7 +449,7 @@ impl App {
                 started_at,
                 ended_at: format!("unix-ms:{ended_at_ms}"),
                 duration_ms,
-                estimated: false,
+                estimated,
             }));
     }
 

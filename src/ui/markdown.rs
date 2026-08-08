@@ -47,6 +47,10 @@ pub struct IncrementalMarkdown {
     stable_blocks: Vec<MarkdownBlock>,
     stable_prefix_bytes: usize,
     scanned_bytes: usize,
+    /// Whether the last update sealed the message. The first sealed update
+    /// discards incremental state and re-parses the full source canonically;
+    /// later sealed updates reuse it.
+    sealed: bool,
 }
 
 impl IncrementalMarkdown {
@@ -54,7 +58,7 @@ impl IncrementalMarkdown {
         let append = source.starts_with(&self.source)
             && self.stable_prefix_bytes <= source.len()
             && source.is_char_boundary(self.stable_prefix_bytes);
-        if !append {
+        if !append || (finished && !self.sealed) {
             self.stable_blocks.clear();
             self.stable_prefix_bytes = 0;
         }
@@ -79,6 +83,7 @@ impl IncrementalMarkdown {
         self.stable_prefix_bytes = stable_prefix_bytes;
         self.source.clear();
         self.source.push_str(source);
+        self.sealed = finished;
 
         debug_assert!(source.is_char_boundary(stable_prefix_bytes));
         MarkdownScan {
@@ -150,6 +155,26 @@ pub fn scan(source: &str, finished: bool) -> MarkdownScan {
         // mutable until the message is sealed.
         stable_prefix_bytes = reference_sensitive.start;
     }
+    if !finished {
+        let unfinished_start = source.rfind('\n').map_or(0, |index| index + 1);
+        if !source.is_empty()
+            && !source.ends_with('\n')
+            && let Some(index) = blocks.iter().position(|block| {
+                block.kind == MarkdownBlockKind::Table
+                    && block.complete
+                    && block.end == unfinished_start
+                    && block.end <= stable_prefix_bytes
+            })
+        {
+            // pulldown-cmark closes a table at the end of its last row line
+            // even when the following line is an unfinished `|` that a later
+            // append can turn into a body row. Hold the whole table (and mark
+            // it incomplete so it stays out of scrollback) until that line is
+            // terminated by a newline, at which point its parse is permanent.
+            stable_prefix_bytes = blocks[index].start;
+            blocks[index].complete = false;
+        }
+    }
     MarkdownScan {
         blocks,
         stable_prefix_bytes,
@@ -174,6 +199,119 @@ fn contains_reference_sensitive_syntax(source: &str) -> bool {
     })
 }
 
+/// LLMs frequently split one logical table into fragments separated by a
+/// blank line (often repeating the `|---|---|` separator). CommonMark ends the
+/// table at that blank, so the tail renders as raw `| ... |` paragraphs and
+/// only the first fragment enters native scrollback. Merge such fragments for
+/// display: drop the interior blank line(s) and repeated separators, but only
+/// when the merged source still parses as a single table block.
+pub(crate) fn normalize_table_continuations(source: &str) -> Cow<'_, str> {
+    if !source.contains('|') || !source.contains('\n') {
+        return Cow::Borrowed(source);
+    }
+    let lines = line_ranges(source);
+    let mut output = String::with_capacity(source.len());
+    let mut changed = false;
+    // Blank and repeated-separator lines buffered until the next line decides
+    // whether they sit inside one table (dropped) or terminate it (kept).
+    let mut pending_start = None;
+    let mut previous_table_like = false;
+    let mut header_separator_seen = false;
+    // Candidate byte ranges of merged fragments; each must parse as one table.
+    let mut merged = Vec::<(usize, usize)>::new();
+    let mut merge_start = 0usize;
+    let mut merge_end = 0usize;
+    let mut merging = false;
+
+    for &(start, end) in &lines {
+        let trimmed = source[start..end].trim();
+        if trimmed.is_empty() {
+            if pending_start.is_none() {
+                pending_start = Some(start);
+            }
+            continue;
+        }
+        let table_like = trimmed.starts_with('|');
+        let separator = table_like && is_table_separator(trimmed);
+        if table_like && previous_table_like {
+            if separator && header_separator_seen {
+                // A repeated section separator is only dropped once the next
+                // line confirms another table row follows.
+                if pending_start.is_none() {
+                    pending_start = Some(start);
+                }
+                continue;
+            }
+            if pending_start.take().is_some() {
+                // A table row directly after buffered blanks/separators joins
+                // the previous table fragment.
+                changed = true;
+                if !merging {
+                    merging = true;
+                    merge_start = output.len();
+                }
+            }
+        }
+        if let Some(blank_start) = pending_start.take() {
+            output.push_str(&source[blank_start..start]);
+        }
+        if separator {
+            header_separator_seen = true;
+        }
+        output.push_str(&source[start..end]);
+        if merging {
+            merge_end = output.len();
+        }
+        previous_table_like = table_like;
+        if !table_like {
+            if merging {
+                merged.push((merge_start, merge_end));
+                merging = false;
+            }
+            header_separator_seen = false;
+        }
+    }
+    if let Some(blank_start) = pending_start.take() {
+        output.push_str(&source[blank_start..]);
+    }
+    if merging {
+        merged.push((merge_start, merge_end));
+    }
+    if !changed {
+        return Cow::Borrowed(source);
+    }
+    // Accept only when every merged fragment lies inside one parsed table.
+    let table_spans = scan(&output, true)
+        .blocks
+        .iter()
+        .filter(|block| block.kind == MarkdownBlockKind::Table)
+        .map(|block| (block.start, block.end))
+        .collect::<Vec<_>>();
+    if merged.is_empty()
+        || merged.iter().any(|(start, end)| {
+            !table_spans
+                .iter()
+                .any(|(table_start, table_end)| *table_start <= *start && *end <= *table_end)
+        })
+    {
+        return Cow::Borrowed(source);
+    }
+    Cow::Owned(output)
+}
+
+fn is_table_separator(line: &str) -> bool {
+    let line = line.trim();
+    if line.len() < 3 || !line.starts_with('|') || !line.ends_with('|') {
+        return false;
+    }
+    let body = &line[1..line.len() - 1];
+    !body.is_empty()
+        && body.contains('-')
+        && body
+            .chars()
+            .all(|character| matches!(character, '-' | ':' | ' ' | '|'))
+}
+
 /// Render CommonMark plus the extensions used by Codex into terminal-native
 /// rows. Parsing is intentionally repeated for the mutable streaming tail;
 /// sealed transcript blocks subsequently move into native terminal history.
@@ -183,7 +321,8 @@ pub fn render(
     width: u16,
     base_style: CellStyle,
 ) -> Vec<VisualRow> {
-    let normalized = unwrap_markdown_table_fences(source);
+    let normalized_source = normalize_table_continuations(source);
+    let normalized = unwrap_markdown_table_fences(normalized_source.as_ref());
     let mut writer = MarkdownWriter::new(component_id, width, base_style);
     for event in Parser::new_ext(&normalized, markdown_options()) {
         writer.handle_event(event);
@@ -831,8 +970,10 @@ impl<'a> MarkdownWriter<'a> {
         let available = usize::from(self.width)
             .saturating_sub(self.continuation_prefix_width())
             .max(1);
-        let gap = 2usize;
         let minimum = 3usize;
+        let overhead = column_count
+            .saturating_mul(2) // one space of padding on each side
+            .saturating_add(column_count.saturating_add(1)); // vertical borders
         let mut widths = (0..column_count)
             .map(|column| {
                 std::iter::once(&header[column])
@@ -843,12 +984,15 @@ impl<'a> MarkdownWriter<'a> {
                     .max(minimum)
             })
             .collect::<Vec<_>>();
-        let gaps = gap.saturating_mul(column_count.saturating_sub(1));
-        if column_count.saturating_mul(minimum).saturating_add(gaps) > available {
+        if column_count
+            .saturating_mul(minimum)
+            .saturating_add(overhead)
+            > available
+        {
             self.render_table_as_records(&header, &rows);
             return;
         }
-        while widths.iter().sum::<usize>().saturating_add(gaps) > available {
+        while widths.iter().sum::<usize>().saturating_add(overhead) > available {
             let Some((index, _)) = widths
                 .iter()
                 .enumerate()
@@ -864,24 +1008,29 @@ impl<'a> MarkdownWriter<'a> {
             return;
         }
 
+        self.render_table_border('╭', '┬', '╮', &widths);
         self.render_table_row(&header, &widths, &alignments, true);
-        let mut separator = Vec::new();
-        for (index, width) in widths.iter().enumerate() {
-            if index > 0 {
-                separator.extend(styled_cells(
-                    &" ".repeat(gap),
-                    CellStyle::foreground(palette::GRAY_FAINT),
-                ));
+        self.render_table_border('├', '┼', '┤', &widths);
+        for (row_index, row) in rows.iter().enumerate() {
+            if row_index > 0 {
+                self.render_table_border('├', '┼', '┤', &widths);
             }
-            separator.extend(styled_cells(
-                &"━".repeat(*width),
-                CellStyle::foreground(palette::GRAY_FAINT),
-            ));
-        }
-        self.push_preformatted(separator);
-        for row in &rows {
             self.render_table_row(row, &widths, &alignments, false);
         }
+        self.render_table_border('╰', '┴', '╯', &widths);
+    }
+
+    fn render_table_border(&mut self, left: char, join: char, right: char, widths: &[usize]) {
+        let style = CellStyle::foreground(palette::GRAY_FAINT);
+        let mut output = styled_cells(&left.to_string(), style);
+        for (index, width) in widths.iter().enumerate() {
+            if index > 0 {
+                output.extend(styled_cells(&join.to_string(), style));
+            }
+            output.extend(styled_cells(&"─".repeat(width + 2), style));
+        }
+        output.extend(styled_cells(&right.to_string(), style));
+        self.push_preformatted(output);
     }
 
     fn render_table_row(
@@ -898,22 +1047,25 @@ impl<'a> MarkdownWriter<'a> {
             .collect::<Vec<_>>();
         let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
         for line_index in 0..height {
-            let mut output = Vec::new();
+            let mut output = styled_cells("│", CellStyle::foreground(palette::GRAY_FAINT));
             for column in 0..widths.len() {
-                if column > 0 {
-                    output.extend(styled_cells("  ", self.base_style));
-                }
                 let mut cells = wrapped[column].get(line_index).cloned().unwrap_or_default();
                 if header {
                     for cell in &mut cells {
                         cell.style = patch_style(cell.style, CellStyle::default().bold());
                     }
                 }
+                output.extend(styled_cells(" ", self.base_style));
                 output.extend(align_cells(
                     cells,
                     widths[column],
                     alignments[column],
                     self.base_style,
+                ));
+                output.extend(styled_cells(" ", self.base_style));
+                output.extend(styled_cells(
+                    "│",
+                    CellStyle::foreground(palette::GRAY_FAINT),
                 ));
             }
             self.push_preformatted(output);
@@ -1317,6 +1469,79 @@ mod tests {
     }
 
     #[test]
+    fn table_stays_mutable_across_a_lone_pipe_frame_and_finishes_canonical() {
+        let final_source = "| a | b |\n|---|---|\n| value | description |";
+        let frames = [
+            "| a | b |\n|---|---|\n",
+            "| a | b |\n|---|---|\n|",
+            "| a | b |\n|---|---|\n| value",
+            final_source,
+        ];
+        let mut incremental = IncrementalMarkdown::default();
+        for frame in frames {
+            let scan = incremental.update(frame, false);
+            assert_eq!(scan.stable_prefix_bytes, 0, "{frame:?}");
+            assert_eq!(scan.blocks[0].kind, MarkdownBlockKind::Table, "{frame:?}");
+            assert!(scan.blocks.iter().all(|block| !block.complete), "{frame:?}");
+        }
+        let finished = incremental.update(final_source, true);
+        let fresh = scan(final_source, true);
+        assert_eq!(finished.blocks, fresh.blocks);
+        assert_eq!(finished.stable_prefix_bytes, final_source.len());
+    }
+
+    #[test]
+    fn table_holdback_releases_once_the_trailing_line_terminates() {
+        let header = "| a | b |\n|---|---|\n";
+        let mut incremental = IncrementalMarkdown::default();
+        assert_eq!(
+            incremental
+                .update(&format!("{header}|"), false)
+                .stable_prefix_bytes,
+            0
+        );
+        let scan = incremental.update(&format!("{header}|\n"), false);
+        assert!(scan.blocks[0].complete);
+        assert_eq!(scan.stable_prefix_bytes, header.len());
+    }
+
+    #[test]
+    fn every_prefix_streaming_converges_to_fresh_parse_for_table_corpus() {
+        let cases = [
+            "| a | b |\n|---|---|\n| 1 | 2 |",
+            "| a | b |\n|---|---|\n| 1 |",
+            "| a |\n|---|\n| 1 |",
+            "a | b\n--- | ---\n1 | 2",
+            "| 名 | 值 |\n|---|---|\n| 你好 👩🏽‍💻 | x |",
+            "| a | b |\n|---|---|\n| `x|y` | \\| z |",
+            "> | a | b |\n> |---|---|\n> | 1 | 2 |",
+            "- | a | b |\n  |---|---|\n  | 1 | 2 |",
+            "| a | b |\n|---|---|\n| 1 | 2 |\n\n| c | d |\n|---|---|\n| 3 | 4 |",
+            "| a | b |\n|---|---|\n| 1 | 2 |\n\nprose",
+        ];
+        for source in cases {
+            let mut incremental = IncrementalMarkdown::default();
+            for (index, _) in source.char_indices() {
+                incremental.update(&source[..index], false);
+            }
+            let finished = incremental.update(source, true);
+            let fresh = scan(source, true);
+            assert_eq!(finished.blocks, fresh.blocks, "{source:?}");
+            assert_eq!(finished.stable_prefix_bytes, source.len(), "{source:?}");
+        }
+    }
+
+    #[test]
+    fn finished_message_is_only_fully_rescanned_once() {
+        let mut incremental = IncrementalMarkdown::default();
+        incremental.update("unfinished", false);
+        incremental.update("unfinished", true);
+        let scanned = incremental.scanned_bytes();
+        incremental.update("unfinished", true);
+        assert_eq!(incremental.scanned_bytes(), scanned);
+    }
+
+    #[test]
     fn table_fence_detection_uses_the_parser() {
         for source in [
             "| a | b |\n|---|---|\n| 1 |",
@@ -1476,10 +1701,7 @@ mod tests {
         assert!(style_for(&rows, "bold").unwrap().bold);
         assert!(style_for(&rows, "italic").unwrap().italic);
         assert!(style_for(&rows, "removed").unwrap().crossed_out);
-        assert_eq!(
-            style_for(&rows, "code").unwrap().foreground,
-            palette::MAUVE
-        );
+        assert_eq!(style_for(&rows, "code").unwrap().foreground, palette::MAUVE);
         assert_eq!(
             style_for(&rows, "fn main() {}").unwrap().foreground,
             palette::MAUVE
@@ -1529,7 +1751,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(wide_text.contains("Name"));
-        assert!(wide_text.contains("━━━━"));
+        assert!(wide_text.contains("╭"));
+        assert!(wide_text.contains("│"));
+        assert!(wide_text.contains("├"));
+        assert!(wide_text.contains("╰"));
         assert!(wide_text.contains("parser"));
 
         let narrow = render(
@@ -1602,7 +1827,8 @@ mod tests {
             .join("\n");
         assert!(long_text.contains("Path:"), "{long_text:?}");
         assert!(long_text.contains("src/"), "{long_text:?}");
-        assert!(!long_text.contains("━━━"), "{long_text:?}");
+        assert!(!long_text.contains("┌"), "{long_text:?}");
+        assert!(!long_text.contains("│"), "{long_text:?}");
 
         let short = render(
             "| a | b | c |\n|---|---|---|\n| 1 | 2 | 3 |",
@@ -1615,7 +1841,8 @@ mod tests {
             .map(VisualRow::plain_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(short_text.contains("━━━"), "{short_text:?}");
+        assert!(short_text.contains("╭"), "{short_text:?}");
+        assert!(short_text.contains("│"), "{short_text:?}");
     }
 
     #[test]
@@ -1633,7 +1860,9 @@ mod tests {
             .join("\n");
 
         assert!(text.contains("Key"));
-        assert!(text.contains("━━━━"));
+        assert!(text.contains("╭"));
+        assert!(text.contains("│"));
+        assert!(text.contains("╰"));
         assert!(text.contains("mode"));
         assert!(!text.contains("```"));
 
@@ -1677,5 +1906,105 @@ mod tests {
             assert!(!rows.is_empty());
             assert!(rows.iter().all(|row| row.display_width() <= 32));
         }
+    }
+
+    #[test]
+    fn split_table_fragments_normalize_into_one_contiguous_table() {
+        let head = concat!(
+            "| 注入块 | 内容 | 性质 |\n",
+            "|---|---|---|\n",
+            "| STANDARD_INSTRUCTIONS | Nabla 宿主行为说明（跟随 Pi 正常交互行为、profiles 使用方式） | 硬编码字符串 |\n",
+            "| FILE_REFERENCE_INSTRUCTIONS | NABLA_FILE_REFERENCES_V1 信封解析规则 | 硬编码字符串 |\n",
+            "| WORKSPACE_COMMAND_INSTRUCTIONS | 工作区命令用法 | 硬编码字符串 |\n",
+            "| PATH_INSTRUCTIONS | 路径约定 | 硬编码字符串 |\n",
+        );
+        let tail = concat!(
+            "| buildWorkspaceContext(cwd) | 目录树（1600 token 预算、深度 2、每目录 20 项） | 动态但有预算 |\n",
+            "| subagentCatalogPrompt() | 子代理目录（profiles 描述） | 动态拼接 |\n",
+            "| 计划模式下 | buildPlanInstructions（替换 STANDARD） | 条件注入 |",
+        );
+        for source in [
+            format!("{head}\n\n{tail}"),
+            format!("{head}\n\n|---|---|---|\n{tail}"),
+            format!("{head}\n\n\n|---|---|---|\n{tail}"),
+        ] {
+            let normalized = normalize_table_continuations(&source);
+            assert_ne!(normalized.as_ref(), source.as_str(), "{source:?}");
+            let parsed = scan(normalized.as_ref(), true);
+            assert_eq!(parsed.blocks.len(), 1, "{source:?}");
+            assert_eq!(
+                parsed.blocks[0].kind,
+                MarkdownBlockKind::Table,
+                "{source:?}"
+            );
+            for width in [40u16, 60, 80, 120, 160] {
+                let rows = render(
+                    normalized.as_ref(),
+                    "injections",
+                    width,
+                    CellStyle::foreground(Color::White),
+                );
+                let texts = rows.iter().map(VisualRow::plain_text).collect::<Vec<_>>();
+                assert!(
+                    !texts.iter().any(|text| text.contains("|---|")),
+                    "raw separator remains at width {width}: {texts:?}"
+                );
+                for (index, text) in texts.iter().enumerate() {
+                    if index > 0
+                        && index + 1 < texts.len()
+                        && text.trim().is_empty()
+                        && texts[index - 1].contains('│')
+                        && texts[index + 1].contains('│')
+                    {
+                        panic!("interior blank row at width {width}: {texts:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn table_normalization_leaves_other_blank_separated_content_alone() {
+        for source in [
+            "| a |\n|---|\n| 1 |\n\nprose",
+            "| a |\n\n| b |",
+            "prose | a\n\n| b |",
+            "| a |\n|---|\n| 1 |\n\nprose\n\n| b |\n|---|\n| 2 |",
+        ] {
+            assert_eq!(
+                normalize_table_continuations(source).as_ref(),
+                source,
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_table_fragments_stream_and_seal_as_one_table() {
+        let head = concat!(
+            "| 注入块 | 内容 | 性质 |\n",
+            "|---|---|---|\n",
+            "| STANDARD_INSTRUCTIONS | Nabla 宿主行为说明 | 硬编码字符串 |\n",
+            "| FILE_REFERENCE_INSTRUCTIONS | NABLA_FILE_REFERENCES_V1 信封解析规则 | 硬编码字符串 |\n",
+            "| WORKSPACE_COMMAND_INSTRUCTIONS | 工作区命令用法 | 硬编码字符串 |\n",
+            "| PATH_INSTRUCTIONS | 路径约定 | 硬编码字符串 |\n",
+        );
+        let tail = concat!(
+            "| buildWorkspaceContext(cwd) | 目录树（1600 token 预算、深度 2、每目录 20 项） | 动态但有预算 |\n",
+            "| subagentCatalogPrompt() | 子代理目录（profiles 描述） | 动态拼接 |\n",
+            "| 计划模式下 | buildPlanInstructions（替换 STANDARD） | 条件注入 |",
+        );
+        let source = format!("{head}\n\n|---|---|---|\n{tail}");
+        let mut incremental = IncrementalMarkdown::default();
+        for (index, _) in source.char_indices() {
+            let prefix = normalize_table_continuations(&source[..index]);
+            incremental.update(prefix.as_ref(), false);
+        }
+        let normalized = normalize_table_continuations(&source);
+        let finished = incremental.update(normalized.as_ref(), true);
+        let fresh = scan(normalized.as_ref(), true);
+        assert_eq!(finished.blocks, fresh.blocks);
+        assert_eq!(finished.blocks.len(), 1);
+        assert_eq!(finished.blocks[0].kind, MarkdownBlockKind::Table);
     }
 }

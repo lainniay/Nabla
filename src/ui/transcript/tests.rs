@@ -829,9 +829,21 @@ fn todo_tools_render_three_state_markers_and_strikethrough() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("• Create TODO"), "{text}");
-    assert!(text.contains("○ plan"), "{text}");
-    assert!(text.contains("◐ build"), "{text}");
-    assert!(text.contains("● ship"), "{text}");
+    assert!(text.contains("├ ◦ plan"), "{text}");
+    assert!(text.contains("├ ◦ build"), "{text}");
+    assert!(text.contains("└ • ship"), "{text}");
+    assert_eq!(text.matches('└').count(), 1, "{text}");
+    assert_eq!(text.matches('├').count(), 2, "{text}");
+    let build = rows
+        .iter()
+        .find(|row| row.plain_text().contains("build"))
+        .expect("build row");
+    assert!(
+        build
+            .cells
+            .iter()
+            .any(|cell| cell.style.foreground == palette::SAPPHIRE)
+    );
     let ship = rows
         .iter()
         .find(|row| row.plain_text().contains("ship"))
@@ -883,7 +895,7 @@ fn todo_tools_render_from_args_while_running_and_failure_rows() {
     };
     let rows = render_tool("todo", &running, 60, ToolRenderMode::Compact, 2);
     assert!(rows[0].plain_text().contains("Edit TODO"));
-    assert!(rows.iter().any(|row| row.plain_text().contains("○ plan")));
+    assert!(rows.iter().any(|row| row.plain_text().contains("└ ◦ plan")));
 
     let failed = ToolExecution {
         id: "todo-failed".to_owned(),
@@ -899,8 +911,33 @@ fn todo_tools_render_from_args_while_running_and_failure_rows() {
         .map(VisualRow::plain_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("○ plan"), "{text}");
+    assert!(text.contains("└ ◦ plan"), "{text}");
     assert!(text.contains("failed"), "{text}");
+}
+
+#[test]
+fn todo_tools_render_empty_placeholder() {
+    let tool = ToolExecution {
+        id: "todo-empty".to_owned(),
+        name: "todo_write".to_owned(),
+        args: json!({ "todos": [] }),
+        output: json!({ "action": "updated", "todos": [] }).to_string(),
+        diff: None,
+        status: ToolStatus::Succeeded,
+    };
+
+    let rows = render_tool("todo", &tool, 60, ToolRenderMode::Compact, 0);
+    let text = rows
+        .iter()
+        .map(VisualRow::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("• Edit TODO"), "{text}");
+    assert!(text.contains("└ (empty)"), "{text}");
+    assert_eq!(text.matches('└').count(), 1, "{text}");
+
+    let summary = render_tool("todo", &tool, 60, ToolRenderMode::Summary, 0);
+    assert_eq!(summary[0].plain_text(), "• Edit TODO · empty");
 }
 
 #[test]
@@ -1498,4 +1535,53 @@ fn plan_transcript_hides_status_and_expands_handoff() {
     .join("\n");
     assert!(expanded.contains("## Handoff"));
     assert!(expanded.contains("Carry the Plan into the implementation turn."));
+}
+
+#[test]
+fn split_table_fragments_commit_as_one_contiguous_table() {
+    let mut state = state();
+    let head = concat!(
+        "| 注入块 | 内容 | 性质 |\n",
+        "|---|---|---|\n",
+        "| STANDARD_INSTRUCTIONS | Nabla 宿主行为说明（跟随 Pi 正常交互行为、profiles 使用方式） | 硬编码字符串 |\n",
+        "| FILE_REFERENCE_INSTRUCTIONS | NABLA_FILE_REFERENCES_V1 信封解析规则 | 硬编码字符串 |\n",
+        "| WORKSPACE_COMMAND_INSTRUCTIONS | 工作区命令用法 | 硬编码字符串 |\n",
+        "| PATH_INSTRUCTIONS | 路径约定 | 硬编码字符串 |\n",
+    );
+    let tail = concat!(
+        "| buildWorkspaceContext(cwd) | 目录树（1600 token 预算、深度 2、每目录 20 项） | 动态但有预算 |\n",
+        "| subagentCatalogPrompt() | 子代理目录（profiles 描述） | 动态拼接 |\n",
+        "| 计划模式下 | buildPlanInstructions（替换 STANDARD） | 条件注入 |",
+    );
+    state
+        .transcript
+        .push(TranscriptItem::Assistant(AssistantMessage {
+            text: format!("{head}\n\n|---|---|---|\n{tail}"),
+            text_revision: 1,
+            complete: true,
+            ..AssistantMessage::default()
+        }));
+    let mut store = TranscriptStore::default();
+    assert_eq!(store.sync(&state), TranscriptSyncOutcome::AppendOnly);
+    let rows = store
+        .render_canonical_history(120)
+        .iter()
+        .map(VisualRow::plain_text)
+        .collect::<Vec<_>>();
+    assert!(rows.iter().any(|row| row.contains("PATH_INSTRUCTIONS")));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("buildWorkspaceContext(cwd)"))
+    );
+    assert!(!rows.iter().any(|row| row.contains("|---|")));
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0
+            && index + 1 < rows.len()
+            && row.trim().is_empty()
+            && rows[index - 1].contains('│')
+            && rows[index + 1].contains('│')
+        {
+            panic!("interior blank row in canonical history: {rows:?}");
+        }
+    }
 }

@@ -619,6 +619,11 @@ impl App {
             append_history_item_to(&mut transcript, item, epoch, &mut next_assistant_message_id);
         }
 
+        self.pi_turn = if state.is_streaming {
+            PiTurnState::AttachedUnknown
+        } else {
+            PiTurnState::Inactive
+        };
         // Construct the target transcript before publishing any session fields.
         // Observers therefore see either the previous canonical session or the
         // complete replacement, never an append-only mixture.

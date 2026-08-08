@@ -14,34 +14,9 @@ impl App {
             return effects;
         }
         match event.kind.as_str() {
-            "turn_timing" => {
-                if event.payload["phase"].as_str() != Some("completed") {
-                    return effects;
-                }
-                if let Ok(separator) =
-                    serde_json::from_value::<TurnSeparator>(event.payload.clone())
-                {
-                    if let Some(current) =
-                        self.state
-                            .transcript
-                            .iter_mut()
-                            .find_map(|item| match item {
-                                TranscriptItem::TurnSeparator(current)
-                                    if current.turn_id == separator.turn_id =>
-                                {
-                                    Some(current)
-                                }
-                                _ => None,
-                            })
-                    {
-                        *current = separator;
-                    } else {
-                        self.state
-                            .transcript
-                            .push(TranscriptItem::TurnSeparator(separator));
-                    }
-                }
-            }
+            // INFO: `turn_timing` is metadata only (TS persists it for resume).
+            // Transcript ordering belongs to the Pi FIFO stream via
+            // `agent_settled`, so host events never append or reorder separators.
             "approval_request" => {
                 let Some(approval_id) = string_field(&event.payload, "requestId") else {
                     return effects;

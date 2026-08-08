@@ -1,7 +1,7 @@
 use super::types::{CellStyle, Color};
 
 /// Bump when semantic palette values or Markdown styling rules change.
-pub const THEME_REVISION: u64 = 2;
+pub const THEME_REVISION: u64 = 3;
 
 // Catppuccin Mocha — https://catppuccin.com/palette/
 //
@@ -42,7 +42,7 @@ pub const GRAY_MUTED: Color = OVERLAY_0;
 pub const GRAY_FAINT: Color = SURFACE_2;
 pub const THINKING_TEXT: Color = OVERLAY_1;
 
-pub const INPUT_ACCENT: Color = MAUVE;
+pub const INPUT_ACCENT: Color = GRAY_TEXT;
 pub const HISTORY_BORDER: Color = GRAY_FAINT;
 pub const PANEL_BORDER: Color = MAUVE;
 pub const ACTIVE_PATH: Color = TEAL;
@@ -50,7 +50,7 @@ pub const DIFF_ADDED_BACKGROUND: Color = Color::Rgb(42, 58, 52);
 pub const DIFF_REMOVED_BACKGROUND: Color = Color::Rgb(64, 42, 54);
 
 pub const fn input_border() -> CellStyle {
-    CellStyle::foreground(INPUT_ACCENT).bold()
+    CellStyle::foreground(INPUT_ACCENT)
 }
 
 pub const fn selected() -> CellStyle {
