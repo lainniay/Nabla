@@ -31,14 +31,16 @@ pub(crate) fn question_modal(view: &SceneViewModel, width: u16) -> Option<PanelR
                     width,
                 )
             }));
-            rows.push(panel_choice_row(
-                "question",
-                "Custom answer",
-                "Type a different response",
-                flow.selected == question.options.len(),
-                true,
-                width,
-            ));
+            if !flow.workspace_trust_prompt {
+                rows.push(panel_choice_row(
+                    "question",
+                    "Custom answer",
+                    "Type a different response",
+                    flow.selected == question.options.len(),
+                    true,
+                    width,
+                ));
+            }
             if flow.custom_answer {
                 rows.extend(wrap_text(
                     "question-input",

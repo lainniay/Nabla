@@ -141,6 +141,14 @@ impl App {
                 });
             }
             "question_request" => {
+                if self
+                    .state
+                    .question
+                    .as_ref()
+                    .is_some_and(|question| question.workspace_trust_prompt)
+                {
+                    return effects;
+                }
                 let Some(request_id) = string_field(&event.payload, "requestId") else {
                     return effects;
                 };
@@ -163,6 +171,7 @@ impl App {
                     editor: EditorState::default(),
                     answers: Vec::new(),
                     replying: false,
+                    workspace_trust_prompt: false,
                 });
             }
             "question_cancelled" => {

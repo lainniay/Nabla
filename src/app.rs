@@ -26,13 +26,13 @@ pub use crate::state::{
     ContextCategoryEstimate, ContextConsumer, ContextPolicy, ContextPruneEstimate, ContextSnapshot,
     ContextUsageState, EditorState, IntegrationPromptState, PermissionManagerState, PlanArtifact,
     PlanExecutionContext, PlanQuestion, PlanReviewState, PruneReason, QuestionAnswer,
-    QuestionFlowState, ResourceSnapshot, RunState, SelectionPanelAction, SelectionPanelKind,
-    SelectionPanelOption, SelectionPanelState, SessionBrowserSnapshot, SessionBrowserState,
-    SessionHistoryItem, SessionScope, SessionSortMode, SessionSummary, SubagentTranscript,
-    THINKING_LEVELS, ToolExecution, ToolStatus, TranscriptItem, TranscriptViewMode,
-    TranscriptViewerState, TreeBrowserState, TreeFilterMode, TreeItem, TreePhase, TreeSnapshot,
-    TurnSeparator, UiModalKind, UserMessage, UserMessageStatus, WorktreeIntegrationSnapshot,
-    matching_auth_choice_indices, parse_tool_diff,
+    QuestionFlowState, QuestionOption, ResourceSnapshot, RunState, SelectionPanelAction,
+    SelectionPanelKind, SelectionPanelOption, SelectionPanelState, SessionBrowserSnapshot,
+    SessionBrowserState, SessionHistoryItem, SessionScope, SessionSortMode, SessionSummary,
+    SubagentTranscript, THINKING_LEVELS, ToolExecution, ToolStatus, TranscriptItem,
+    TranscriptViewMode, TranscriptViewerState, TreeBrowserState, TreeFilterMode, TreeItem,
+    TreePhase, TreeSnapshot, TurnSeparator, UiModalKind, UserMessage, UserMessageStatus,
+    WorktreeIntegrationSnapshot, matching_auth_choice_indices, parse_tool_diff,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +255,41 @@ impl App {
         self.state.resources = bootstrap.resources;
         self.state.agents = bootstrap.agents;
         self.state.context = bootstrap.context;
+        if !self.state.resources.trusted {
+            self.state.question = Some(QuestionFlowState {
+                request_id: "workspace-trust".to_owned(),
+                questions: vec![PlanQuestion {
+                    id: "trust".to_owned(),
+                    prompt: "This workspace is not trusted. Trust it to load project configuration and agent files?"
+                        .to_owned(),
+                    options: vec![
+                        QuestionOption {
+                            id: "trust".to_owned(),
+                            label: "Trust workspace".to_owned(),
+                            description: Some(
+                                "Loads project .nabla config and agents files; saved to ~/.nabla/config.json"
+                                    .to_owned(),
+                            ),
+                        },
+                        QuestionOption {
+                            id: "deny".to_owned(),
+                            label: "Don't trust".to_owned(),
+                            description: Some(
+                                "Keeps project config and agents files disabled for this workspace"
+                                    .to_owned(),
+                            ),
+                        },
+                    ],
+                }],
+                current: 0,
+                selected: 0,
+                custom_answer: false,
+                editor: EditorState::default(),
+                answers: Vec::new(),
+                replying: false,
+                workspace_trust_prompt: true,
+            });
+        }
         for pending in bootstrap.pending_integrations {
             self.enqueue_integration_prompt(IntegrationPromptState {
                 agent: pending.agent,

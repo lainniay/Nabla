@@ -1235,3 +1235,47 @@ fn open_panel_sits_flush_against_the_composer() {
             .starts_with('╭')
     );
 }
+
+#[test]
+fn trust_prompt_question_modal_omits_custom_answer() {
+    let mut domain = state();
+    domain.question = Some(crate::state::QuestionFlowState {
+        request_id: "workspace-trust".to_owned(),
+        questions: vec![crate::state::PlanQuestion {
+            id: "trust".to_owned(),
+            prompt: "Trust this workspace?".to_owned(),
+            options: vec![
+                crate::state::QuestionOption {
+                    id: "trust".to_owned(),
+                    label: "Trust workspace".to_owned(),
+                    description: None,
+                },
+                crate::state::QuestionOption {
+                    id: "deny".to_owned(),
+                    label: "Don't trust".to_owned(),
+                    description: None,
+                },
+            ],
+        }],
+        current: 0,
+        selected: 0,
+        custom_answer: false,
+        editor: crate::state::EditorState::default(),
+        answers: Vec::new(),
+        replying: false,
+        workspace_trust_prompt: true,
+    });
+
+    let request = crate::ui::scene::panels::modals::question::question_modal(&view(&domain), 80)
+        .expect("trust prompt panel");
+    let text = request
+        .rows
+        .iter()
+        .map(|row| row.plain_text())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    assert!(text.contains("Trust workspace"));
+    assert!(text.contains("Don't trust"));
+    assert!(!text.contains("Custom answer"));
+}

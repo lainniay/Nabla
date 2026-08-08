@@ -119,8 +119,7 @@ impl App {
                 }
             },
             CommandEvent::ResourcesFinished(result)
-            | CommandEvent::ResourceReloadFinished(result)
-            | CommandEvent::WorkspaceTrustFinished(result) => match result {
+            | CommandEvent::ResourceReloadFinished(result) => match result {
                 Ok(snapshot) => {
                     if !self.snapshot_scope_matches(snapshot.scope_id.as_deref())
                         || snapshot.revision < self.state.resources.revision
@@ -135,6 +134,37 @@ impl App {
                         .push(TranscriptItem::Resources(self.state.resources.clone()));
                 }
                 Err(error) => self.set_error(format!("Unable to update resources: {error}")),
+            },
+            CommandEvent::WorkspaceTrustFinished(result) => match result {
+                Ok(snapshot) => {
+                    if self
+                        .state
+                        .question
+                        .as_ref()
+                        .is_some_and(|question| question.workspace_trust_prompt)
+                    {
+                        self.state.question = None;
+                    }
+                    if !self.snapshot_scope_matches(snapshot.scope_id.as_deref())
+                        || snapshot.revision < self.state.resources.revision
+                    {
+                        return Vec::new();
+                    }
+                    self.state.command_catalog =
+                        crate::command::CommandCatalog::new(snapshot.commands.clone());
+                    self.state.resources = *snapshot;
+                    self.state
+                        .transcript
+                        .push(TranscriptItem::Resources(self.state.resources.clone()));
+                }
+                Err(error) => {
+                    if let Some(question) = self.state.question.as_mut()
+                        && question.workspace_trust_prompt
+                    {
+                        question.replying = false;
+                    }
+                    self.set_error(format!("Unable to change workspace trust: {error}"));
+                }
             },
             CommandEvent::ApprovalRulesFinished(result)
             | CommandEvent::ApprovalRuleRevoked(result)

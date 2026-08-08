@@ -73,6 +73,7 @@ pub struct QuestionFlowState {
     pub editor: EditorState,
     pub answers: Vec<QuestionAnswer>,
     pub replying: bool,
+    pub workspace_trust_prompt: bool,
 }
 
 impl QuestionFlowState {
@@ -81,7 +82,8 @@ impl QuestionFlowState {
     }
 
     pub fn choice_count(&self) -> usize {
-        self.current_question()
-            .map_or(0, |question| question.options.len() + 1)
+        self.current_question().map_or(0, |question| {
+            question.options.len() + usize::from(!self.workspace_trust_prompt)
+        })
     }
 }

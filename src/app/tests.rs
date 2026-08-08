@@ -3,8 +3,8 @@ use serde_json::json;
 
 use super::*;
 use crate::host::{
-    AuthLoginData, AuthMethod, AuthProvider, HostPlanModeData, ModelListData, ModelSummary,
-    PlanExecutionData, QueueClearData, SessionCommandData, TreeNavigateData,
+    AuthLoginData, AuthMethod, AuthProvider, BootstrapStateData, HostPlanModeData, ModelListData,
+    ModelSummary, PlanExecutionData, QueueClearData, SessionCommandData, TreeNavigateData,
 };
 
 fn state() -> PiState {
@@ -22,6 +22,34 @@ fn state() -> PiState {
         message_count: 0,
         pending_message_count: 0,
     }
+}
+
+fn bootstrap(trusted: bool) -> BootstrapStateData {
+    serde_json::from_value(json!({
+        "scopeId": "session-1",
+        "planMode": {"active": false, "activeTools": ["read"]},
+        "plan": {"artifact": null},
+        "resources": {
+            "trusted": trusted,
+            "contextFiles": [],
+            "skills": [],
+            "prompts": [],
+            "extensions": [],
+            "commands": [],
+            "diagnostics": [],
+            "revision": 1
+        },
+        "agents": {
+            "maxParallel": 3,
+            "profiles": [],
+            "active": [],
+            "pending": [],
+            "diagnostics": []
+        },
+        "context": serde_json::to_value(ContextSnapshot::default()).unwrap(),
+        "warnings": []
+    }))
+    .unwrap()
 }
 
 fn press(code: KeyCode) -> AppEvent {
@@ -189,6 +217,95 @@ fn clarification_questions_are_answered_sequentially_with_custom_input() {
             && answers[1].value == "Rust 1.85+"
             && answers[1].option_id.is_none()
     ));
+}
+
+#[test]
+fn untrusted_workspace_opens_trust_prompt_at_bootstrap() {
+    let mut app = App::new(state());
+    app.set_initial_bootstrap_state(bootstrap(false));
+
+    let question = app.state.question.as_ref().expect("trust prompt");
+    assert!(question.workspace_trust_prompt);
+    assert_eq!(question.request_id, "workspace-trust");
+    assert_eq!(question.questions.len(), 1);
+    assert_eq!(question.choice_count(), 2);
+    assert_eq!(app.state.active_modal_kind(), Some(UiModalKind::Question));
+}
+
+#[test]
+fn trusted_workspace_skips_trust_prompt() {
+    let mut app = App::new(state());
+    app.set_initial_bootstrap_state(bootstrap(true));
+
+    assert!(app.state.question.is_none());
+}
+
+#[test]
+fn trust_prompt_trust_sends_workspace_trust_and_closes_on_finish() {
+    let mut app = App::new(state());
+    app.set_initial_bootstrap_state(bootstrap(false));
+
+    let effects = app.update(press(KeyCode::Enter));
+    assert_eq!(effects, vec![AppEffect::SetWorkspaceTrust(true)]);
+    assert!(app.state.question.as_ref().expect("trust prompt").replying);
+
+    let snapshot = ResourceSnapshot {
+        trusted: true,
+        revision: 1,
+        ..ResourceSnapshot::default()
+    };
+    app.update(AppEvent::Command(CommandEvent::WorkspaceTrustFinished(Ok(
+        Box::new(snapshot),
+    ))));
+
+    assert!(app.state.question.is_none());
+    assert!(app.state.resources.trusted);
+}
+
+#[test]
+fn trust_prompt_deny_closes_without_effect() {
+    let mut app = App::new(state());
+    app.set_initial_bootstrap_state(bootstrap(false));
+
+    app.update(press(KeyCode::Down));
+    let effects = app.update(press(KeyCode::Enter));
+
+    assert!(effects.is_empty());
+    assert!(app.state.question.is_none());
+}
+
+#[test]
+fn trust_prompt_escape_closes_without_abort() {
+    let mut app = App::new(state());
+    app.set_initial_bootstrap_state(bootstrap(false));
+
+    let effects = app.update(press(KeyCode::Esc));
+
+    assert!(effects.is_empty());
+    assert!(app.state.question.is_none());
+}
+
+#[test]
+fn remote_question_is_ignored_while_trust_prompt_is_open() {
+    let mut app = App::new(state());
+    app.set_initial_bootstrap_state(bootstrap(false));
+
+    let effects = app.update(AppEvent::Host(RpcEvent {
+        kind: "question_request".to_owned(),
+        payload: json!({
+            "requestId": "question-remote",
+            "questions": [{
+                "id": "choice",
+                "prompt": "Choose",
+                "options": [{"id": "first", "label": "First"}]
+            }]
+        }),
+    }));
+
+    assert!(effects.is_empty());
+    let question = app.state.question.as_ref().expect("trust prompt");
+    assert!(question.workspace_trust_prompt);
+    assert_eq!(question.request_id, "workspace-trust");
 }
 
 #[test]

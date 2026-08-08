@@ -13,6 +13,10 @@ impl App {
         let interrupt = key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c' | 'C'));
         if interrupt || (matches!(key.code, KeyCode::Esc) && !question.custom_answer) {
+            if question.workspace_trust_prompt {
+                self.state.question = None;
+                return Vec::new();
+            }
             question.replying = true;
             self.state.run_state = RunState::Aborting;
             return vec![AppEffect::Abort];
@@ -62,6 +66,10 @@ impl App {
             }
             ChoiceNavAction::Confirm(_) => {}
             ChoiceNavAction::Unhandled => return Vec::new(),
+                if question.workspace_trust_prompt {
+                    self.state.question = None;
+                    return Vec::new();
+                }
         }
 
         let Some(current) = question.current_question() else {
@@ -91,6 +99,21 @@ impl App {
         let Some(current) = question.current_question() else {
             return Vec::new();
         };
+        if self
+            .state
+            .question
+            .as_ref()
+            .is_some_and(|question| question.workspace_trust_prompt)
+        {
+            if option_id.as_deref() == Some("trust") {
+                if let Some(question) = self.state.question.as_mut() {
+                    question.replying = true;
+                }
+                return vec![AppEffect::SetWorkspaceTrust(true)];
+            }
+            self.state.question = None;
+            return Vec::new();
+        }
         question.answers.push(QuestionAnswer {
             question_id: current.id.clone(),
             value,
