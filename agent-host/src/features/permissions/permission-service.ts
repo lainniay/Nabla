@@ -379,9 +379,11 @@ export class PermissionService {
       return {
         blocked: true,
         reason:
-          authorization.evaluation.effect === "deny"
-            ? "Denied by permission policy"
-            : "Denied by user",
+          authorization.deniedReason === "policy_changed"
+            ? "Permission policy changed after approval; please retry"
+            : authorization.evaluation.effect === "deny"
+              ? "Denied by permission policy"
+              : "Denied by user",
       };
     }
     return { authorization, intent: normalize() };

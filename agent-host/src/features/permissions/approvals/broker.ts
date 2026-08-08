@@ -19,6 +19,10 @@ export type ApprovalRequester = (
   signal?: AbortSignal,
 ) => Promise<ApprovalDecision>;
 
+export type ApprovalSelection =
+  | { decision: "deny" }
+  | { decision: ApprovalDecision; bundle: GrantBundle };
+
 export class ApprovalBroker {
   readonly once: OnceGrantStore;
   readonly session: SessionGrantStore;
@@ -44,11 +48,10 @@ export class ApprovalBroker {
   async request(
     requestId: string,
     intent: PermissionIntent,
-    identity: WorkspaceIdentity,
     proposals: GrantBundle[],
     requester: ApprovalRequester,
     signal?: AbortSignal,
-  ): Promise<ApprovalDecision> {
+  ): Promise<ApprovalSelection> {
     const decision = await requester({ requestId, intent, proposals }, signal);
     const selected = proposals.find((proposal) =>
       decision === "allow_once"
@@ -59,21 +62,29 @@ export class ApprovalBroker {
             ? proposal.scope === "workspace"
             : false,
     );
-    if (!selected || decision === "deny") return "deny";
-    if (selected.scope === "once") {
+    if (!selected || decision === "deny") return { decision: "deny" };
+    return { decision, bundle: selected };
+  }
+
+  commit(
+    requestId: string,
+    intent: PermissionIntent,
+    identity: WorkspaceIdentity,
+    bundle: GrantBundle,
+  ): void {
+    if (bundle.scope === "once") {
       this.once.put({
         requestId,
         toolCallId: intent.toolCallId,
         intentDigest: intent.digest,
         sessionId: intent.sessionId,
         workspaceId: intent.workspaceId,
-        bundle: selected,
+        bundle,
       });
-    } else if (selected.scope === "session") {
-      this.session.add(selected);
+    } else if (bundle.scope === "session") {
+      this.session.add(bundle);
     } else {
-      this.workspace.add(selected, identity);
+      this.workspace.add(bundle, identity);
     }
-    return decision;
   }
 }

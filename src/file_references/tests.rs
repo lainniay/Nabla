@@ -1,8 +1,9 @@
 use super::*;
+use crate::file_references::matcher::{is_subsequence, match_score, path_depth, slash_path};
 use crate::file_references::model::FileReferenceEnvelope;
 use crate::file_references::model::MAX_TEXT_FILE;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -166,5 +167,75 @@ fn preparation_rejects_directories_and_escaping_symlinks() {
     assert!(service.prepare("Read @folder".to_owned()).is_err());
     assert!(service.prepare("Read @escape".to_owned()).is_err());
     fs::remove_file(outside).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn matcher_scores_by_exact_prefix_segment_containment_and_subsequence() {
+    let candidate = |path: &str| FileCandidate {
+        path: path.to_owned(),
+        basename: path.rsplit('/').next().unwrap().to_owned(),
+        parent: path
+            .rsplit_once('/')
+            .map(|(parent, _)| parent.to_owned())
+            .unwrap_or_default(),
+        size: 0,
+    };
+    assert_eq!(match_score(&candidate("src/lib.rs"), ""), Some(5));
+    assert_eq!(match_score(&candidate("src/lib.rs"), "lib.rs"), Some(0));
+    assert_eq!(match_score(&candidate("src/lib.rs"), "lib"), Some(1));
+    assert_eq!(match_score(&candidate("src/lib.rs"), "src"), Some(2));
+    assert_eq!(match_score(&candidate("src/lib.rs"), "ib.r"), Some(3));
+    assert_eq!(match_score(&candidate("src/lib.rs"), "slrs"), Some(4));
+    assert_eq!(match_score(&candidate("src/lib.rs"), "xyz"), None);
+}
+
+#[test]
+fn path_helpers_measure_depth_and_normalize_components() {
+    assert_eq!(path_depth("a/b/c"), 2);
+    assert_eq!(path_depth("file"), 0);
+    assert_eq!(slash_path(Path::new("/root/a/../b/./c")), "root/a/b/c");
+    assert_eq!(
+        slash_path(Path::new("relative/dir/file.txt")),
+        "relative/dir/file.txt"
+    );
+    assert!(is_subsequence("slrs", "src/lib.rs"));
+    assert!(!is_subsequence("xyz", "src/lib.rs"));
+}
+
+#[test]
+fn search_ranks_exact_basenames_first_and_shallower_paths_sooner() {
+    let root = workspace();
+    fs::create_dir_all(root.join("src/deep")).unwrap();
+    fs::write(root.join("lib.rs"), "x").unwrap();
+    fs::write(root.join("src/main.rs"), "x").unwrap();
+    fs::write(root.join("src/deep/lib.rs"), "x").unwrap();
+    fs::write(root.join("notlib.rs"), "x").unwrap();
+    let service = FileReferenceService::new(root.clone()).unwrap();
+    let paths = service
+        .search("lib.rs")
+        .unwrap()
+        .into_iter()
+        .map(|candidate| candidate.path)
+        .collect::<Vec<_>>();
+    assert_eq!(paths, ["lib.rs", "src/deep/lib.rs", "notlib.rs"]);
+    let uppercase = service
+        .search("LIB.RS")
+        .unwrap()
+        .into_iter()
+        .map(|candidate| candidate.path)
+        .collect::<Vec<_>>();
+    assert_eq!(uppercase, paths);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn search_results_are_bounded_to_fifty() {
+    let root = workspace();
+    for index in 0..60 {
+        fs::write(root.join(format!("file-{index:02}.txt")), "x").unwrap();
+    }
+    let service = FileReferenceService::new(root.clone()).unwrap();
+    assert_eq!(service.search("file-").unwrap().len(), 50);
     fs::remove_dir_all(root).unwrap();
 }

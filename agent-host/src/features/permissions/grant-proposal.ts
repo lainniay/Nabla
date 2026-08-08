@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import type {
+  CapabilityAtom,
   CapabilityMatcher,
   GrantBundle,
   InvalidationKey,
@@ -18,8 +19,11 @@ const MANIFESTS_BY_EXECUTABLE: Record<string, string[]> = {
   cargo: ["Cargo.toml", "Cargo.lock"],
 };
 
-export function exactMatchers(intent: PermissionIntent): CapabilityMatcher[] {
-  return intent.atoms.map((atom): CapabilityMatcher => {
+export function exactMatchers(
+  intent: PermissionIntent,
+  atoms: readonly CapabilityAtom[] = intent.atoms,
+): CapabilityMatcher[] {
+  return atoms.map((atom): CapabilityMatcher => {
     switch (atom.kind) {
       case "exec":
         return {
@@ -51,14 +55,15 @@ export function exactMatchers(intent: PermissionIntent): CapabilityMatcher[] {
 export function proposeGrantBundles(
   intent: PermissionIntent,
   identity?: WorkspaceIdentity,
+  atoms: readonly CapabilityAtom[] = intent.atoms,
 ): GrantBundle[] {
-  const matchers = exactMatchers(intent);
+  const matchers = exactMatchers(intent, atoms);
   const base = {
     workspaceId: intent.workspaceId,
     matchers,
   };
   const once: GrantBundle = { ...base, scope: "once" };
-  if (intent.atoms.some((atom) => atom.kind === "opaque_code")) {
+  if (atoms.some((atom) => atom.kind === "opaque_code")) {
     return [once];
   }
   return [
@@ -70,9 +75,9 @@ export function proposeGrantBundles(
       invalidationKeys: identity
         ? [
             ...workspaceInvalidationKeys(identity),
-            ...manifestKeys(intent, identity),
+            ...manifestKeys(intent, identity, atoms),
           ]
-        : manifestKeys(intent),
+        : manifestKeys(intent, undefined, atoms),
     },
   ];
 }
@@ -80,9 +85,10 @@ export function proposeGrantBundles(
 function manifestKeys(
   intent: PermissionIntent,
   identity?: WorkspaceIdentity,
+  atoms: readonly CapabilityAtom[] = intent.atoms,
 ): InvalidationKey[] {
   const keys = new Map<string, InvalidationKey>();
-  for (const atom of intent.atoms) {
+  for (const atom of atoms) {
     if (atom.kind !== "exec") continue;
     const executable = atom.executable.split("/").at(-1) ?? atom.executable;
     const paths = (MANIFESTS_BY_EXECUTABLE[executable] ?? [])

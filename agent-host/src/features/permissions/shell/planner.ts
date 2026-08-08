@@ -376,7 +376,7 @@ function fileReadOperands(command: ShellCommand): string[] {
       (separator >= 0 ? index > separator : !value.startsWith("-"))
     );
   }
-  if (executable !== "head") return [];
+  if (executable !== "head" && executable !== "tail") return [];
   const operands: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index]!;

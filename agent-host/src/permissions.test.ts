@@ -38,7 +38,6 @@ import type {
 } from "./features/permissions/model.ts";
 import { PolicyStore } from "./features/permissions/policy-store.ts";
 import { planShell } from "./features/permissions/shell/planner.ts";
-import { digestValue } from "./features/permissions/shell/digest.ts";
 import {
   fileDigest,
   resolveWorkspaceIdentity,
@@ -192,7 +191,7 @@ test("cargo grants bind workspace manifests, build scripts, and config", () => {
   }
 });
 
-test("legacy exact path and command approvals migrate while prefixes do not", () => {
+test("legacy exact path approvals migrate while command and prefix rules do not", () => {
   const value = fixture();
   try {
     mkdirSync(join(value.home, ".nabla"));
@@ -227,18 +226,11 @@ test("legacy exact path and command approvals migrate while prefixes do not", ()
     );
     const identity = resolveWorkspaceIdentity(value.workspace);
     const grants = new WorkspaceGrantStore(value.home).get(identity);
-    assert.equal(grants.length, 2);
-    assert.equal(
-      grants.some((grant) =>
-        grant.matchers.some((matcher) => matcher.kind === "shell_digest")),
-      true,
-    );
+    assert.equal(grants.length, 1);
     assert.equal(
       grants.some((grant) =>
         grant.matchers.some(
-          (matcher) =>
-            matcher.kind === "shell_digest" &&
-            matcher.digest === digestValue({ command: "npm test" }),
+          (matcher) => matcher.kind === "shell_digest",
         )),
       false,
     );

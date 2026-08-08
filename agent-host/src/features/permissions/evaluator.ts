@@ -87,7 +87,11 @@ export function matcherMatches(
         matcher.inputDigest === digestValue(intent.normalizedInput))
     );
   }
-  if (matcher.kind === "shell_digest" || matcher.kind === "shell_command") {
+  // Legacy shell_digest grants bind only the command string, so they can
+  // authorize the same command against different cwd/files. They are retired:
+  // stored grants stay in documents but never match.
+  if (matcher.kind === "shell_digest") return false;
+  if (matcher.kind === "shell_command") {
     if (
       !intent ||
       intent.tool !== "bash" ||
@@ -98,12 +102,10 @@ export function matcherMatches(
     }
     const command = (intent.normalizedInput as { command?: unknown }).command;
     if (typeof command !== "string") return false;
-    return matcher.kind === "shell_digest"
-      ? digestValue({ command }) === matcher.digest
-      : patternMatches(
-          matcher.pattern,
-          command.trim().replace(/\s+/gu, " "),
-        );
+    return patternMatches(
+      matcher.pattern,
+      command.trim().replace(/\s+/gu, " "),
+    );
   }
   if (matcher.kind !== atom.kind) return false;
   switch (matcher.kind) {

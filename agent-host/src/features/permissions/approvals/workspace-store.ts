@@ -8,7 +8,6 @@ import type { GrantBundle } from "../model.ts";
 import type { CapabilityMatcher, InvalidationKey } from "../model.ts";
 import {
   invalidationKeysValid,
-  fileDigest,
   resolveWorkspaceIdentity,
   workspaceInvalidationKeys,
   type WorkspaceIdentity,
@@ -186,7 +185,6 @@ export class WorkspaceGrantStore {
               matchers: [matcher],
               invalidationKeys: [
                 ...workspaceInvalidationKeys(identity),
-                ...legacyCommandInvalidationKeys(rule, identity.canonicalPath),
               ],
             }]
           : [];
@@ -249,25 +247,6 @@ function documentIdentityId(document: WorkspaceGrantDocument): string {
   }));
 }
 
-function legacyCommandInvalidationKeys(
-  rule: Record<string, unknown>,
-  workspace: string,
-): InvalidationKey[] {
-  if (rule.kind !== "command" || typeof rule.value !== "string") return [];
-  const executable = rule.value.trim().split(/\s+/u)[0]?.split("/").at(-1);
-  const manifests =
-    executable === "cargo"
-      ? ["Cargo.toml", "Cargo.lock"]
-      : ["npm", "npx"].includes(executable ?? "")
-        ? ["package.json", "package-lock.json", "npm-shrinkwrap.json"]
-        : [];
-  return manifests.flatMap((name): InvalidationKey[] => {
-    const path = join(workspace, name);
-    const value = fileDigest(path);
-    return value ? [{ kind: "file_digest", path, value }] : [];
-  });
-}
-
 function legacyMatcher(
   rule: Record<string, unknown>,
   workspace: string,
@@ -275,10 +254,7 @@ function legacyMatcher(
   const kind = rule.kind;
   const tool = String(rule.toolName);
   const value = String(rule.value);
-  if (kind === "command_prefix") return undefined;
-  if (kind === "command") {
-    return { kind: "shell_digest", digest: digestValue({ command: value }) };
-  }
+  if (kind === "command_prefix" || kind === "command") return undefined;
   if (kind === "input") {
     return {
       kind: "tool",
