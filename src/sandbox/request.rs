@@ -33,6 +33,8 @@ pub struct SandboxProfile {
     pub filesystem: FilesystemProfile,
     pub network: NetworkProfile,
     pub protected_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub unix_sockets: UnixSocketRules,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -53,6 +55,15 @@ pub struct FilesystemProfile {
 pub enum NetworkProfile {
     Deny,
     Allow,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnixSocketRules {
+    #[serde(default)]
+    pub allow: Vec<PathBuf>,
+    #[serde(default)]
+    pub deny: Vec<PathBuf>,
 }
 
 impl SandboxExecRequest {
@@ -89,6 +100,20 @@ impl SandboxExecRequest {
             if !path.is_absolute() {
                 return Err(format!(
                     "sandbox protected path must be absolute: {}",
+                    path.display()
+                ));
+            }
+        }
+        for path in self
+            .profile
+            .unix_sockets
+            .allow
+            .iter()
+            .chain(&self.profile.unix_sockets.deny)
+        {
+            if !path.is_absolute() {
+                return Err(format!(
+                    "sandbox unix socket path must be absolute: {}",
                     path.display()
                 ));
             }
@@ -168,6 +193,34 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(profile.network, NetworkProfile::Deny);
+        assert!(profile.unix_sockets.allow.is_empty());
+        assert!(profile.unix_sockets.deny.is_empty());
+    }
+
+    #[test]
+    fn rejects_relative_unix_socket_paths() {
+        let request: SandboxExecRequest = serde_json::from_value(json!({
+            "version": 1,
+            "cwd": "/workspace",
+            "command": "echo hi",
+            "profile": {
+                "filesystem": {
+                    "readOnly": [],
+                    "readWrite": [],
+                    "denyRead": [],
+                    "denyWrite": []
+                },
+                "network": "deny",
+                "protectedPaths": [],
+                "unixSockets": {
+                    "allow": ["relative.sock"],
+                    "deny": []
+                }
+            },
+            "environment": {}
+        }))
+        .unwrap();
+        assert!(request.validate().is_err());
     }
 
     #[test]

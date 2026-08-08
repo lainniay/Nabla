@@ -12,7 +12,11 @@
       "denyWrite": []
     },
     "network": "deny",
-    "protectedPaths": ["/Users/test/.aws"]
+    "protectedPaths": ["/Users/test/.aws"],
+    "unixSockets": {
+      "allow": [],
+      "deny": []
+    }
   },
   "environment": {}
 }

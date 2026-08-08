@@ -3,6 +3,9 @@ import {
   READ_ONLY_TOOL_NAMES,
   type ThinkingLevel,
 } from "../permissions/shell/rules.ts";
+import type { AgentConfigDiagnostic } from "../../protocol/schemas/agents.ts";
+
+export type { AgentConfigDiagnostic } from "../../protocol/schemas/agents.ts";
 
 export interface AgentPermissionRule {
   resource: string;
@@ -24,13 +27,6 @@ export interface AgentProfile {
   isolation: AgentIsolationPolicy;
   disabled: boolean;
   source: string;
-}
-
-export interface AgentConfigDiagnostic {
-  type: "warning" | "error";
-  message: string;
-  path?: string;
-  profile?: string;
 }
 
 export const SUPPORTED_AGENT_TOOLS = new Set([

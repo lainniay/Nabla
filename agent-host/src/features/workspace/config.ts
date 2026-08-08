@@ -1,8 +1,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import { writeAtomicJsonSync } from "../../persistence/atomic-json.ts";
+import {
+  EMPTY_SANDBOX_CONFIG,
+  type SandboxConfig,
+} from "../permissions/execution/sandbox-config.ts";
 import { canonicalPath } from "../permissions/filesystem/path.ts";
 import {
   isJsonObject as isRecord,
@@ -10,6 +14,9 @@ import {
   errorMessage,
   validAgentName,
 } from "../../protocol/validation.ts";
+import type { ResourceSnapshot } from "../../protocol/schemas/workspace.ts";
+
+export type { ResourceSnapshot } from "../../protocol/schemas/workspace.ts";
 import {
   DEFAULT_CONFIG,
   mergeAgentDirectory,
@@ -27,30 +34,11 @@ export interface HarnessConfig {
   trustedWorkspaces: string[];
   allowedProjectExtensions: string[];
   profiles: Record<string, AgentProfile>;
+  sandbox: SandboxConfig;
   diagnostics: AgentConfigDiagnostic[];
 }
 
-export interface ResourceSnapshot {
-  scopeId?: string;
-  trusted: boolean;
-  contextFiles: string[];
-  skills: Array<{ name: string; path: string; description: string }>;
-  prompts: Array<{ name: string; path: string; description: string }>;
-  extensions: string[];
-  commands: Array<{
-    name: string;
-    description: string;
-    source: "extension" | "prompt" | "skill";
-  }>;
-  diagnostics: Array<{
-    type: string;
-    message: string;
-    path?: string;
-  }>;
-  revision: number;
-}
-
-interface HarnessConfigOptions {
+export interface HarnessConfigOptions {
   homeDir?: string;
 }
 
@@ -61,9 +49,9 @@ export function loadHarnessConfig(
   const home = options.homeDir ?? homedir();
   const globalPath = join(home, ".nabla", "config.json");
   const diagnostics: AgentConfigDiagnostic[] = [];
-  const globalValue = readJsonObject(globalPath, diagnostics);
+  const globalValue = readConfigJson(globalPath, diagnostics);
   let globalConfig = mergeConfig(
-    cloneHarnessConfig(DEFAULT_CONFIG),
+    structuredClone(DEFAULT_CONFIG),
     globalValue,
     globalPath,
     diagnostics,
@@ -77,7 +65,7 @@ export function loadHarnessConfig(
     return { ...globalConfig, diagnostics };
   }
   const projectPath = join(cwd, ".nabla", "config.json");
-  const projectValue = readJsonObject(projectPath, diagnostics);
+  const projectValue = readConfigJson(projectPath, diagnostics);
   let projectConfig = mergeConfig(
     globalConfig,
     projectValue,
@@ -180,6 +168,14 @@ function mergeConfig(
   diagnostics: AgentConfigDiagnostic[],
   project = false,
 ): HarnessConfig {
+  if (project && isRecord(raw.sandbox)) {
+    diagnostics.push({
+      type: "warning",
+      message:
+        "Project sandbox configuration cannot expand sandbox boundaries and was ignored",
+      path: source,
+    });
+  }
   const profiles = Object.fromEntries(
     Object.entries(base.profiles).map(([name, profile]) => [
       name,
@@ -236,17 +232,58 @@ function mergeConfig(
         ? stringArray(raw.allowedProjectExtensions)
         : base.allowedProjectExtensions,
     profiles,
+    sandbox: project
+      ? base.sandbox
+      : parseSandboxConfig(raw, source, diagnostics),
     diagnostics,
   };
 }
 
-function readJsonObject(
-  path: string,
+function parseSandboxConfig(
+  raw: Record<string, unknown>,
+  source: string,
   diagnostics: AgentConfigDiagnostic[],
-): Record<string, unknown> {
-  return readConfigJson(path, diagnostics);
+): SandboxConfig {
+  if (!isRecord(raw.sandbox)) return EMPTY_SANDBOX_CONFIG;
+  const value = raw.sandbox;
+  const unixSocketsRaw = isRecord(value.unixSockets) ? value.unixSockets : {};
+  return {
+    writableRoots: parseAbsolutePaths(
+      stringArray(value.writableRoots),
+      "sandbox.writableRoots",
+      source,
+      diagnostics,
+    ),
+    unixSockets: {
+      allow: parseAbsolutePaths(
+        stringArray(unixSocketsRaw.allow),
+        "sandbox.unixSockets.allow",
+        source,
+        diagnostics,
+      ),
+      deny: parseAbsolutePaths(
+        stringArray(unixSocketsRaw.deny),
+        "sandbox.unixSockets.deny",
+        source,
+        diagnostics,
+      ),
+    },
+  };
 }
 
-function cloneHarnessConfig(config: HarnessConfig): HarnessConfig {
-  return structuredClone(config);
+function parseAbsolutePaths(
+  paths: string[],
+  label: string,
+  source: string,
+  diagnostics: AgentConfigDiagnostic[],
+): string[] {
+  return paths.filter((path) => {
+    if (isAbsolute(path)) return true;
+    diagnostics.push({
+      type: "warning",
+      message: `${label} path must be absolute and was ignored: ${path}`,
+      path: source,
+    });
+    return false;
+  });
 }

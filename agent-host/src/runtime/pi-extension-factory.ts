@@ -10,6 +10,10 @@ import { Type } from "typebox";
 
 import { newFileDisplayDiff } from "../tool-diff.ts";
 import {
+  PlanQuestionSchema,
+  QuestionOptionSchema,
+} from "../protocol/schemas/questions.ts";
+import {
   type ContextBudgetManager,
   contextRemaining,
 } from "../features/context/engine.ts";
@@ -18,6 +22,11 @@ import type { ContextSnapshot } from "../features/context/model.ts";
 import type { PlanArtifact, PlanContent } from "../features/plans/model.ts";
 import { PLAN_ENTRY_TYPE } from "../features/plans/model.ts";
 import type { PlanModePort } from "../features/plans/plan-controller.ts";
+import type {
+  TodoItem,
+  TodoReplaceResult,
+} from "../features/todos/store.ts";
+import { TODO_ENTRY_TYPE } from "../features/todos/store.ts";
 import type { PlanQuestion, QuestionAnswer } from "../questions.ts";
 import { TURN_METRICS_ENTRY_TYPE } from "../features/sessions/history.ts";
 import type { JsonObject } from "../protocol/validation.ts";
@@ -47,6 +56,10 @@ export interface PiExtensionPort {
     onSessionActivated(
       entries: readonly unknown[],
     ): PlanArtifact | null;
+  };
+  todos: {
+    replace(items: TodoItem[]): TodoReplaceResult;
+    onSessionActivated(entries: readonly unknown[]): TodoItem[];
   };
   context: {
     snapshot(): ContextSnapshot;
@@ -124,16 +137,11 @@ export class PiExtensionFactory {
           parameters: Type.Object({
             questions: Type.Array(
               Type.Object({
-                id: Type.String({ minLength: 1 }),
-                prompt: Type.String({ minLength: 1 }),
-                options: Type.Array(
-                  Type.Object({
-                    id: Type.String({ minLength: 1 }),
-                    label: Type.String({ minLength: 1 }),
-                    description: Type.Optional(Type.String()),
-                  }),
-                  { minItems: 2, maxItems: 4 },
-                ),
+                ...PlanQuestionSchema.properties,
+                options: Type.Array(QuestionOptionSchema, {
+                  minItems: 2,
+                  maxItems: 4,
+                }),
               }),
               { minItems: 1, maxItems: 3 },
             ),
@@ -220,9 +228,50 @@ export class PiExtensionFactory {
             };
           },
         });
+        pi.registerTool({
+          name: "todo_write",
+          label: "Todo list",
+          description:
+            "Replace the entire session todo list. Every item has content and status pending, in_progress, or completed; at most one item may be in_progress. Pass an empty array to clear the list.",
+          promptSnippet:
+            "Track multi-step progress by keeping the session todo list current",
+          parameters: Type.Object({
+            todos: Type.Array(
+              Type.Object({
+                content: Type.String({ minLength: 1 }),
+                status: Type.Union([
+                  Type.Literal("pending"),
+                  Type.Literal("in_progress"),
+                  Type.Literal("completed"),
+                ]),
+              }),
+            ),
+          }),
+          execute: async (_toolCallId, params) => {
+            const result = this.port.todos.replace(
+              params.todos as TodoItem[],
+            );
+            pi.appendEntry(TODO_ENTRY_TYPE, result.todos);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    action: result.action,
+                    todos: result.todos,
+                  }),
+                },
+              ],
+              details: result,
+            };
+          },
+        });
         pi.on("session_start", (_event, context) => {
           this.port.context.onRuntimeSessionStart(context);
           this.port.plans.onSessionActivated(
+            context.sessionManager.getBranch(),
+          );
+          this.port.todos.onSessionActivated(
             context.sessionManager.getBranch(),
           );
         });

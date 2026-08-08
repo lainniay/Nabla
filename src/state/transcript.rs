@@ -58,6 +58,17 @@ impl EditorState {
         self.insert_text("\n");
     }
 
+    /// Deletes from the cursor back to the start of the current line,
+    /// matching the readline/macOS "delete line" convention (Ctrl+U /
+    /// Cmd+Backspace) without touching the rest of the buffer.
+    pub fn delete_to_line_start(&mut self) {
+        let end = self.byte_index();
+        let line_start = self.text[..end].rfind('\n').map_or(0, |index| index + 1);
+        self.text.replace_range(line_start..end, "");
+        self.cursor = self.grapheme_index_after_byte(line_start);
+        self.preferred_visual_column = None;
+    }
+
     pub fn backspace(&mut self) {
         if self.cursor == 0 {
             return;

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub const COMMAND_MENU_VISIBLE_ROWS: usize = 7;
 
-const LOCAL_COMMANDS: [LocalCommandDefinition; 15] = [
+const LOCAL_COMMANDS: [LocalCommandDefinition; 14] = [
     LocalCommandDefinition::new(
         "login",
         "Show how to authenticate Pi",
@@ -37,11 +37,6 @@ const LOCAL_COMMANDS: [LocalCommandDefinition; 15] = [
         LocalCommandKind::Permissions,
     ),
     LocalCommandDefinition::new("model", "List or select a model", LocalCommandKind::Model),
-    LocalCommandDefinition::new(
-        "thinking",
-        "Show or change the thinking level",
-        LocalCommandKind::Thinking,
-    ),
     LocalCommandDefinition::new(
         "agents",
         "Inspect configured and running subagents",
@@ -84,7 +79,6 @@ enum LocalCommandKind {
     Trust,
     Permissions,
     Model,
-    Thinking,
     Agents,
     Agent,
 }
@@ -121,7 +115,6 @@ impl LocalCommandKind {
             Self::Trust => LocalCommand::Trust(argument),
             Self::Permissions => LocalCommand::Permissions(argument),
             Self::Model => LocalCommand::Model(argument),
-            Self::Thinking => LocalCommand::Thinking(argument),
             Self::Agents => LocalCommand::Agents(argument),
             Self::Agent => LocalCommand::Agent(argument),
         }
@@ -178,7 +171,6 @@ pub enum LocalCommand {
     Trust(Option<String>),
     Permissions(Option<String>),
     Model(Option<String>),
-    Thinking(Option<String>),
     Agents(Option<String>),
     Agent(Option<String>),
 }

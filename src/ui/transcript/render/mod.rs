@@ -12,7 +12,7 @@ pub(crate) mod tool;
 pub(crate) mod user;
 
 pub(crate) use assistant::render_assistant_segment;
-pub(crate) use common::{render_turn_separator, row_from_cells};
+pub(crate) use common::{render_turn_separator, row_from_cells, wrap_styled_breaking};
 pub(crate) use tool::{ToolRenderMode, render_tool, tool_operation_summary};
 pub(crate) use user::render_user;
 

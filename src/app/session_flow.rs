@@ -55,7 +55,7 @@ impl App {
                 KeyCode::Home => browser.query.move_home(),
                 KeyCode::End => browser.query.move_end(),
                 KeyCode::Char('u' | 'U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    browser.query.clear();
+                    browser.query.delete_to_line_start();
                     refresh = true;
                 }
                 KeyCode::Char(character)
@@ -125,27 +125,6 @@ impl App {
                 browser.selected = browser.sessions.len().saturating_sub(1);
             }
             KeyCode::Char('/') => browser.search_active = true,
-            KeyCode::Char('w' | 'W') => {
-                browser.scope = match browser.scope {
-                    SessionScope::Current => SessionScope::All,
-                    SessionScope::All => SessionScope::Current,
-                };
-                browser.selected = 0;
-                browser.loaded = None;
-                return self.refresh_session_browser_effect().into_iter().collect();
-            }
-            KeyCode::Char('s' | 'S') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                browser.sort_mode = browser.sort_mode.next();
-                return self.refresh_session_browser_effect().into_iter().collect();
-            }
-            KeyCode::Char('m' | 'M') => {
-                browser.named_only = !browser.named_only;
-                browser.selected = 0;
-                return self.refresh_session_browser_effect().into_iter().collect();
-            }
-            KeyCode::Char('p' | 'P') => {
-                browser.show_path = !browser.show_path;
-            }
             KeyCode::Enter => {
                 let Some(session) = browser.selected_session().cloned() else {
                     return Vec::new();
@@ -334,7 +313,7 @@ impl App {
                 KeyCode::Home => browser.query.move_home(),
                 KeyCode::End => browser.query.move_end(),
                 KeyCode::Char('u' | 'U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    browser.query.clear();
+                    browser.query.delete_to_line_start();
                     refresh = true;
                 }
                 KeyCode::Char(character)
@@ -443,32 +422,6 @@ impl App {
                     selected: 0,
                 };
             }
-            KeyCode::Char('x' | 'X') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(entry_id) = browser.selected_item().map(|item| item.entry_id.clone()) {
-                    return vec![AppEffect::CopyTreeEntry { entry_id }];
-                }
-            }
-            KeyCode::Char('l' | 'L')
-                if key.modifiers.contains(KeyModifiers::SHIFT)
-                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                if let Some(item) = browser.selected_item().cloned() {
-                    let mut editor = EditorState::default();
-                    if let Some(label) = item.label {
-                        editor.replace(label);
-                    }
-                    browser.phase = TreePhase::EditLabel {
-                        entry_id: item.entry_id,
-                        editor,
-                    };
-                }
-            }
-            KeyCode::Char('t' | 'T')
-                if key.modifiers.contains(KeyModifiers::SHIFT)
-                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                browser.show_label_timestamps = !browser.show_label_timestamps;
-            }
             KeyCode::Char('d' | 'D') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 browser.filter_mode = TreeFilterMode::Default;
                 browser.folded_entry_ids.clear();
@@ -492,30 +445,8 @@ impl App {
                 browser.folded_entry_ids.clear();
                 return self.refresh_tree_effect().into_iter().collect();
             }
-            KeyCode::Char('l' | 'L') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                browser.filter_mode = if browser.filter_mode == TreeFilterMode::LabeledOnly {
-                    TreeFilterMode::Default
-                } else {
-                    TreeFilterMode::LabeledOnly
-                };
-                browser.folded_entry_ids.clear();
-                return self.refresh_tree_effect().into_iter().collect();
-            }
-            KeyCode::Char('a' | 'A') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                browser.filter_mode = if browser.filter_mode == TreeFilterMode::All {
-                    TreeFilterMode::Default
-                } else {
-                    TreeFilterMode::All
-                };
-                browser.folded_entry_ids.clear();
-                return self.refresh_tree_effect().into_iter().collect();
-            }
             KeyCode::Char('o' | 'O') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                browser.filter_mode = if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    browser.filter_mode.previous()
-                } else {
-                    browser.filter_mode.next()
-                };
+                browser.filter_mode = browser.filter_mode.next();
                 browser.folded_entry_ids.clear();
                 return self.refresh_tree_effect().into_iter().collect();
             }

@@ -596,7 +596,7 @@ fn approval_panel_only_renders_actions_valid_for_the_request() {
         command_row
             .cells
             .iter()
-            .any(|cell| cell.style.foreground == Color::Cyan && cell.style.bold)
+            .any(|cell| cell.style.foreground == Color::Gray && cell.style.dim)
     );
     assert!(command_row.cells.len() > 1);
     assert!(text.contains("Allow once"));
@@ -748,6 +748,56 @@ fn approval_panel_normalizes_paths_truncates_details_and_keeps_actions_visible()
 }
 
 #[test]
+fn approval_panel_shows_full_shell_command_with_wrapping() {
+    let mut domain = state();
+    domain.selection_page_size = 8;
+    domain.approval = Some(ApprovalState {
+        approval_id: "approval".to_owned(),
+        tool_call_id: "tool".to_owned(),
+        tool_name: "bash".to_owned(),
+        input: json!({
+            "command": "cargo test --lib clarification_questions_are_answered_sequentially_with_custom_input 2>&1 | tail -5 && cargo test --lib tree_browser_supports_pi_filters_summary_and_abort_flow 2>&1 | tail -5"
+        }),
+        agent_id: None,
+        agent_profile: None,
+        model: None,
+        reason: None,
+        risk: Some("normal".to_owned()),
+        selected: 1,
+        replying: false,
+        available_decisions: vec![ApprovalDecision::AllowOnce, ApprovalDecision::Deny],
+        ..ApprovalState::default()
+    });
+
+    let request = primary_panel_request(&view(&domain), 36).expect("approval panel request");
+    let all_text = request
+        .rows
+        .iter()
+        .map(VisualRow::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let joined = all_text
+        .chars()
+        .filter(|character| character.is_alphanumeric() || *character == '_')
+        .collect::<String>();
+    assert!(joined.contains("clarification_questions_are_answered_sequentially_with_custom_input"));
+    assert!(joined.contains("tree_browser_supports_pi_filters_summary_and_abort_flow"));
+    assert!(all_text.contains("Deny"));
+    assert!(
+        request
+            .rows
+            .iter()
+            .any(|row| row.plain_text().starts_with("  └ ") && row.plain_text().contains("cargo"))
+    );
+    assert!(
+        request
+            .rows
+            .iter()
+            .any(|row| row.plain_text().starts_with("    ") && row.plain_text().contains("cargo"))
+    );
+}
+
+#[test]
 fn narrow_panel_rows_preserve_action_and_shortcut_before_description() {
     let row = panel_choice_row(
         "approval",
@@ -856,7 +906,7 @@ fn common_panel_rows_right_align_descriptions() {
         selected
             .cells
             .iter()
-            .all(|cell| { cell.style.foreground == palette::LAVENDER && cell.style.bold })
+            .all(|cell| { cell.style.foreground == palette::MAUVE && cell.style.bold })
     );
 }
 
@@ -1080,11 +1130,11 @@ fn busy_to_idle_converges_in_the_same_frame_without_layout_holes() {
     assert_eq!(busy.rows.len(), idle.rows.len());
     let busy_status = busy.rows.last().unwrap().plain_text();
     let idle_status = idle.rows.last().unwrap().plain_text();
-    assert!(busy_status.starts_with(" model · thinking off"));
+    assert!(busy_status.starts_with(" model · off"));
     assert!(busy_status.contains("⠋ · ctx"));
     assert!(!busy_status.contains("running"));
     assert!(!busy_status.contains("connected"));
-    assert!(idle_status.starts_with(" model · thinking off"));
+    assert!(idle_status.starts_with(" model · off"));
     assert!(!idle_status.contains('⠋'));
     assert!(!idle_status.contains("idle"));
     assert!(!idle_status.contains("connected"));

@@ -113,12 +113,17 @@ test("shared sandbox exec fixtures carry the execution mode", () => {
       mode: string;
       cwd: string;
       command: string;
-      profile: { filesystem: Record<string, unknown>; network: string };
+      profile: {
+        filesystem: Record<string, unknown>;
+        network: string;
+        unixSockets: { allow: string[]; deny: string[] };
+      };
     };
     assert.equal(parsed.version, 1);
     assert.equal(parsed.mode, expectedMode);
     assert.equal(typeof parsed.cwd, "string");
     assert.equal(typeof parsed.command, "string");
     assert.equal(parsed.profile.network, "deny");
+    assert.deepEqual(parsed.profile.unixSockets, { allow: [], deny: [] });
   }
 });

@@ -5,7 +5,10 @@ import type { AgentProfile } from "../profile-model.ts";
 import type { HarnessConfig } from "../../workspace/config.ts";
 import { evaluateProfilePermission } from "../../permissions/policy/profile-compiler.ts";
 import { workspaceRelativePath } from "../../permissions/filesystem/path.ts";
-import { isJsonObject } from "../../../protocol/validation.ts";
+import {
+  errorMessage,
+  isJsonObject,
+} from "../../../protocol/validation.ts";
 import type {
   AgentIsolationPolicy,
   WorktreeRecord,
@@ -109,13 +112,13 @@ export class IntegrationService {
       } catch (error) {
         let warning =
           `Preserved worktree ${record.id}, but recovery validation failed: ${
-            error instanceof Error ? error.message : String(error)
+            errorMessage(error)
           }`;
         try {
           await this.worktrees.keep(record);
         } catch (keepError) {
           warning += `; recording the keep decision also failed: ${
-            keepError instanceof Error ? keepError.message : String(keepError)
+            errorMessage(keepError)
           }`;
         }
         this.warn(warning);
@@ -126,7 +129,7 @@ export class IntegrationService {
     await this.worktrees.pruneTerminalArtifacts(cwd).catch((error) => {
       this.warn(
         `Unable to prune old terminal worktree artifacts: ${
-          error instanceof Error ? error.message : String(error)
+          errorMessage(error)
         }`,
       );
     });

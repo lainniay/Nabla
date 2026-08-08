@@ -1,11 +1,10 @@
-import type { GrantProposal } from "./features/permissions/model.ts";
-import { PendingRequestRegistry } from "./protocol/pending-request-registry.ts";
+import type {
+  ApprovalDecision,
+  GrantProposal,
+} from "./protocol/schemas/permissions.ts";
+import { RequestQueue } from "./features/interactions/request-queue.ts";
 
-export type ApprovalDecision =
-  | "allow_once"
-  | "allow_session"
-  | "allow_workspace"
-  | "deny";
+export type { ApprovalDecision } from "./protocol/schemas/permissions.ts";
 
 export interface ApprovalRequest {
   requestId: string;
@@ -26,41 +25,28 @@ export interface ApprovalRequest {
   reason?: string;
 }
 
-interface PendingApproval {
-  resolve(decision: ApprovalDecision): void;
-}
-
 export class ApprovalQueue {
-  private readonly pending = new PendingRequestRegistry<PendingApproval>();
+  private readonly queue = new RequestQueue<undefined, ApprovalDecision>();
 
   request(
     request: ApprovalRequest,
     signal: AbortSignal | undefined,
     notify: (event: Record<string, unknown>) => void,
   ): Promise<ApprovalDecision> {
-    return new Promise<ApprovalDecision>((resolveDecision) => {
-      const onAbort = () => {
-        this.pending.take(request.requestId)?.resolve("deny");
-      };
-      this.pending.register(
-        request.requestId,
-        { resolve: resolveDecision },
-        () => signal?.removeEventListener("abort", onAbort),
-      );
-      signal?.addEventListener("abort", onAbort, { once: true });
-      if (signal?.aborted) {
-        onAbort();
-        return;
-      }
-      try {
+    return this.queue.request(
+      request.requestId,
+      undefined,
+      signal ? [signal] : [],
+      () =>
         notify({
           type: "approval_request",
           ...request,
-        });
-      } catch {
-        this.pending.take(request.requestId)?.resolve("deny");
-      }
-    });
+        }),
+      {
+        onAbort: (pending) => pending.resolve("deny"),
+        onNotifyError: (pending) => pending.resolve("deny"),
+      },
+    );
   }
 
   reply(requestId: string, decision: ApprovalDecision): boolean {
@@ -72,13 +58,10 @@ export class ApprovalQueue {
     ) {
       throw new Error(`Unsupported approval decision: ${String(decision)}`);
     }
-    const approval = this.pending.take(requestId);
-    if (!approval) return false;
-    approval.resolve(decision);
-    return true;
+    return this.queue.reply(requestId, decision);
   }
 
   denyAll(): void {
-    for (const approval of this.pending.drain()) approval.resolve("deny");
+    this.queue.settleAll((pending) => pending.resolve("deny"));
   }
 }

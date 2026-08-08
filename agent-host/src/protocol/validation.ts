@@ -67,6 +67,10 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(errorMessage(error));
+}
+
 export function isStringRecord(value: unknown): value is Record<string, string> {
   return (
     isJsonObject(value) &&

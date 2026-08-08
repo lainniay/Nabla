@@ -236,6 +236,9 @@ impl App {
             CommandEvent::ModelSetFinished(result) => match result {
                 Ok(model) => {
                     self.state.session.model = Some(model);
+                    self.state.selection_panel = Some(SelectionPanelState::thinking(
+                        &self.state.session.thinking_level,
+                    ));
                 }
                 Err(error) => self.set_error(format!("Unable to set model: {error}")),
             },

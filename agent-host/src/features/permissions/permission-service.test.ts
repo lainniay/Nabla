@@ -8,7 +8,11 @@ import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 
 import { InteractionBroker } from "../interactions/interaction-broker.ts";
 import type { AgentProfile } from "../subagents/profile-model.ts";
+import { MemoryPermissionAuditLog } from "./audit-log.ts";
+import { WorkspaceGrantStore } from "./approvals/workspace-store.ts";
 import type { SandboxCapability } from "./execution/sandbox-capability.ts";
+import { EMPTY_SANDBOX_CONFIG } from "./execution/sandbox-config.ts";
+import type { SandboxConfig } from "./execution/sandbox-config.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 import { PermissionService } from "./permission-service.ts";
 import type { ToolAuthorizationResult } from "./permission-service.ts";
@@ -42,6 +46,7 @@ function service(options: {
   cwd?: string;
   profile?: AgentProfile;
   sandbox?: SandboxCapability;
+  sandboxConfig?: SandboxConfig;
 } = {}) {
   const events: JsonObject[] = [];
   const interactions = new InteractionBroker();
@@ -62,6 +67,11 @@ function service(options: {
       cwd: () => options.cwd ?? "/workspace",
     },
     { capability: () => capability },
+    {
+      auditLog: new MemoryPermissionAuditLog(),
+      sandboxConfig: () => options.sandboxConfig ?? EMPTY_SANDBOX_CONFIG,
+      workspaceStore: new WorkspaceGrantStore(tmpdir()),
+    },
   );
   return { events, interactions, permissions };
 }
@@ -100,6 +110,11 @@ test("builtin tools are allowed without approval", async () => {
       cwd,
     });
     assert.equal("permit" in result, true);
+    const todos = await permissions.authorizeTool(
+      event("t2", "todo_write", { todos: [] }),
+      { cwd },
+    );
+    assert.equal("permit" in todos, true);
   });
 });
 

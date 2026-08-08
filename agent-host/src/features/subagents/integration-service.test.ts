@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { HarnessConfig } from "../workspace/config.ts";
+import { EMPTY_SANDBOX_CONFIG } from "../permissions/execution/sandbox-config.ts";
 import type { WorktreeRecord } from "./isolation/model.ts";
 import { IntegrationService } from "./isolation/integration-service.ts";
 
@@ -27,6 +28,7 @@ const config: HarnessConfig = {
       instructions: [],
     },
   },
+  sandbox: EMPTY_SANDBOX_CONFIG,
   diagnostics: [],
 };
 

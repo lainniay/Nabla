@@ -17,7 +17,7 @@ import {
   executePlan as dispatchPlanExecution,
   type PlanExecutionResult,
 } from "./execution.ts";
-import type { JsonObject } from "../../protocol/validation.ts";
+import { errorMessage, type JsonObject } from "../../protocol/validation.ts";
 
 export const PLAN_MODE_POLICY = {
   exposedTools: [
@@ -32,6 +32,7 @@ export const PLAN_MODE_POLICY = {
     "write",
     "bash",
     "delegate_task",
+    "todo_write",
   ],
   permissionRules: [
     {
@@ -185,7 +186,7 @@ export class PlanController {
         this.send({
           type: "host_warning",
           message: `Plan implementation turn failed: ${
-            error instanceof Error ? error.message : String(error)
+            errorMessage(error)
           }`,
         });
       },

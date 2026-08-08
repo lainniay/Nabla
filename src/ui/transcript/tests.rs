@@ -259,6 +259,32 @@ fn fenced_code_and_tables_remain_streaming_until_structurally_complete() {
 }
 
 #[test]
+fn sparse_table_body_stays_in_the_table_component() {
+    let mut state = state();
+    state
+        .transcript
+        .push(TranscriptItem::Assistant(AssistantMessage {
+            id: 1,
+            text: "| a | b |\n|---|---|\n| 1 |".to_owned(),
+            text_revision: 1,
+            complete: true,
+            ..AssistantMessage::default()
+        }));
+    let mut store = TranscriptStore::default();
+    store.sync(&state);
+    assert_eq!(store.order.len(), 1);
+    let projection = store.project_primary(40, 12, 1, usize::MAX, usize::MAX, 0);
+    let text = projection
+        .resident_rows
+        .iter()
+        .map(VisualRow::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains('1'), "{text:?}");
+    assert!(!text.contains("| 1 |"), "{text:?}");
+}
+
+#[test]
 fn history_batches_acknowledge_rows_before_the_whole_segment() {
     let mut state = state();
     let body = (0..64)
@@ -719,7 +745,7 @@ fn assistant_messages_render_markdown_in_the_primary_transcript() {
     assert!(
         rows.iter()
             .flat_map(|row| &row.cells)
-            .any(|cell| { cell.symbol == "c" && cell.style.foreground == palette::SAPPHIRE })
+            .any(|cell| { cell.symbol == "c" && cell.style.foreground == palette::MAUVE })
     );
 }
 
@@ -758,11 +784,11 @@ fn tool_updates_replace_the_canonical_snapshot_by_id() {
 }
 
 #[test]
-fn primary_tools_are_two_line_summaries_and_never_render_output_body() {
+fn primary_non_shell_tools_are_two_line_summaries_without_output_body() {
     let tool = ToolExecution {
         id: "call-1".to_owned(),
-        name: "bash".to_owned(),
-        args: json!({"command": "cargo test --all"}),
+        name: "read".to_owned(),
+        args: json!({"path": "src/lib.rs"}),
         output: "PRIVATE OUTPUT\nsecond line\nthird line".to_owned(),
         diff: None,
         status: ToolStatus::Succeeded,
@@ -775,11 +801,232 @@ fn primary_tools_are_two_line_summaries_and_never_render_output_body() {
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(rows.len(), 2);
-    assert!(text.contains("• Ran"));
-    assert!(text.contains("└ cargo test --all"));
-    assert!(text.contains("· 3 lines"));
-    assert!(!text.contains("succeeded"));
+    assert!(text.contains("• Explored"));
+    assert!(text.contains("└ Read · src/lib.rs"));
     assert!(!text.contains("PRIVATE OUTPUT"));
+}
+
+#[test]
+fn todo_tools_render_three_state_markers_and_strikethrough() {
+    let todos = json!([
+        { "content": "plan", "status": "pending" },
+        { "content": "build", "status": "in_progress" },
+        { "content": "ship", "status": "completed" },
+    ]);
+    let tool = ToolExecution {
+        id: "todo".to_owned(),
+        name: "todo_write".to_owned(),
+        args: json!({ "todos": todos }),
+        output: json!({ "action": "created", "todos": todos }).to_string(),
+        diff: None,
+        status: ToolStatus::Succeeded,
+    };
+
+    let rows = render_tool("todo", &tool, 60, ToolRenderMode::Compact, 0);
+    let text = rows
+        .iter()
+        .map(VisualRow::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("• Create TODO"), "{text}");
+    assert!(text.contains("○ plan"), "{text}");
+    assert!(text.contains("◐ build"), "{text}");
+    assert!(text.contains("● ship"), "{text}");
+    let ship = rows
+        .iter()
+        .find(|row| row.plain_text().contains("ship"))
+        .expect("ship row");
+    assert!(ship.cells.iter().any(|cell| cell.style.crossed_out));
+    assert!(ship.cells.iter().any(|cell| cell.style.dim));
+}
+
+#[test]
+fn todo_tools_label_updates_and_summarize_counts() {
+    let tool = ToolExecution {
+        id: "todo".to_owned(),
+        name: "todo_write".to_owned(),
+        args: json!({ "todos": [] }),
+        output: json!({
+            "action": "updated",
+            "todos": [
+                { "content": "build", "status": "completed" },
+                { "content": "test", "status": "pending" },
+            ],
+        })
+        .to_string(),
+        diff: None,
+        status: ToolStatus::Succeeded,
+    };
+
+    let rows = render_tool("todo", &tool, 60, ToolRenderMode::Compact, 0);
+    let text = rows
+        .iter()
+        .map(VisualRow::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("• Edit TODO"), "{text}");
+
+    let summary = render_tool("todo", &tool, 60, ToolRenderMode::Summary, 0);
+    assert_eq!(summary.len(), 1);
+    assert_eq!(summary[0].plain_text(), "• Edit TODO · 1/2");
+}
+
+#[test]
+fn todo_tools_render_from_args_while_running_and_failure_rows() {
+    let running = ToolExecution {
+        id: "todo-running".to_owned(),
+        name: "todo_write".to_owned(),
+        args: json!({ "todos": [{ "content": "plan", "status": "pending" }] }),
+        output: String::new(),
+        diff: None,
+        status: ToolStatus::Running,
+    };
+    let rows = render_tool("todo", &running, 60, ToolRenderMode::Compact, 2);
+    assert!(rows[0].plain_text().contains("Edit TODO"));
+    assert!(rows.iter().any(|row| row.plain_text().contains("○ plan")));
+
+    let failed = ToolExecution {
+        id: "todo-failed".to_owned(),
+        name: "todo_write".to_owned(),
+        args: json!({ "todos": [{ "content": "plan", "status": "pending" }] }),
+        output: "boom".to_owned(),
+        diff: None,
+        status: ToolStatus::Failed,
+    };
+    let rows = render_tool("todo", &failed, 60, ToolRenderMode::Compact, 0);
+    let text = rows
+        .iter()
+        .map(VisualRow::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("○ plan"), "{text}");
+    assert!(text.contains("failed"), "{text}");
+}
+
+#[test]
+fn todo_tools_fall_back_to_generic_rendering_for_bad_args() {
+    let tool = ToolExecution {
+        id: "todo-bad".to_owned(),
+        name: "todo_write".to_owned(),
+        args: json!({ "nope": 1 }),
+        output: String::new(),
+        diff: None,
+        status: ToolStatus::Succeeded,
+    };
+
+    let rows = render_tool("todo", &tool, 60, ToolRenderMode::Compact, 0);
+    let text = rows
+        .iter()
+        .map(VisualRow::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Edited"), "{text}");
+    assert!(!text.contains("TODO"), "{text}");
+}
+
+#[test]
+fn primary_shell_tools_render_full_command_and_gray_output_preview() {
+    let tool = ToolExecution {
+        id: "call-1".to_owned(),
+        name: "bash".to_owned(),
+        args: json!({"command": "cargo test --all"}),
+        output: "first line\nsecond line\nthird line".to_owned(),
+        diff: None,
+        status: ToolStatus::Succeeded,
+    };
+
+    let rows = render_item("tool:call-1", &TranscriptItem::Tool(tool), 60, 0);
+    let text = rows
+        .iter()
+        .map(VisualRow::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rows.len() >= 3);
+    assert!(text.contains("• Ran cargo test --all"));
+    assert!(text.contains("└ first line"));
+    assert!(text.contains("second line"));
+    assert!(text.contains("third line"));
+    assert!(!text.contains("succeeded"));
+    assert!(!text.contains("· 3 lines"));
+    let output_row = rows
+        .iter()
+        .find(|row| row.plain_text().contains("first line"))
+        .expect("output row");
+    assert!(
+        output_row
+            .cells
+            .iter()
+            .all(|cell| cell.style.foreground == Color::Gray && cell.style.dim)
+    );
+}
+
+#[test]
+fn primary_shell_command_wraps_without_truncation() {
+    let command = "cargo test --lib clarification_questions_are_answered_sequentially_with_custom_input 2>&1 | tail -5 && cargo test --lib tree_browser_supports_pi_filters_summary_and_abort_flow 2>&1 | tail -5";
+    let tool = ToolExecution {
+        id: "call".to_owned(),
+        name: "bash".to_owned(),
+        args: json!({"command": command}),
+        output: String::new(),
+        diff: None,
+        status: ToolStatus::Succeeded,
+    };
+
+    let rows = render_tool("tool", &tool, 60, ToolRenderMode::Compact, 0);
+    let text = rows
+        .iter()
+        .map(VisualRow::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let joined = text
+        .chars()
+        .filter(|character| character.is_alphanumeric() || *character == '_')
+        .collect::<String>();
+    assert!(rows.len() >= 3);
+    assert!(text.contains("│"));
+    assert!(joined.contains("clarification_questions_are_answered_sequentially_with_custom_input"));
+    assert!(joined.contains("tree_browser_supports_pi_filters_summary_and_abort_flow"));
+    assert!(!text.contains('…'));
+}
+
+#[test]
+fn primary_shell_output_preview_collapses_and_expanded_shows_everything() {
+    let output = (1..=12)
+        .map(|index| format!("output line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tool = ToolExecution {
+        id: "call".to_owned(),
+        name: "bash".to_owned(),
+        args: json!({"command": "cargo test"}),
+        output,
+        diff: None,
+        status: ToolStatus::Succeeded,
+    };
+
+    let compact = render_tool("tool", &tool, 80, ToolRenderMode::Compact, 0);
+    let compact_text = compact
+        .iter()
+        .map(VisualRow::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(compact_text.contains("output line 1"));
+    assert!(compact_text.contains("output line 2"));
+    assert!(compact_text.contains("… +6 lines · expand in Ctrl+O"));
+    assert!(compact_text.contains("output line 9"));
+    assert!(compact_text.contains("output line 12"));
+    assert!(!compact_text.contains("output line 3"));
+    assert!(!compact_text.contains("output line 8"));
+
+    let expanded = render_tool("tool", &tool, 80, ToolRenderMode::Expanded, 0);
+    let expanded_text = expanded
+        .iter()
+        .map(VisualRow::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(expanded_text.contains("output line 1"));
+    assert!(expanded_text.contains("output line 12"));
+    assert!(!expanded_text.contains("expand in Ctrl+O"));
 }
 
 #[test]
@@ -921,7 +1168,7 @@ fn compact_edit_diffs_are_bounded_and_viewer_expansion_is_complete() {
 }
 
 #[test]
-fn primary_shell_tools_use_token_colors_and_only_surface_non_success_states() {
+fn primary_shell_tools_use_token_colors_and_surface_status_states() {
     let tool = ToolExecution {
         id: "call-shell".to_owned(),
         name: "bash".to_owned(),
@@ -931,17 +1178,17 @@ fn primary_shell_tools_use_token_colors_and_only_surface_non_success_states() {
         status: ToolStatus::Succeeded,
     };
     let rows = render_tool("tool", &tool, 80, ToolRenderMode::Compact, 0);
-    assert_eq!(rows.len(), 2);
-    assert!(!rows[1].plain_text().contains("0 B"));
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].plain_text().contains("0 B"));
     for color in [
-        palette::SAPPHIRE,
-        palette::BLUE,
         palette::GREEN,
         palette::PEACH,
+        palette::RED,
         palette::YELLOW,
+        palette::TEXT,
     ] {
         assert!(
-            rows[1]
+            rows[0]
                 .cells
                 .iter()
                 .any(|cell| cell.style.foreground == color),
@@ -959,8 +1206,9 @@ fn primary_shell_tools_use_token_colors_and_only_surface_non_success_states() {
         ToolRenderMode::Compact,
         2,
     );
+    assert_eq!(running.len(), 2);
     assert!(running[0].plain_text().starts_with("⠹ Ran"));
-    assert!(running[1].plain_text().ends_with("· running"));
+    assert!(running[1].plain_text().contains("└ running"));
 
     let waiting = render_tool(
         "waiting",
@@ -972,8 +1220,10 @@ fn primary_shell_tools_use_token_colors_and_only_surface_non_success_states() {
         ToolRenderMode::Compact,
         2,
     );
+    assert_eq!(waiting.len(), 2);
     assert!(waiting[0].plain_text().starts_with("● Ran"));
     assert_eq!(waiting[0].cells[0].style.foreground, palette::YELLOW);
+    assert!(waiting[1].plain_text().contains("└ waiting approval"));
 
     let failed = render_tool(
         "failed",
@@ -988,13 +1238,8 @@ fn primary_shell_tools_use_token_colors_and_only_surface_non_success_states() {
     );
     assert_eq!(failed.len(), 3);
     assert!(failed[2].plain_text().contains("failed"));
-    assert!(
-        !failed
-            .iter()
-            .map(VisualRow::plain_text)
-            .collect::<String>()
-            .contains("private failure body")
-    );
+    let failed_text = failed.iter().map(VisualRow::plain_text).collect::<String>();
+    assert!(failed_text.contains("private failure body"));
 }
 
 #[test]

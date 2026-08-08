@@ -5,6 +5,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { writeAtomicJson } from "../../../persistence/atomic-json.ts";
 import { assertWorkspaceRelativePath } from "../../permissions/filesystem/path.ts";
 import { sha256Hex } from "../../permissions/shell/digest.ts";
+import { errorMessage } from "../../../protocol/validation.ts";
 import type {
   WorktreeRecord,
   WorktreeRecoveryScan,
@@ -74,7 +75,7 @@ export class WorktreeArtifactStore {
         } catch (error) {
           warnings.push(
             `Unable to read worktree recovery record ${recordPath}: ${
-              error instanceof Error ? error.message : String(error)
+              errorMessage(error)
             }`,
           );
           continue;
@@ -91,7 +92,7 @@ export class WorktreeArtifactStore {
         } catch (error) {
           warnings.push(
             `Unable to validate worktree recovery record ${recordPath}: ${
-              error instanceof Error ? error.message : String(error)
+              errorMessage(error)
             }`,
           );
         }
@@ -208,7 +209,7 @@ export class WorktreeArtifactStore {
       if (code !== "ENOENT") {
         warnings.push(
           `Unable to scan managed worktree directory ${path}: ${
-            error instanceof Error ? error.message : String(error)
+            errorMessage(error)
           }`,
         );
       }

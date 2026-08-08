@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use super::request::UnixSocketRules;
 use super::request::{NetworkProfile, SandboxExecRequest};
 
 #[derive(Debug, Clone)]
@@ -12,6 +13,7 @@ pub struct CompiledProfile {
     pub deny_read: Vec<PathBuf>,
     pub deny_write: Vec<PathBuf>,
     pub network: NetworkProfile,
+    pub unix_sockets: UnixSocketRules,
 }
 
 pub fn compile(request: &SandboxExecRequest) -> Result<CompiledProfile, String> {
@@ -43,6 +45,22 @@ pub fn compile(request: &SandboxExecRequest) -> Result<CompiledProfile, String> 
         .into_iter()
         .filter(|path| !deny_write.contains(path))
         .collect();
+    let unix_sockets = UnixSocketRules {
+        allow: request
+            .profile
+            .unix_sockets
+            .allow
+            .iter()
+            .map(|path| canonicalize_path(path))
+            .collect::<Result<Vec<_>, _>>()?,
+        deny: request
+            .profile
+            .unix_sockets
+            .deny
+            .iter()
+            .map(|path| canonicalize_path(path))
+            .collect::<Result<Vec<_>, _>>()?,
+    };
 
     Ok(CompiledProfile {
         cwd,
@@ -50,6 +68,7 @@ pub fn compile(request: &SandboxExecRequest) -> Result<CompiledProfile, String> 
         deny_read: deny_read.into_iter().collect(),
         deny_write: deny_write.into_iter().collect(),
         network: request.profile.network,
+        unix_sockets,
     })
 }
 
@@ -97,6 +116,7 @@ mod tests {
                 },
                 network: NetworkProfile::Deny,
                 protected_paths: vec!["/home/user/.aws".into()],
+                unix_sockets: Default::default(),
             },
             environment: BTreeMap::new(),
         }

@@ -61,6 +61,7 @@ mod tests {
     use super::*;
     use crate::sandbox::SandboxMode;
     use crate::sandbox::profile::{CompiledProfile, compile};
+    use crate::sandbox::request::UnixSocketRules;
     use crate::sandbox::request::{FilesystemProfile, SandboxExecRequest, SandboxProfile};
     use std::collections::BTreeMap;
 
@@ -80,6 +81,7 @@ mod tests {
                 },
                 network: crate::sandbox::NetworkProfile::Deny,
                 protected_paths: vec![],
+                unix_sockets: UnixSocketRules::default(),
             },
             environment: BTreeMap::new(),
         }

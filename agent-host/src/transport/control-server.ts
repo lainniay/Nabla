@@ -3,7 +3,7 @@ import { createServer, type Socket } from "node:net";
 
 import type { OperationContext } from "../app/operation-scope.ts";
 import type { CommandRouter } from "../protocol/command-router.ts";
-import type { JsonObject } from "../protocol/validation.ts";
+import { errorMessage, type JsonObject } from "../protocol/validation.ts";
 import { ControlConnection } from "./control-connection.ts";
 
 export interface ControlServerLifecycle {
@@ -116,7 +116,7 @@ export class ControlServer {
         if (id) this.requestConnections.delete(id);
         connection.send({
           type: "host_protocol_error",
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       });
   }

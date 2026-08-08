@@ -13,7 +13,7 @@ import type {
   PendingIntegrationSnapshot,
   WorktreeIntegrationSnapshot,
 } from "../../protocol/contracts.ts";
-import type { JsonObject } from "../../protocol/validation.ts";
+import { errorMessage, type JsonObject } from "../../protocol/validation.ts";
 import type { RuntimeAccess } from "../../runtime/runtime-access.ts";
 import type { PlanModePort } from "../plans/plan-controller.ts";
 import type {
@@ -348,7 +348,7 @@ export class SubagentSupervisor implements SubagentRunnerPort {
           active,
           active.controller.signal.aborted ? "cancelled" : "failed",
           undefined,
-          error instanceof Error ? error.message : String(error),
+          errorMessage(error),
         );
         this.subagents.delete(active.id);
         this.onAgentsChanged();
@@ -439,9 +439,7 @@ export class SubagentSupervisor implements SubagentRunnerPort {
       } catch (cleanupError) {
         this.warn(
           `Unable to discard failed conflict resolver ${prepared.isolation.record.id}: ${
-            cleanupError instanceof Error
-              ? cleanupError.message
-              : String(cleanupError)
+            errorMessage(cleanupError)
           }`,
         );
       }
@@ -461,7 +459,7 @@ export class SubagentSupervisor implements SubagentRunnerPort {
       event: "conflicted",
       agent: this.publicSubagent(pending.agent),
       integration: this.worktreeSummary(pending.agent),
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 

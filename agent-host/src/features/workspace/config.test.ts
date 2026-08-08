@@ -120,6 +120,68 @@ test("trusted project config cannot expand profile permissions", () => {
   );
 });
 
+test("global sandbox config is honored and relative paths are rejected", () => {
+  const setup = fixture();
+  const home = join(setup.root, "home");
+  const globalDir = join(home, ".nabla");
+  mkdirSync(globalDir, { recursive: true });
+  writeFileSync(
+    join(globalDir, "config.json"),
+    JSON.stringify({
+      sandbox: {
+        writableRoots: ["/srv/nabla-cache", "relative/cache"],
+        unixSockets: {
+          allow: ["/var/run/nabla.sock"],
+          deny: ["/srv/nabla-cache/.env.sock", "relative.sock"],
+        },
+      },
+    }),
+  );
+
+  const config = loadHarnessConfig(setup.cwd, { homeDir: home });
+  assert.deepEqual(config.sandbox, {
+    writableRoots: ["/srv/nabla-cache"],
+    unixSockets: {
+      allow: ["/var/run/nabla.sock"],
+      deny: ["/srv/nabla-cache/.env.sock"],
+    },
+  });
+  assert.equal(
+    config.diagnostics.filter((entry) =>
+      entry.message.includes("must be absolute"),
+    ).length,
+    2,
+  );
+});
+
+test("project sandbox config cannot expand boundaries", () => {
+  const setup = fixture();
+  const home = join(setup.root, "home");
+  const projectDir = join(setup.cwd, ".nabla");
+  mkdirSync(projectDir);
+  writeFileSync(
+    join(projectDir, "config.json"),
+    JSON.stringify({
+      sandbox: {
+        writableRoots: ["/srv/project-root"],
+        unixSockets: { allow: ["/var/run/project.sock"], deny: [] },
+      },
+    }),
+  );
+  saveWorkspaceTrust(setup.cwd, true, { homeDir: home });
+
+  const config = loadHarnessConfig(setup.cwd, { homeDir: home });
+  assert.deepEqual(config.sandbox, {
+    writableRoots: [],
+    unixSockets: { allow: [], deny: [] },
+  });
+  assert.ok(
+    config.diagnostics.some((entry) =>
+      entry.message.includes("Project sandbox configuration"),
+    ),
+  );
+});
+
 test("markdown subagents merge globally and from trusted projects", () => {
   const setup = fixture();
   const home = join(setup.root, "home");

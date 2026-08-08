@@ -63,6 +63,9 @@ listed canonical modules.
   `THINKING_LEVELS`, read-only/high-risk command classifiers.
 - `permissions/policy/builtin.ts` — `buildCredentialDenyRules`,
   `buildReadOnlyBashRules`, `buildSandboxBashRules`.
+- `permissions/execution/sandbox-config.ts` — `SandboxConfig`,
+  `EMPTY_SANDBOX_CONFIG` (global `~/.nabla/config.json` `sandbox` section:
+  `writableRoots`, `unixSockets.allow/deny`; project config cannot expand).
 - `runtime/path-utils.ts` — `expandHomePath`.
 - `persistence/atomic-json.ts` — `writeAtomicFile`, `writeAtomicJson`,
   `writeAtomicJsonSync`.
@@ -119,9 +122,14 @@ cargo test                             # run Rust tests
 cargo fmt --all -- --check             # verify Rust formatting
 cargo clippy --all-targets -- -D warnings
 cd agent-host && npm run typecheck     # strict TypeScript checking
-cd agent-host && npm test              # Node test runner
+cd agent-host && npm test              # Node test runner (scripts/test.mjs redirects
+                                       # PI_CODING_AGENT_DIR/PI_CODING_AGENT_SESSION_DIR to tmpdir)
 cd agent-host && npm run host          # run the host directly
 ```
+
+Unix socket / control-server tests require the app sandbox to allow local IPC:
+run them through `./target/debug/nabla __sandbox-exec` with `readWrite`
+including the workspace and `tmpdir()` when the calling shell denies network.
 
 Use the Node version declared in `agent-host/package.json`.
 

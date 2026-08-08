@@ -146,6 +146,15 @@ test("missing tools roll back to the previous tool set", () => {
   }
 });
 
+test("todo_write is available in normal sessions but hidden in plan mode", () => {
+  assert.ok(
+    (PLAN_MODE_POLICY.standardTools as readonly string[]).includes("todo_write"),
+  );
+  assert.ok(
+    !(PLAN_MODE_POLICY.exposedTools as readonly string[]).includes("todo_write"),
+  );
+});
+
 test("submit bumps revision and snapshot exposes the artifact", () => {
   const root = mkdtempSync(join(tmpdir(), "nabla-plan-controller-"));
   try {

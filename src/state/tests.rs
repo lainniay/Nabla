@@ -33,6 +33,32 @@ fn editor_preserves_paste_newlines_and_deletes_whole_graphemes() {
 }
 
 #[test]
+fn delete_to_line_start_removes_only_the_current_line_prefix() {
+    let mut editor = EditorState::default();
+    editor.insert_text("first\nsecond\nthird");
+    editor.move_end();
+    editor.delete_to_line_start();
+    assert_eq!(editor.text(), "first\nsecond\n");
+    assert_eq!(editor.cursor(), "first\nsecond\n".chars().count());
+
+    let mut editor = EditorState::default();
+    editor.insert_text("ab\ncdef");
+    editor.move_left();
+    editor.move_left();
+    editor.move_left();
+    editor.delete_to_line_start();
+    assert_eq!(editor.text(), "ab\ndef");
+    assert_eq!(editor.cursor(), "ab\n".chars().count());
+
+    let mut editor = EditorState::default();
+    editor.insert_text("hello");
+    editor.move_left();
+    editor.delete_to_line_start();
+    assert_eq!(editor.text(), "o");
+    assert_eq!(editor.cursor(), 0);
+}
+
+#[test]
 fn maps_pi_session_flags_to_initial_run_state() {
     assert_eq!(
         AppState::new(session(false, false)).run_state,

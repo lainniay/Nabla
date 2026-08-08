@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 
+import { errorMessage } from "../../../protocol/validation.ts";
 import type { SandboxStatus } from "../../../protocol/contracts.ts";
 import type { SandboxCapability } from "./sandbox-capability.ts";
 import { disabledSandbox } from "./sandbox-capability.ts";
@@ -58,7 +59,7 @@ export class RustSandboxBackend {
     } catch (error) {
       return new RustSandboxBackend(
         disabledSandbox(
-          error instanceof Error ? error.message : String(error),
+          errorMessage(error),
         ),
         executable,
       );
@@ -93,6 +94,10 @@ export class RustSandboxBackend {
               denyWrite: profile.filesystem.denyWrite,
             },
             network: profile.network === "allowed" ? "allow" : "deny",
+            unixSockets: {
+              allow: profile.unixSockets.allow,
+              deny: profile.unixSockets.deny,
+            },
             protectedPaths: profile.filesystem.denyRead,
           },
           environment: env ?? {},

@@ -4,6 +4,7 @@ import test from "node:test";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import type { HarnessConfig } from "../workspace/config.ts";
+import { EMPTY_SANDBOX_CONFIG } from "../permissions/execution/sandbox-config.ts";
 import type { RuntimeSupervisor } from "../../runtime/runtime-supervisor.ts";
 import type { PlanModePort } from "../plans/plan-controller.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
@@ -37,6 +38,7 @@ const config: HarnessConfig = {
       instructions: [],
     },
   },
+  sandbox: EMPTY_SANDBOX_CONFIG,
   diagnostics: [],
 };
 

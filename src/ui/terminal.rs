@@ -5,7 +5,10 @@ use std::{
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     queue,
     style::{
         Attribute, Color as CrosstermColor, ResetColor, SetAttribute, SetBackgroundColor,
@@ -13,7 +16,7 @@ use crossterm::{
     },
     terminal::{
         BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate, EnterAlternateScreen,
-        LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement,
     },
 };
 
@@ -62,6 +65,7 @@ pub struct TerminalDriver<W: Write> {
     owned_footer_height: u16,
     claimed_primary: bool,
     mouse_enabled: bool,
+    keyboard_enhancement_enabled: bool,
     pending_wrap: bool,
     physical_cursor: Option<CursorPosition>,
     physical_valid: bool,
@@ -71,9 +75,16 @@ impl TerminalDriver<Stdout> {
     pub fn open(size: TerminalSize) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut driver = Self::new(io::stdout(), TerminalCapabilities::detect(), size);
-        if let Err(error) = driver.claim_primary_surface() {
+        let result = driver
+            .enable_bracketed_paste()
+            .and_then(|()| driver.claim_primary_surface());
+        if let Err(error) = result {
+            let _ = driver.disable_bracketed_paste();
             let _ = disable_raw_mode();
             return Err(error);
+        }
+        if supports_keyboard_enhancement().unwrap_or(false) {
+            let _ = driver.push_keyboard_enhancement();
         }
         Ok(driver)
     }
@@ -99,6 +110,7 @@ impl<W: Write> TerminalDriver<W> {
             owned_footer_height: 2,
             claimed_primary: false,
             mouse_enabled: false,
+            keyboard_enhancement_enabled: false,
             pending_wrap: false,
             physical_cursor: None,
             physical_valid: true,
@@ -151,6 +163,43 @@ impl<W: Write> TerminalDriver<W> {
         self.output.flush()?;
         self.mouse_enabled = enabled;
         Ok(())
+    }
+
+    /// Wraps pastes in bracketed-paste markers so multiline clipboard content
+    /// arrives as a single `Event::Paste` instead of synthetic Enter keys.
+    pub(crate) fn enable_bracketed_paste(&mut self) -> io::Result<()> {
+        queue!(self.output, EnableBracketedPaste)?;
+        self.output.flush()
+    }
+
+    pub(crate) fn disable_bracketed_paste(&mut self) -> io::Result<()> {
+        queue!(self.output, DisableBracketedPaste)?;
+        self.output.flush()
+    }
+
+    /// Asks the terminal to disambiguate modified keys (kitty keyboard
+    /// protocol) so Shift+Enter arrives as Enter with the SHIFT modifier
+    /// instead of an unmodified Enter.
+    pub(crate) fn push_keyboard_enhancement(&mut self) -> io::Result<()> {
+        queue!(
+            self.output,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        )?;
+        self.output.flush()?;
+        self.keyboard_enhancement_enabled = true;
+        Ok(())
+    }
+
+    pub(crate) fn pop_keyboard_enhancement(&mut self) -> io::Result<()> {
+        if !self.keyboard_enhancement_enabled {
+            return Ok(());
+        }
+        queue!(self.output, PopKeyboardEnhancementFlags)?;
+        self.keyboard_enhancement_enabled = false;
+        self.output.flush()
     }
 
     pub fn commit(&mut self, plan: &TerminalCommitPlan) -> io::Result<()> {
@@ -637,6 +686,8 @@ impl<W: Write> TerminalDriver<W> {
     }
 
     fn finish_terminal(&mut self) -> io::Result<()> {
+        let _ = self.pop_keyboard_enhancement();
+        let _ = self.disable_bracketed_paste();
         if self.mouse_enabled {
             queue!(self.output, DisableMouseCapture)?;
             self.mouse_enabled = false;
@@ -672,8 +723,12 @@ impl<W: Write> Drop for TerminalDriver<W> {
         if self.surface == SurfaceKind::Alternate {
             let _ = queue!(self.output, LeaveAlternateScreen);
         }
+        if self.keyboard_enhancement_enabled {
+            let _ = queue!(self.output, PopKeyboardEnhancementFlags);
+        }
         let _ = queue!(
             self.output,
+            DisableBracketedPaste,
             ResetColor,
             SetAttribute(Attribute::Reset),
             Show
@@ -1105,6 +1160,50 @@ mod tests {
             output.ends_with("\u{1b}[2;1H"),
             "full-width row must explicitly cancel pending wrap: {output:?}"
         );
+    }
+
+    #[test]
+    fn bracketed_paste_modes_are_emitted_for_terminal_sessions() {
+        let mut driver = TerminalDriver::new(
+            Vec::<u8>::new(),
+            TerminalCapabilities {
+                synchronized_output: false,
+                true_color: false,
+                mouse: false,
+            },
+            TerminalSize::new(20, 4),
+        );
+
+        driver.enable_bracketed_paste().unwrap();
+        let enabled = String::from_utf8_lossy(driver.output_ref());
+        assert!(enabled.contains("\u{1b}[?2004h"));
+
+        driver.disable_bracketed_paste().unwrap();
+        let output = String::from_utf8_lossy(driver.output_ref());
+        assert!(output.contains("\u{1b}[?2004l"));
+    }
+
+    #[test]
+    fn keyboard_enhancement_flags_are_pushed_and_popped_for_terminal_sessions() {
+        let mut driver = TerminalDriver::new(
+            Vec::<u8>::new(),
+            TerminalCapabilities {
+                synchronized_output: false,
+                true_color: false,
+                mouse: false,
+            },
+            TerminalSize::new(20, 4),
+        );
+
+        driver.push_keyboard_enhancement().unwrap();
+        let pushed = String::from_utf8_lossy(driver.output_ref());
+        assert!(pushed.contains("\u{1b}[>3u"));
+        assert!(driver.keyboard_enhancement_enabled);
+
+        driver.pop_keyboard_enhancement().unwrap();
+        let output = String::from_utf8_lossy(driver.output_ref());
+        assert!(output.contains("\u{1b}[<1u"));
+        assert!(!driver.keyboard_enhancement_enabled);
     }
 
     #[test]

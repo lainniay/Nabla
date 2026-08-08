@@ -6,6 +6,8 @@ export const QuestionOptionSchema = Type.Object({
   description: Type.Optional(Type.String()),
 });
 
+export type QuestionOption = Static<typeof QuestionOptionSchema>;
+
 export const PlanQuestionSchema = Type.Object({
   id: Type.String(),
   prompt: Type.String(),

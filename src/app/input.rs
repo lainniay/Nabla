@@ -52,7 +52,7 @@ impl App {
                 return Vec::new();
             }
             match key.code {
-                KeyCode::Enter => {
+                KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                     self.accept_file_completion();
                     return Vec::new();
                 }
@@ -170,7 +170,7 @@ impl App {
                 self.refresh_file_completion().into_iter().collect()
             }
             KeyCode::Char('u' | 'U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.state.editor.clear();
+                self.state.editor.delete_to_line_start();
                 self.state.file_completion = None;
                 self.state.reset_command_menu();
                 Vec::new()

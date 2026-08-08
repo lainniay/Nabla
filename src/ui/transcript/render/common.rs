@@ -1,37 +1,13 @@
 use crate::state::TurnSeparator;
 use crate::ui::{
     palette,
-    text::{display_width, truncate, wrap_text},
+    text::{truncate, wrap_text},
     types::{CellStyle, StyledCell, VisualRow},
 };
 
-pub(crate) fn styled_cells(text: &str, style: CellStyle) -> Vec<StyledCell> {
-    wrap_text("inline", text, u16::MAX, style)
-        .into_iter()
-        .next()
-        .map(|row| row.cells)
-        .unwrap_or_default()
-}
-
-pub(crate) fn cells_width(cells: &[StyledCell]) -> u16 {
-    cells
-        .iter()
-        .fold(0u16, |width, cell| width.saturating_add(cell.width))
-}
-
-pub(crate) fn clip_cells(cells: Vec<StyledCell>, width: u16) -> Vec<StyledCell> {
-    let mut used = 0u16;
-    cells
-        .into_iter()
-        .take_while(|cell| {
-            let fits = used.saturating_add(cell.width) <= width;
-            if fits {
-                used = used.saturating_add(cell.width);
-            }
-            fits
-        })
-        .collect()
-}
+pub(crate) use crate::ui::text::{
+    cells_width, clip_cells, display_width, styled_cells, take_graphemes_by_width,
+};
 
 pub(crate) fn row_from_cells(id: &str, cells: Vec<StyledCell>, width: u16) -> VisualRow {
     VisualRow {
@@ -42,20 +18,65 @@ pub(crate) fn row_from_cells(id: &str, cells: Vec<StyledCell>, width: u16) -> Vi
     }
 }
 
-pub(crate) fn indent_styled_rows(
-    rows: Vec<VisualRow>,
-    prefix: &str,
-    style: CellStyle,
+/// Like [`crate::ui::text::wrap_styled_lines`] but also breaks cells that are
+/// wider than the target width so long unbroken tokens (paths, test names)
+/// wrap instead of being clipped away.
+pub(crate) fn wrap_styled_breaking(
+    component_id: &str,
+    logical_lines: &[Vec<StyledCell>],
+    width: u16,
 ) -> Vec<VisualRow> {
-    rows.into_iter()
-        .map(|mut row| {
-            let mut cells = styled_cells(prefix, style);
-            cells.extend(row.cells);
-            row.cells = cells;
-            row
-        })
-        .collect()
+    let width = usize::from(width.max(1));
+    let mut rows = Vec::new();
+    for (logical_line, line) in logical_lines.iter().enumerate() {
+        if line.is_empty() {
+            rows.push(VisualRow {
+                component_id: component_id.to_owned(),
+                logical_line,
+                wrap_index: 0,
+                cells: Vec::new(),
+            });
+            continue;
+        }
+        let mut current = Vec::new();
+        let mut current_width = 0usize;
+        let mut wrap_index = 0usize;
+        for cell in line {
+            let mut remaining = cell.symbol.as_str();
+            while !remaining.is_empty() {
+                if current_width >= width {
+                    rows.push(VisualRow {
+                        component_id: component_id.to_owned(),
+                        logical_line,
+                        wrap_index,
+                        cells: std::mem::take(&mut current),
+                    });
+                    current_width = 0;
+                    wrap_index += 1;
+                }
+                let available = width - current_width;
+                let (take, rest) = take_graphemes_by_width(remaining, available);
+                let take_width = display_width(take);
+                current.push(StyledCell::new(take, take_width as u16, cell.style));
+                current_width = current_width.saturating_add(take_width);
+                remaining = rest;
+            }
+        }
+        if !current.is_empty() {
+            rows.push(VisualRow {
+                component_id: component_id.to_owned(),
+                logical_line,
+                wrap_index,
+                cells: current,
+            });
+        }
+    }
+    if rows.is_empty() {
+        rows.push(VisualRow::blank(component_id));
+    }
+    rows
 }
+
 pub(crate) fn single_line_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }

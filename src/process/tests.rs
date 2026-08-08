@@ -103,7 +103,8 @@ async fn repo_local_pi_get_state_smoke() {
             "edit",
             "write",
             "bash",
-            "delegate_task"
+            "delegate_task",
+            "todo_write"
         ]
     );
     let plan = host.set_plan_mode(true).await.unwrap();
@@ -132,7 +133,8 @@ async fn repo_local_pi_get_state_smoke() {
             "edit",
             "write",
             "bash",
-            "delegate_task"
+            "delegate_task",
+            "todo_write"
         ]
     );
     let state_after_modes = client.get_state().await.unwrap();

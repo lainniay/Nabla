@@ -2,8 +2,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { Value } from "typebox/value";
+
 import { writeAtomicJsonSync } from "../../../persistence/atomic-json.ts";
-import { isJsonObject, isStringRecord } from "../../../protocol/validation.ts";
+import { isJsonObject } from "../../../protocol/validation.ts";
+import {
+  GrantProposalSchema,
+  InvalidationKeySchema,
+} from "../../../protocol/schemas/permissions.ts";
 import type { GrantBundle } from "../model.ts";
 import type { CapabilityMatcher, InvalidationKey } from "../model.ts";
 import {
@@ -282,86 +288,17 @@ function legacyMatcher(
 
 function isGrantBundle(value: unknown): value is GrantBundle {
   return (
-    isJsonObject(value) &&
-    value.scope === "workspace" &&
-    typeof value.workspaceId === "string" &&
-    Array.isArray(value.matchers) &&
-    value.matchers.every(isCapabilityMatcher) &&
-    (value.invalidationKeys === undefined ||
-      (Array.isArray(value.invalidationKeys) &&
-        value.invalidationKeys.every(isInvalidationKey)))
-  );
-}
-
-function isCapabilityMatcher(value: unknown): value is CapabilityMatcher {
-  if (!isJsonObject(value) || typeof value.kind !== "string") return false;
-  if (value.kind === "shell_digest") {
-    return typeof value.digest === "string";
-  }
-  if (value.kind === "tool") {
-    return typeof value.tool === "string" &&
-      (value.inputDigest === undefined || typeof value.inputDigest === "string");
-  }
-  if (value.kind === "exec") {
-    return (
-      typeof value.executable === "string" &&
-      (value.argv === undefined ||
-        (Array.isArray(value.argv) &&
-          value.argv.every((item) => typeof item === "string"))) &&
-      (value.cwd === undefined || typeof value.cwd === "string") &&
-      (value.environment === undefined || isStringRecord(value.environment))
-    );
-  }
-  if (value.kind === "file") {
-    return (
-      [
-        "read",
-        "list",
-        "create",
-        "write",
-        "truncate",
-        "append",
-        "rename",
-        "delete",
-      ]
-        .includes(String(value.operation)) &&
-      typeof value.path === "string" &&
-      (value.recursive === undefined || typeof value.recursive === "boolean") &&
-      (value.destination === undefined || typeof value.destination === "string")
-    );
-  }
-  if (value.kind === "network") {
-    return (
-      (value.operation === "connect" || value.operation === "listen") &&
-      typeof value.host === "string" &&
-      (value.port === undefined || typeof value.port === "number") &&
-      (value.protocol === undefined || typeof value.protocol === "string")
-    );
-  }
-  return (
-    value.kind === "opaque_code" &&
-    typeof value.runtime === "string" &&
-    typeof value.digest === "string"
+    Value.Check(GrantProposalSchema, value) &&
+    (value as GrantBundle).scope === "workspace"
   );
 }
 
 function isInvalidationKey(value: unknown): value is InvalidationKey {
-  if (
-    !isJsonObject(value) ||
-    ![
-      "file_digest",
-      "npm_script_digest",
-      "workspace_generation",
-      "git_common_directory",
-    ].includes(String(value.kind)) ||
-    typeof value.value !== "string" ||
-    (value.path !== undefined && typeof value.path !== "string")
-  ) {
-    return false;
-  }
+  if (!Value.Check(InvalidationKeySchema, value)) return false;
+  const key = value as InvalidationKey;
   return (
-    value.kind !== "npm_script_digest" ||
-    (typeof value.path === "string" && typeof value.selector === "string")
+    key.kind !== "npm_script_digest" ||
+    (typeof key.path === "string" && typeof key.selector === "string")
   );
 }
 

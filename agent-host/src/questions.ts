@@ -1,14 +1,11 @@
-export interface QuestionOption {
-  id: string;
-  label: string;
-  description?: string;
-}
+import { asError } from "./protocol/validation.ts";
+import type { PlanQuestion } from "./protocol/schemas/questions.ts";
+import { RequestQueue } from "./features/interactions/request-queue.ts";
 
-export interface PlanQuestion {
-  id: string;
-  prompt: string;
-  options: QuestionOption[];
-}
+export type {
+  PlanQuestion,
+  QuestionOption,
+} from "./protocol/schemas/questions.ts";
 
 export interface QuestionAnswer {
   questionId: string;
@@ -16,15 +13,9 @@ export interface QuestionAnswer {
   optionId?: string;
 }
 
-interface PendingQuestion {
-  questions: PlanQuestion[];
-  resolve(answers: QuestionAnswer[]): void;
-  reject(error: Error): void;
-}
-
 export class QuestionQueue {
   private nextId = 1;
-  private readonly pending = new PendingRequestRegistry<PendingQuestion>();
+  private readonly queue = new RequestQueue<PlanQuestion[], QuestionAnswer[]>();
 
   request(
     questions: PlanQuestion[],
@@ -39,53 +30,30 @@ export class QuestionQueue {
 
     const requestId = `question-${this.nextId++}`;
 
-    return new Promise<QuestionAnswer[]>((resolve, reject) => {
-      const pending: PendingQuestion = {
-        questions: structuredClone(questions),
-        resolve,
-        reject,
-      };
-      const onAbort = () => {
-        const aborted = this.pending.take(requestId);
-        if (!aborted) return;
-        onCancelled(requestId);
-        aborted.reject(new Error("Question flow cancelled"));
-      };
-      this.pending.register(requestId, pending, () =>
-        signal?.removeEventListener("abort", onAbort),
-      );
-      signal?.addEventListener("abort", onAbort, { once: true });
-
-      // Abort may race with listener registration. Re-check after the request is
-      // stored so onAbort can remove it without leaving a stale queue entry.
-      if (signal?.aborted) {
-        onAbort();
-        return;
-      }
-
-      try {
-        notify(requestId, questions);
-      } catch (error) {
-        this.pending
-          .take(requestId)
-          ?.reject(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
+    return this.queue.request(
+      requestId,
+      structuredClone(questions),
+      signal ? [signal] : [],
+      () => notify(requestId, questions),
+      {
+        onAbort: (pending, announced) => {
+          if (announced) onCancelled(requestId);
+          pending.reject(new Error("Question flow cancelled"));
+        },
+        onNotifyError: (pending, error) => pending.reject(asError(error)),
+      },
+    );
   }
 
   reply(requestId: string, answers: QuestionAnswer[]): boolean {
-    const pending = this.pending.get(requestId);
+    const pending = this.queue.get(requestId);
     if (!pending) return false;
-    validateAnswers(answers, pending.questions);
-    this.pending.take(requestId);
-    pending.resolve(structuredClone(answers));
-    return true;
+    validateAnswers(answers, pending.request);
+    return this.queue.reply(requestId, structuredClone(answers));
   }
 
   cancelAll(reason = "Question host stopped"): void {
-    for (const pending of this.pending.drain()) {
-      pending.reject(new Error(reason));
-    }
+    this.queue.settleAll((pending) => pending.reject(new Error(reason)));
   }
 }
 
@@ -139,4 +107,3 @@ function validateAnswers(answers: QuestionAnswer[], questions: PlanQuestion[]): 
     }
   }
 }
-import { PendingRequestRegistry } from "./protocol/pending-request-registry.ts";

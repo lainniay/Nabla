@@ -1,20 +1,22 @@
+import type {
+  ApprovalDecision,
+  CapabilityMatcher,
+  FileOperation,
+  GrantBundle,
+  GrantProposal,
+  InvalidationKey,
+} from "../../protocol/schemas/permissions.ts";
+
+export type {
+  ApprovalDecision,
+  CapabilityMatcher,
+  FileOperation,
+  GrantBundle,
+  GrantProposal,
+  InvalidationKey,
+} from "../../protocol/schemas/permissions.ts";
+
 export type PolicyEffect = "allow" | "ask" | "deny";
-
-export type ApprovalDecision =
-  | "allow_once"
-  | "allow_session"
-  | "allow_workspace"
-  | "deny";
-
-export type FileOperation =
-  | "read"
-  | "list"
-  | "create"
-  | "write"
-  | "truncate"
-  | "append"
-  | "rename"
-  | "delete";
 
 export interface ExecCapability {
   kind: "exec";
@@ -63,63 +65,10 @@ export interface PermissionIntent {
   digest: string;
 }
 
-export interface ExecCapabilityMatcher {
-  kind: "exec";
-  executable: string;
-  argv?: string[];
-  cwd?: string;
-  environment?: Record<string, string>;
-  manifestDigest?: string;
-}
-
-export interface FileCapabilityMatcher {
-  kind: "file";
-  operation: FileOperation | "*";
-  path: string;
-  /** Treat path as a glob pattern instead of a containment prefix. */
-  pattern?: boolean;
-  recursive?: boolean;
-  destination?: string;
-}
-
-export interface NetworkCapabilityMatcher {
-  kind: "network";
-  operation: "connect" | "listen";
-  host: string;
-  port?: number;
-  protocol?: string;
-}
-
-export interface OpaqueCodeCapabilityMatcher {
-  kind: "opaque_code";
-  runtime: string;
-  digest: string;
-}
-
-export interface ToolCapabilityMatcher {
-  kind: "tool";
-  tool: string;
-  inputDigest?: string;
-}
-
-export interface ShellDigestMatcher {
-  kind: "shell_digest";
-  digest: string;
-}
-
-export interface ShellCommandMatcher {
-  kind: "shell_command";
-  pattern: string;
-}
-
-export type CapabilityMatcher =
-  | ExecCapabilityMatcher
-  | FileCapabilityMatcher
-  | NetworkCapabilityMatcher
-  | OpaqueCodeCapabilityMatcher
-  | ToolCapabilityMatcher
-  | ShellDigestMatcher
-  | ShellCommandMatcher;
+export type FileCapabilityMatcher = Extract<
+  CapabilityMatcher,
+  { kind: "file" }
+>;
 
 export interface PermissionRule {
   id: string;
@@ -127,27 +76,6 @@ export interface PermissionRule {
   matcher: CapabilityMatcher;
   source: "builtin" | "managed" | "user" | "workspace" | "session";
 }
-
-export interface InvalidationKey {
-  kind:
-    | "file_digest"
-    | "npm_script_digest"
-    | "workspace_generation"
-    | "git_common_directory";
-  path?: string;
-  selector?: string;
-  value: string;
-}
-
-export interface GrantBundle {
-  scope: "once" | "session" | "workspace";
-  workspaceId: string;
-  sessionId?: string;
-  matchers: CapabilityMatcher[];
-  invalidationKeys?: InvalidationKey[];
-}
-
-export type GrantProposal = GrantBundle;
 
 export interface PermissionExplanation {
   summary: string;

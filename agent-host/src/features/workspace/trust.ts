@@ -8,12 +8,9 @@ import {
   readConfigJson,
   writeConfigJson,
   type HarnessConfig,
+  type HarnessConfigOptions,
 } from "./config.ts";
 import { canonicalPath } from "../permissions/filesystem/path.ts";
-
-interface HarnessConfigOptions {
-  homeDir?: string;
-}
 
 export function saveWorkspaceTrust(
   cwd: string,

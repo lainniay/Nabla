@@ -8,7 +8,7 @@ use crate::{
         panel::PanelRequest,
         scene::{text_row, view_model::SceneViewModel},
         shell,
-        transcript::{row_from_cells, tool_operation_summary},
+        transcript::{row_from_cells, tool_operation_summary, wrap_styled_breaking},
         types::{CellStyle, Color, StyledCell, VisualRow},
     },
 };
@@ -25,7 +25,7 @@ pub(crate) fn permissions_modal(view: &SceneViewModel, width: u16) -> Option<Pan
         text_row(
             "permissions",
             "Persistent Approvals",
-            CellStyle::foreground(palette::LAVENDER).bold(),
+            CellStyle::foreground(palette::MAUVE).bold(),
             width,
         ),
         text_row(
@@ -71,7 +71,7 @@ fn approval_panel_request(approval: &ApprovalState, width: u16) -> Option<PanelR
     let mut rows = vec![text_row(
         "approval",
         "Ask for Approval",
-        CellStyle::foreground(palette::LAVENDER).bold(),
+        CellStyle::foreground(palette::MAUVE).bold(),
         width,
     )];
     rows.push(VisualRow::blank("approval-spacing"));
@@ -85,7 +85,7 @@ fn approval_panel_request(approval: &ApprovalState, width: u16) -> Option<PanelR
         },
         width,
     ));
-    rows.push(approval_operation_row(approval, width));
+    rows.extend(approval_operation_rows(approval, width));
     rows.push(VisualRow::blank("approval-spacing"));
 
     let actions = approval
@@ -193,11 +193,16 @@ fn approval_summary(approval: &ApprovalState) -> &str {
     }
 }
 
-fn approval_operation_row(approval: &ApprovalState, width: u16) -> VisualRow {
+fn approval_operation_rows(approval: &ApprovalState, width: u16) -> Vec<VisualRow> {
     let normalized_name = approval.tool_name.to_ascii_lowercase();
-    let operation = if let Some(command) = input_string(&approval.input, &["command", "cmd"]) {
-        command.replace(['\r', '\n'], " ")
-    } else if is_file_tool(&normalized_name) {
+    if let Some(command) = input_string(&approval.input, &["command", "cmd"]) {
+        return wrapped_command_rows(
+            "approval-input",
+            &command.replace("\r\n", "\n").replace('\r', "\n"),
+            width,
+        );
+    }
+    let operation = if is_file_tool(&normalized_name) {
         let label = tool_operation_summary(&approval.tool_name, &approval.input)
             .split(" · ")
             .next()
@@ -220,7 +225,35 @@ fn approval_operation_row(approval: &ApprovalState, width: u16) -> VisualRow {
         CellStyle::foreground(Color::Cyan).bold(),
     )];
     prefixed.append(&mut cells);
-    row_from_cells("approval-input", prefixed, width)
+    vec![row_from_cells("approval-input", prefixed, width)]
+}
+
+fn wrapped_command_rows(id: &str, command: &str, width: u16) -> Vec<VisualRow> {
+    let inner_width = width.saturating_sub(4).max(1);
+    let wrapped = wrap_styled_breaking(id, &shell::highlight(command), inner_width);
+    let mut rows = Vec::with_capacity(wrapped.len());
+    for (index, row) in wrapped.into_iter().enumerate() {
+        let prefix = if index == 0 { "  └ " } else { "    " };
+        let mut cells = vec![StyledCell::new(
+            prefix,
+            4,
+            CellStyle::foreground(Color::Gray).dim(),
+        )];
+        cells.extend(row.cells);
+        rows.push(row_from_cells(id, cells, width));
+    }
+    if rows.is_empty() {
+        rows.push(row_from_cells(
+            id,
+            vec![StyledCell::new(
+                "  └ ",
+                4,
+                CellStyle::foreground(Color::Gray).dim(),
+            )],
+            width,
+        ));
+    }
+    rows
 }
 
 fn input_string<'a>(input: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {

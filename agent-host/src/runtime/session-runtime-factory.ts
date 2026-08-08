@@ -70,7 +70,7 @@ export function createSessionRuntimeFactory(
           extensions: base.extensions.filter(
             (extension) =>
               extension.resolvedPath.startsWith("<inline:") ||
-              loadHarnessConfig(runtimeCwd).allowedProjectExtensions.some(
+              runtimeConfig.allowedProjectExtensions.some(
                 (allowed) =>
                   extension.resolvedPath === resolve(runtimeCwd, allowed) ||
                   extension.resolvedPath === resolve(agentDir, allowed),
@@ -81,7 +81,7 @@ export function createSessionRuntimeFactory(
           agentsFiles: filterContextFilesByTrust(
             base.agentsFiles,
             agentDir,
-            workspaceIsTrusted(runtimeCwd, loadHarnessConfig(runtimeCwd)),
+            workspaceIsTrusted(runtimeCwd, runtimeConfig),
           ),
         }),
       },

@@ -47,6 +47,60 @@ pub fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
+pub(crate) fn styled_cells(text: &str, style: CellStyle) -> Vec<StyledCell> {
+    text.graphemes(true)
+        .map(|grapheme| {
+            let width = display_width(grapheme).max(1);
+            StyledCell::new(grapheme, u16::try_from(width).unwrap_or(u16::MAX), style)
+        })
+        .collect()
+}
+
+pub(crate) fn cells_width(cells: &[StyledCell]) -> u16 {
+    cells
+        .iter()
+        .fold(0u16, |total, cell| total.saturating_add(cell.width))
+}
+
+pub(crate) fn clip_cells(cells: Vec<StyledCell>, width: u16) -> Vec<StyledCell> {
+    let mut used = 0u16;
+    cells
+        .into_iter()
+        .take_while(|cell| {
+            let fits = used.saturating_add(cell.width) <= width;
+            if fits {
+                used = used.saturating_add(cell.width);
+            }
+            fits
+        })
+        .collect()
+}
+
+pub(crate) fn plain_cells(cells: &[StyledCell]) -> String {
+    cells.iter().map(|cell| cell.symbol.as_str()).collect()
+}
+
+pub(crate) fn take_graphemes_by_width(text: &str, width: usize) -> (&str, &str) {
+    if text.is_empty() || width == 0 {
+        return ("", text);
+    }
+    let mut used = 0usize;
+    let mut end = 0usize;
+    for (byte, grapheme) in text.grapheme_indices(true) {
+        let next = used.saturating_add(display_width(grapheme));
+        if next > width {
+            break;
+        }
+        used = next;
+        end = byte + grapheme.len();
+    }
+    if end == 0 {
+        let grapheme = text.graphemes(true).next().unwrap_or_default();
+        end = grapheme.len();
+    }
+    (&text[..end], &text[end..])
+}
+
 pub fn truncate(text: &str, width: usize) -> String {
     let mut used = 0usize;
     text.graphemes(true)
@@ -63,68 +117,11 @@ pub fn truncate(text: &str, width: usize) -> String {
 }
 
 pub fn wrap_text(component_id: &str, text: &str, width: u16, style: CellStyle) -> Vec<VisualRow> {
-    let width = usize::from(width.max(1));
-    let logical_lines = text.split('\n').collect::<Vec<_>>();
-    let mut rows = Vec::new();
-
-    for (logical_line, line) in logical_lines.iter().enumerate() {
-        if line.is_empty() {
-            rows.push(VisualRow {
-                component_id: component_id.to_owned(),
-                logical_line,
-                wrap_index: 0,
-                cells: Vec::new(),
-            });
-            continue;
-        }
-
-        let mut cells = Vec::new();
-        let mut column = 0usize;
-        let mut wrap_index = 0usize;
-        for grapheme in line.graphemes(true) {
-            let grapheme_width = UnicodeWidthStr::width(grapheme);
-            let terminal_width = grapheme_width.max(1);
-            if !cells.is_empty() && column.saturating_add(terminal_width) > width {
-                rows.push(VisualRow {
-                    component_id: component_id.to_owned(),
-                    logical_line,
-                    wrap_index,
-                    cells: std::mem::take(&mut cells),
-                });
-                column = 0;
-                wrap_index += 1;
-            }
-            // A grapheme wider than the viewport is still kept atomically.
-            cells.push(StyledCell::new(
-                grapheme,
-                terminal_width.min(usize::from(u16::MAX)) as u16,
-                style,
-            ));
-            column = column.saturating_add(terminal_width);
-            if column >= width {
-                rows.push(VisualRow {
-                    component_id: component_id.to_owned(),
-                    logical_line,
-                    wrap_index,
-                    cells: std::mem::take(&mut cells),
-                });
-                column = 0;
-                wrap_index += 1;
-            }
-        }
-        if !cells.is_empty() {
-            rows.push(VisualRow {
-                component_id: component_id.to_owned(),
-                logical_line,
-                wrap_index,
-                cells,
-            });
-        }
-    }
-    if rows.is_empty() {
-        rows.push(VisualRow::blank(component_id));
-    }
-    rows
+    let lines = text
+        .split('\n')
+        .map(|line| styled_cells(line, style))
+        .collect::<Vec<_>>();
+    wrap_styled_lines(component_id, &lines, width)
 }
 
 pub fn wrap_file_references(

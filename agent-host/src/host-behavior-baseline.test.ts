@@ -18,6 +18,8 @@ import type { IntegrationService } from "./features/subagents/isolation/integrat
 import { RuntimeSupervisor } from "./runtime/runtime-supervisor.ts";
 import type { HostApp } from "./app/host-app.ts";
 import { createHostApp } from "./app/create-host-app.ts";
+import { MemoryPermissionAuditLog } from "./features/permissions/audit-log.ts";
+import { WorkspaceGrantStore } from "./features/permissions/approvals/workspace-store.ts";
 
 const HOST_COMMANDS = [
   "agents_reload",
@@ -170,6 +172,8 @@ async function createApp(options: {
         fakeRuntime(true),
       ),
     integrations: options.integrations,
+    auditLog: new MemoryPermissionAuditLog(),
+    workspaceStore: new WorkspaceGrantStore(tmpdir()),
   });
   return { app, socketPath, cwd };
 }

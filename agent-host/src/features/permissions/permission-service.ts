@@ -8,8 +8,12 @@ import { isCredentialPath } from "./filesystem/credential.ts";
 import type { AgentProfile } from "../subagents/profile-model.ts";
 import { workspacePathError } from "./filesystem/path.ts";
 import { resolveWorkspaceIdentity } from "./workspace-identity.ts";
-import { JsonlPermissionAuditLog } from "./audit-log.ts";
+import {
+  JsonlPermissionAuditLog,
+  type PermissionAuditSink,
+} from "./audit-log.ts";
 import { ApprovalBroker as PermissionApprovalBroker } from "./approvals/broker.ts";
+import type { WorkspaceGrantStore } from "./approvals/workspace-store.ts";
 import { PermissionKernel } from "./kernel.ts";
 import type { Authorization } from "./kernel.ts";
 import type {
@@ -18,6 +22,10 @@ import type {
 } from "./execution/sandbox-profile.ts";
 import { buildSandboxProfile } from "./execution/sandbox-profile.ts";
 import type { SandboxCapability } from "./execution/sandbox-capability.ts";
+import {
+  EMPTY_SANDBOX_CONFIG,
+  type SandboxConfig,
+} from "./execution/sandbox-config.ts";
 import type { PermissionIntent, PermissionRule, ToolContext } from "./model.ts";
 import { mutatesManagedWorktree } from "./managed-worktree.ts";
 import { PolicyStore } from "./policy-store.ts";
@@ -66,6 +74,12 @@ export interface AuthorizeBashInput {
   agent?: ToolAuthorizationContext["agent"];
 }
 
+export interface PermissionServiceOptions {
+  auditLog?: PermissionAuditSink;
+  sandboxConfig?: () => SandboxConfig;
+  workspaceStore?: WorkspaceGrantStore;
+}
+
 export interface BashAuthorization extends ExecutionPermit {
   decision: "allow" | "deny";
   reason?: string;
@@ -77,17 +91,14 @@ export type ToolAuthorizationResult =
 
 export class PermissionService {
   private readonly policies = new PolicyStore();
-  private readonly approvals = new PermissionApprovalBroker();
-  private readonly kernel = new PermissionKernel(
-    this.policies,
-    this.approvals,
-    new JsonlPermissionAuditLog(),
-  );
+  private readonly approvals: PermissionApprovalBroker;
+  private readonly kernel: PermissionKernel;
   private readonly activeAuthorizations = new Map<string, Authorization>();
   private readonly shellAdapter = new ShellAdapter();
   private readonly sessionIdProvider: () => string;
   private readonly cwdProvider: () => string;
   private readonly sandboxCapability: () => SandboxCapability;
+  private readonly sandboxConfig: () => SandboxConfig;
   private readonly interactions: InteractionBroker;
   private readonly send: (event: JsonObject) => void;
   private readonly planMode: { current(): boolean };
@@ -100,6 +111,7 @@ export class PermissionService {
     isConnected: () => boolean,
     scope: { sessionId(): string; cwd(): string },
     sandbox?: { capability(): SandboxCapability },
+    options: PermissionServiceOptions = {},
   ) {
     this.interactions = interactions;
     this.send = send;
@@ -108,8 +120,19 @@ export class PermissionService {
     this.sessionIdProvider = scope.sessionId;
     this.cwdProvider = scope.cwd;
     this.sandboxCapability = sandbox?.capability ?? (() => DEGRADED_CAPABILITY);
+    this.sandboxConfig = options.sandboxConfig ?? (() => EMPTY_SANDBOX_CONFIG);
+    this.approvals = new PermissionApprovalBroker(
+      undefined,
+      undefined,
+      options.workspaceStore,
+    );
+    this.kernel = new PermissionKernel(
+      this.policies,
+      this.approvals,
+      options.auditLog ?? new JsonlPermissionAuditLog(),
+    );
     this.policies.setBuiltin(
-      ["ask_user", "submit_plan"].map(
+      ["ask_user", "submit_plan", "todo_write"].map(
         (tool): PermissionRule => ({
           id: `builtin-tool-${tool}`,
           effect: "allow",
@@ -173,6 +196,7 @@ export class PermissionService {
           emptyIntent(input),
           input.cwd,
           this.sandboxCapability(),
+          this.sandboxConfig(),
         ),
       };
     }
@@ -180,6 +204,7 @@ export class PermissionService {
       core.intent,
       input.cwd,
       this.sandboxCapability(),
+      this.sandboxConfig(),
     );
     const permit: ExecutionPermit = {
       id: core.authorization.requestId,

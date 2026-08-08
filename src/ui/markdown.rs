@@ -6,11 +6,10 @@
 use std::{borrow::Cow, collections::VecDeque};
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
     palette,
-    text::display_width,
+    text::{cells_width as text_cells_width, clip_cells as text_clip_cells, display_width},
     types::{CellStyle, Color, StyledCell, VisualRow},
 };
 
@@ -101,165 +100,50 @@ impl IncrementalMarkdown {
 pub fn scan(source: &str, finished: bool) -> MarkdownScan {
     let lines = line_ranges(source);
     let mut blocks = Vec::new();
-    let mut index = 0usize;
-
-    while index < lines.len() {
-        let (start, end) = lines[index];
-        let line = trim_line(&source[start..end]);
-        if line.trim().is_empty() {
-            index += 1;
-            continue;
-        }
-
-        if let Some(marker) = fence_marker(line) {
-            let block_start = start;
-            index += 1;
-            let mut closed = false;
-            let mut block_end = end;
-            while index < lines.len() {
-                let (row_start, row_end) = lines[index];
-                block_end = row_end;
-                if closes_fence(trim_line(&source[row_start..row_end]), marker) {
-                    closed = true;
-                    index += 1;
-                    break;
+    let mut open = Vec::<MarkdownBlockKind>::new();
+    for (event, range) in Parser::new_ext(source, markdown_options()).into_offset_iter() {
+        match event {
+            Event::Start(tag) => open.push(block_kind(&tag)),
+            Event::End(_) => {
+                if let Some(kind) = open.pop()
+                    && open.is_empty()
+                {
+                    let (start, end) = line_span(range.start, range.end, &lines);
+                    blocks.push(MarkdownBlock {
+                        kind,
+                        start,
+                        end,
+                        complete: finished || end < source.len(),
+                    });
                 }
-                index += 1;
             }
-            blocks.push(MarkdownBlock {
-                kind: MarkdownBlockKind::Fence,
-                start: block_start,
-                end: block_end,
-                complete: finished || (closed && block_end < source.len()),
-            });
-            continue;
-        }
-
-        if html_block_start(line) {
-            let block_start = start;
-            let tag = html_tag(line);
-            let mut block_end = end;
-            let mut closed = tag
-                .as_deref()
-                .is_some_and(|tag| line.to_ascii_lowercase().contains(&format!("</{tag}>")))
-                || line.trim_end().ends_with("-->");
-            index += 1;
-            while !closed && index < lines.len() {
-                let (row_start, row_end) = lines[index];
-                let row = trim_line(&source[row_start..row_end]);
-                block_end = row_end;
-                closed = tag
-                    .as_deref()
-                    .is_some_and(|tag| row.to_ascii_lowercase().contains(&format!("</{tag}>")))
-                    || row.trim_end().ends_with("-->");
-                index += 1;
-            }
-            blocks.push(MarkdownBlock {
-                kind: MarkdownBlockKind::Html,
-                start: block_start,
-                end: block_end,
-                complete: finished || (closed && block_end < source.len()),
-            });
-            continue;
-        }
-
-        if index + 1 < lines.len() {
-            let (next_start, next_end) = lines[index + 1];
-            let next = trim_line(&source[next_start..next_end]);
-            if looks_like_table_row(line) && is_table_delimiter(next) {
-                let block_start = start;
-                let mut block_end = next_end;
-                index += 2;
-                while index < lines.len() {
-                    let (row_start, row_end) = lines[index];
-                    let row = trim_line(&source[row_start..row_end]);
-                    if row.trim().is_empty() || !looks_like_table_row(row) {
-                        break;
-                    }
-                    block_end = row_end;
-                    index += 1;
+            Event::Rule => {
+                if open.is_empty() {
+                    let (start, end) = line_span(range.start, range.end, &lines);
+                    blocks.push(MarkdownBlock {
+                        kind: MarkdownBlockKind::Paragraph,
+                        start,
+                        end,
+                        complete: finished || end < source.len(),
+                    });
                 }
-                let complete =
-                    finished || index < lines.len() || source[..block_end].ends_with("\n\n");
-                blocks.push(MarkdownBlock {
-                    kind: MarkdownBlockKind::Table,
-                    start: block_start,
-                    end: block_end,
-                    complete,
-                });
-                continue;
             }
+            _ => {}
         }
-
-        if is_heading(line) {
-            blocks.push(MarkdownBlock {
-                kind: MarkdownBlockKind::Heading,
-                start,
-                end,
-                complete: finished || end < source.len(),
-            });
-            index += 1;
-            continue;
-        }
-
-        let (kind, continuation) = if is_list_item(line) {
-            (MarkdownBlockKind::List, Continuation::List)
-        } else if is_quote(line) {
-            (MarkdownBlockKind::Quote, Continuation::Quote)
-        } else {
-            (MarkdownBlockKind::Paragraph, Continuation::Paragraph)
-        };
-        let block_start = start;
-        let mut block_end = end;
-        index += 1;
-        while index < lines.len() {
-            let (row_start, row_end) = lines[index];
-            let row = trim_line(&source[row_start..row_end]);
-            if row.trim().is_empty() {
-                break;
-            }
-            let belongs = match continuation {
-                Continuation::List => {
-                    is_list_item(row) || row.starts_with("  ") || row.starts_with('\t')
-                }
-                Continuation::Quote => is_quote(row),
-                Continuation::Paragraph => {
-                    !is_heading(row)
-                        && !is_list_item(row)
-                        && !is_quote(row)
-                        && fence_marker(row).is_none()
-                        && !html_block_start(row)
-                }
-            };
-            if !belongs {
-                break;
-            }
-            block_end = row_end;
-            index += 1;
-        }
-        let followed_by_blank = index < lines.len()
-            && trim_line(&source[lines[index].0..lines[index].1])
-                .trim()
-                .is_empty();
-        blocks.push(MarkdownBlock {
-            kind,
-            start: block_start,
-            end: block_end,
-            complete: finished || followed_by_blank,
-        });
     }
-
     let mut stable_prefix_bytes = blocks
         .iter()
         .take_while(|block| block.complete)
         .last()
         .map_or(0, |block| block.end);
-    if !finished
-        && let Some(reference_sensitive) = blocks.iter().find(|block| {
-            block.end <= stable_prefix_bytes
-                && contains_reference_sensitive_syntax(&source[block.start..block.end])
-        })
-    {
+    if finished {
+        // Reference definitions and trailing blank lines produce no parser
+        // blocks; sealing is a whole-message property, not a block-span one.
+        stable_prefix_bytes = source.len();
+    } else if let Some(reference_sensitive) = blocks.iter().find(|block| {
+        block.end <= stable_prefix_bytes
+            && contains_reference_sensitive_syntax(&source[block.start..block.end])
+    }) {
         // CommonMark reference definitions are document-global: a later
         // `[label]: url` can change how an earlier `[text][label]` or
         // shortcut `[label]` renders. Keep that block and everything after it
@@ -299,18 +183,23 @@ pub fn render(
     width: u16,
     base_style: CellStyle,
 ) -> Vec<VisualRow> {
+    let normalized = unwrap_markdown_table_fences(source);
+    let mut writer = MarkdownWriter::new(component_id, width, base_style);
+    for event in Parser::new_ext(&normalized, markdown_options()) {
+        writer.handle_event(event);
+    }
+    writer.finish()
+}
+
+/// Markdown extension flags shared by scanning and rendering, so block
+/// boundaries always match what the renderer produces.
+fn markdown_options() -> Options {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_TASKLISTS);
     options.insert(Options::ENABLE_FOOTNOTES);
-
-    let normalized = unwrap_markdown_table_fences(source);
-    let mut writer = MarkdownWriter::new(component_id, width, base_style);
-    for event in Parser::new_ext(&normalized, options) {
-        writer.handle_event(event);
-    }
-    writer.finish()
+    options
 }
 
 /// LLMs often place a Markdown table inside a `md`/`markdown` code fence.
@@ -398,10 +287,9 @@ fn markdown_fence(line: &str) -> Option<(char, usize, bool)> {
 }
 
 fn contains_table(source: &str) -> bool {
-    let lines = source.lines().collect::<Vec<_>>();
-    lines.windows(2).any(|pair| {
-        looks_like_table_row(pair[0]) && !is_table_delimiter(pair[0]) && is_table_delimiter(pair[1])
-    })
+    Parser::new_ext(source, markdown_options())
+        .into_offset_iter()
+        .any(|(event, _)| matches!(event, Event::Start(Tag::Table(_))))
 }
 
 #[derive(Debug, Clone)]
@@ -542,7 +430,7 @@ impl<'a> MarkdownWriter<'a> {
             Event::End(tag) => self.end_tag(tag),
             Event::Text(text) => self.push_text(&text),
             Event::Code(code) => {
-                self.push_styled_text(&code, CellStyle::foreground(palette::SAPPHIRE))
+                self.push_styled_text(&code, CellStyle::foreground(palette::MAUVE))
             }
             Event::Html(html) | Event::InlineHtml(html) => self.push_text(&html),
             Event::SoftBreak | Event::HardBreak => {
@@ -605,7 +493,7 @@ impl<'a> MarkdownWriter<'a> {
                         list_item: false,
                     });
                 }
-                self.push_inline_style(CellStyle::foreground(palette::SAPPHIRE));
+                self.push_inline_style(CellStyle::foreground(palette::MAUVE));
             }
             Tag::List(start) => {
                 if self.list_stack.is_empty() {
@@ -971,6 +859,10 @@ impl<'a> MarkdownWriter<'a> {
             };
             widths[index] -= 1;
         }
+        if table_needs_records(&rows, &widths) {
+            self.render_table_as_records(&header, &rows);
+            return;
+        }
 
         self.render_table_row(&header, &widths, &alignments, true);
         let mut separator = Vec::new();
@@ -1029,6 +921,25 @@ impl<'a> MarkdownWriter<'a> {
     }
 
     fn render_table_as_records(&mut self, header: &[TableCell], rows: &[Vec<TableCell>]) {
+        if rows.is_empty() {
+            let keys = header
+                .iter()
+                .map(|cell| plain_cells(&cell.cells))
+                .filter(|key| !key.is_empty())
+                .collect::<Vec<_>>();
+            if !keys.is_empty() {
+                let line = styled_cells(
+                    &keys.join("  "),
+                    CellStyle::foreground(palette::GRAY_TEXT).bold(),
+                );
+                self.ensure_line(true);
+                if let Some(current) = self.current.as_mut() {
+                    current.content.extend(line);
+                }
+                self.flush_line();
+            }
+            return;
+        }
         for (row_index, row) in rows.iter().enumerate() {
             if row_index > 0 {
                 self.push_preformatted(styled_cells(
@@ -1043,15 +954,12 @@ impl<'a> MarkdownWriter<'a> {
                         .map(|cell| cell.cells.as_slice())
                         .unwrap_or_default(),
                 );
-                let mut line = styled_cells(
-                    &format!("{}: ", if key.is_empty() { column + 1 } else { 0 }),
-                    CellStyle::foreground(palette::GRAY_TEXT).bold(),
-                );
+                let mut line = Vec::new();
                 if !key.is_empty() {
-                    line = styled_cells(
+                    line.extend(styled_cells(
                         &format!("{key}: "),
                         CellStyle::foreground(palette::GRAY_TEXT).bold(),
-                    );
+                    ));
                 }
                 line.extend(value.cells.clone());
                 self.ensure_line(true);
@@ -1073,6 +981,27 @@ impl<'a> MarkdownWriter<'a> {
             wrap: false,
         });
     }
+}
+
+/// Records render better than a grid when enough rows would break an unbroken
+/// token (long path, test name, URL) across a column.
+fn table_needs_records(rows: &[Vec<TableCell>], widths: &[usize]) -> bool {
+    let affected = rows
+        .iter()
+        .filter(|row| {
+            row.iter().zip(widths).any(|(cell, width)| {
+                plain_cells(&cell.cells)
+                    .split_whitespace()
+                    .any(|token| display_width(token) > *width)
+            })
+        })
+        .count();
+    let threshold = if rows.len() == 1 {
+        1
+    } else {
+        2.max(rows.len().div_ceil(3))
+    };
+    affected >= threshold
 }
 
 fn heading_style(level: HeadingLevel) -> CellStyle {
@@ -1106,20 +1035,15 @@ fn patch_style(base: CellStyle, overlay: CellStyle) -> CellStyle {
 }
 
 fn styled_cells(text: &str, style: CellStyle) -> Vec<StyledCell> {
-    text.graphemes(true)
-        .map(|grapheme| {
-            let width = display_width(grapheme).max(1);
-            StyledCell::new(grapheme, u16::try_from(width).unwrap_or(u16::MAX), style)
-        })
-        .collect()
+    super::text::styled_cells(text, style)
 }
 
 fn cells_width(cells: &[StyledCell]) -> usize {
-    cells.iter().map(|cell| usize::from(cell.width)).sum()
+    usize::from(text_cells_width(cells))
 }
 
 fn plain_cells(cells: &[StyledCell]) -> String {
-    cells.iter().map(|cell| cell.symbol.as_str()).collect()
+    super::text::plain_cells(cells)
 }
 
 fn wrap_rich_line(line: RichLine, width: usize) -> Vec<Vec<StyledCell>> {
@@ -1219,19 +1143,7 @@ fn take_wrapped_chunk(remaining: &mut VecDeque<StyledCell>, width: usize) -> Vec
 }
 
 fn clip_cells(cells: Vec<StyledCell>, width: usize) -> Vec<StyledCell> {
-    let mut used = 0usize;
-    cells
-        .into_iter()
-        .take_while(|cell| {
-            let next = used.saturating_add(usize::from(cell.width));
-            if next > width {
-                false
-            } else {
-                used = next;
-                true
-            }
-        })
-        .collect()
+    text_clip_cells(cells, u16::try_from(width).unwrap_or(u16::MAX))
 }
 
 fn align_cells(
@@ -1253,13 +1165,6 @@ fn align_cells(
     output
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Continuation {
-    List,
-    Quote,
-    Paragraph,
-}
-
 fn line_ranges(source: &str) -> Vec<(usize, usize)> {
     let mut rows = Vec::new();
     let mut start = 0usize;
@@ -1279,118 +1184,38 @@ fn trim_line(line: &str) -> &str {
     line.trim_end_matches(['\r', '\n'])
 }
 
-fn fence_marker(line: &str) -> Option<char> {
-    let trimmed = line.trim_start();
-    let marker = trimmed.chars().next()?;
-    if !matches!(marker, '`' | '~') {
-        return None;
+fn block_kind(tag: &Tag<'_>) -> MarkdownBlockKind {
+    match tag {
+        Tag::Paragraph => MarkdownBlockKind::Paragraph,
+        Tag::Heading { .. } => MarkdownBlockKind::Heading,
+        Tag::BlockQuote => MarkdownBlockKind::Quote,
+        Tag::List(_) => MarkdownBlockKind::List,
+        Tag::CodeBlock(_) => MarkdownBlockKind::Fence,
+        Tag::HtmlBlock => MarkdownBlockKind::Html,
+        Tag::Table(_) => MarkdownBlockKind::Table,
+        Tag::FootnoteDefinition(_) | Tag::MetadataBlock(_) | Tag::Item => {
+            MarkdownBlockKind::Paragraph
+        }
+        _ => MarkdownBlockKind::Paragraph,
     }
-    (trimmed
-        .chars()
-        .take_while(|character| *character == marker)
-        .count()
-        >= 3)
-        .then_some(marker)
 }
 
-fn closes_fence(line: &str, marker: char) -> bool {
-    let trimmed = line.trim();
-    trimmed.chars().all(|character| character == marker) && trimmed.chars().count() >= 3
-}
-
-fn is_heading(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    let hashes = trimmed
-        .chars()
-        .take_while(|character| *character == '#')
-        .count();
-    (1..=6).contains(&hashes) && trimmed.chars().nth(hashes) == Some(' ')
-}
-
-fn is_list_item(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    if ["- ", "* ", "+ "]
+fn line_span(start: usize, end: usize, lines: &[(usize, usize)]) -> (usize, usize) {
+    let start_line = lines
         .iter()
-        .any(|marker| trimmed.starts_with(marker))
-    {
-        return true;
-    }
-    let digits = trimmed
-        .chars()
-        .take_while(|character| character.is_ascii_digit())
-        .count();
-    digits > 0
-        && trimmed
-            .get(digits..)
-            .is_some_and(|tail| tail.starts_with(". ") || tail.starts_with(") "))
-}
-
-fn is_quote(line: &str) -> bool {
-    line.trim_start().starts_with('>')
-}
-
-fn looks_like_table_row(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.contains('|')
-        && trimmed
-            .split('|')
-            .filter(|cell| !cell.trim().is_empty())
-            .count()
-            >= 2
-}
-
-fn is_table_delimiter(line: &str) -> bool {
-    let trimmed = line.trim().trim_matches('|');
-    let cells = trimmed.split('|').map(str::trim).collect::<Vec<_>>();
-    cells.len() >= 2
-        && cells.iter().all(|cell| {
-            let cell = cell.trim_matches(':');
-            cell.len() >= 3 && cell.chars().all(|character| character == '-')
-        })
-}
-
-fn html_block_start(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with("<!--")
-        || html_tag(trimmed).is_some_and(|tag| {
-            matches!(
-                tag.as_str(),
-                "address"
-                    | "article"
-                    | "aside"
-                    | "blockquote"
-                    | "details"
-                    | "dialog"
-                    | "div"
-                    | "footer"
-                    | "header"
-                    | "main"
-                    | "nav"
-                    | "pre"
-                    | "script"
-                    | "section"
-                    | "style"
-                    | "table"
-            )
-        })
-}
-
-fn html_tag(line: &str) -> Option<String> {
-    let trimmed = line.trim_start().strip_prefix('<')?;
-    if trimmed.starts_with(['!', '?', '/']) {
-        return None;
-    }
-    let tag = trimmed
-        .chars()
-        .take_while(|character| character.is_ascii_alphanumeric())
-        .collect::<String>()
-        .to_ascii_lowercase();
-    (!tag.is_empty()).then_some(tag)
+        .position(|(line_start, line_end)| *line_start <= start && start < *line_end);
+    let end_line = lines.iter().position(|(line_start, line_end)| {
+        *line_start <= end.saturating_sub(1) && end.saturating_sub(1) < *line_end
+    });
+    let start = start_line.map_or(0, |index| lines[index].0);
+    let end = end_line.map_or(0, |index| lines[index].1);
+    (start, end)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_segmentation::UnicodeSegmentation;
 
     #[test]
     fn an_unfinished_paragraph_stays_mutable_until_a_blank_line() {
@@ -1451,6 +1276,58 @@ mod tests {
                 .stable_prefix_bytes,
             table.len() + 1
         );
+    }
+
+    #[test]
+    fn sparse_and_single_column_table_rows_stay_in_one_table_block() {
+        for source in [
+            "| a | b |\n|---|---|\n| 1 |",
+            "| a | b |\n|---|---|\n| 1 |  |",
+            "| a | b |\n|---|---|\n|  | 2 |",
+            "| a | b |\n|---|---|\n|  |  |",
+            "| a |\n|---|\n| 1 |",
+        ] {
+            let partial = scan(source, false);
+            assert_eq!(partial.blocks.len(), 1, "{source:?}");
+            assert_eq!(
+                partial.blocks[0].kind,
+                MarkdownBlockKind::Table,
+                "{source:?}"
+            );
+            assert!(!partial.blocks[0].complete, "{source:?}");
+            assert_eq!(
+                scan(source, true).stable_prefix_bytes,
+                source.len(),
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_table_rows_become_stable_after_a_blank_line() {
+        let mut incremental = IncrementalMarkdown::default();
+        let table = "| a | b |\n|---|---|\n| 1 |";
+        assert_eq!(incremental.update(table, false).stable_prefix_bytes, 0);
+        assert_eq!(
+            incremental
+                .update(&format!("{table}\n\nnext"), false)
+                .stable_prefix_bytes,
+            table.len() + 1
+        );
+    }
+
+    #[test]
+    fn table_fence_detection_uses_the_parser() {
+        for source in [
+            "| a | b |\n|---|---|\n| 1 |",
+            "| a |\n|---|\n| 1 |",
+            "- | a | b |\n  |---|---|\n  | 1 | 2 |",
+            "> | a | b |\n> |---|---|\n> | 1 | 2 |",
+        ] {
+            assert!(contains_table(source), "{source:?}");
+        }
+        assert!(!contains_table("no table here"));
+        assert!(!contains_table("| a | b |"));
     }
 
     #[test]
@@ -1601,7 +1478,11 @@ mod tests {
         assert!(style_for(&rows, "removed").unwrap().crossed_out);
         assert_eq!(
             style_for(&rows, "code").unwrap().foreground,
-            palette::SAPPHIRE
+            palette::MAUVE
+        );
+        assert_eq!(
+            style_for(&rows, "fn main() {}").unwrap().foreground,
+            palette::MAUVE
         );
         assert!(style_for(&rows, "https://example.com").unwrap().underlined);
     }
@@ -1665,6 +1546,76 @@ mod tests {
         assert!(narrow_text.contains("Path:"));
         assert!(narrow_text.contains("Description:"));
         assert!(narrow.iter().all(|row| row.display_width() <= 12));
+    }
+
+    #[test]
+    fn records_fallback_keeps_header_only_tables_visible() {
+        let rows = render(
+            "| Path | State |\n|---|---|",
+            "table",
+            7,
+            CellStyle::foreground(Color::White),
+        );
+        let text = rows
+            .iter()
+            .map(VisualRow::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Path"), "{text:?}");
+        assert!(text.contains("State"), "{text:?}");
+        assert!(!text.contains("0:"), "{text:?}");
+        assert!(!text.contains("1:"), "{text:?}");
+    }
+
+    #[test]
+    fn records_fallback_does_not_invent_column_labels() {
+        let rows = render(
+            "| | A | B |\n|---|---|---|\n| x | 1 | 2 |",
+            "table",
+            12,
+            CellStyle::foreground(Color::White),
+        );
+        let text = rows
+            .iter()
+            .map(VisualRow::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains('x'), "{text:?}");
+        assert!(text.contains("A: 1"), "{text:?}");
+        assert!(text.contains("B: 2"), "{text:?}");
+        assert!(!text.contains("0:"), "{text:?}");
+        assert!(!text.contains("1:"), "{text:?}");
+    }
+
+    #[test]
+    fn records_fallback_triggers_on_fragmented_tokens() {
+        let long = render(
+            "| Path | Status | Notes |\n|---|---|---|\n| src/really_long_unbroken_path_here.rs | ready | ok |",
+            "table",
+            30,
+            CellStyle::foreground(Color::White),
+        );
+        let long_text = long
+            .iter()
+            .map(VisualRow::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(long_text.contains("Path:"), "{long_text:?}");
+        assert!(long_text.contains("src/"), "{long_text:?}");
+        assert!(!long_text.contains("━━━"), "{long_text:?}");
+
+        let short = render(
+            "| a | b | c |\n|---|---|---|\n| 1 | 2 | 3 |",
+            "table",
+            30,
+            CellStyle::foreground(Color::White),
+        );
+        let short_text = short
+            .iter()
+            .map(VisualRow::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(short_text.contains("━━━"), "{short_text:?}");
     }
 
     #[test]

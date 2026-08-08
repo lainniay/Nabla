@@ -1,4 +1,11 @@
-import { isJsonObject as isRecord } from "../../protocol/validation.ts";
+import { Value } from "typebox/value";
+
+import {
+  PlanArtifactSchema,
+  type PlanArtifact,
+} from "../../protocol/schemas/plans.ts";
+
+export type { PlanArtifact } from "../../protocol/schemas/plans.ts";
 
 export const PLAN_ENTRY_TYPE = "nabla.plan";
 export const PLAN_MODE_ENTRY_TYPE = "nabla.plan-mode.v1";
@@ -10,14 +17,6 @@ export interface PlanContent {
   assumptions: string[];
   testPlan: string[];
   handoffMarkdown: string;
-}
-
-export interface PlanArtifact extends PlanContent {
-  id: string;
-  revision: number;
-  sourceSessionId: string;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface PlanSessionEntry {
@@ -60,24 +59,11 @@ export function planRevisionMarker(id: string, revision: number): string {
 }
 
 export function isPlanArtifact(value: unknown): value is PlanArtifact {
-  if (!isRecord(value)) return false;
+  const artifact = value as PlanArtifact;
   return (
-    typeof value.id === "string" &&
-    value.id.length > 0 &&
-    Number.isInteger(value.revision) &&
-    (value.revision as number) > 0 &&
-    typeof value.title === "string" &&
-    typeof value.summary === "string" &&
-    typeof value.bodyMarkdown === "string" &&
-    typeof value.handoffMarkdown === "string" &&
-    isStringArray(value.assumptions) &&
-    isStringArray(value.testPlan) &&
-    typeof value.sourceSessionId === "string" &&
-    typeof value.createdAt === "string" &&
-    typeof value.updatedAt === "string"
+    Value.Check(PlanArtifactSchema, value) &&
+    artifact.id.length > 0 &&
+    Number.isInteger(artifact.revision) &&
+    artifact.revision > 0
   );
-}
-
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }

@@ -9,6 +9,7 @@ import {
   isPathWithin,
 } from "../../permissions/filesystem/path.ts";
 import { sha256Hex } from "../../permissions/shell/digest.ts";
+import { errorMessage } from "../../../protocol/validation.ts";
 import { WorktreeArtifactStore } from "./artifact-store.ts";
 import { GitClient, type GitResult } from "./git.ts";
 import { listRecoverable, pruneTerminalArtifacts } from "./recovery.ts";
@@ -631,7 +632,7 @@ export class WorktreeIsolation {
         status: "applied",
         record,
         error: `Patch was applied, but the managed checkout could not be cleaned up: ${
-          error instanceof Error ? error.message : String(error)
+          errorMessage(error)
         }`,
       };
     }

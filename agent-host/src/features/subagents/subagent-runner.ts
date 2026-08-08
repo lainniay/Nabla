@@ -19,7 +19,11 @@ import {
   type AgentProfile,
 } from "./profile-model.ts";
 import { parseSubagentOutput } from "../../protocol/subagent-output.ts";
-import { isJsonObject, type JsonObject } from "../../protocol/validation.ts";
+import {
+  errorMessage,
+  isJsonObject,
+  type JsonObject,
+} from "../../protocol/validation.ts";
 import type {
   ActiveAgentSnapshot,
   WorktreeIntegrationSnapshot,
@@ -372,9 +376,7 @@ export class SubagentRunner {
           } catch (recoveryError) {
             this.port.reportHostWarning(
               `Unable to capture worktree changes for ${agentId} after its turn limit: ${
-                recoveryError instanceof Error
-                  ? recoveryError.message
-                  : String(recoveryError)
+                errorMessage(recoveryError)
               }. The registered checkout was preserved for recovery.`,
             );
           }
@@ -385,7 +387,7 @@ export class SubagentRunner {
         this.port.finishSubagent(active, "limit_reached", limited);
         return limited;
       }
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       if (options.resolutionForAgentId && active.worktree) {
         try {
           await this.integrations.discard(active.worktree);
@@ -393,9 +395,7 @@ export class SubagentRunner {
         } catch (cleanupError) {
           this.port.reportHostWarning(
             `Unable to discard failed resolver worktree ${active.worktree.id}: ${
-              cleanupError instanceof Error
-                ? cleanupError.message
-                : String(cleanupError)
+              errorMessage(cleanupError)
             }`,
           );
         }
@@ -435,9 +435,7 @@ export class SubagentRunner {
         } catch (recoveryError) {
           this.port.reportHostWarning(
             `Unable to capture worktree changes for failed subagent ${agentId}: ${
-              recoveryError instanceof Error
-                ? recoveryError.message
-                : String(recoveryError)
+              errorMessage(recoveryError)
             }. The original execution error was preserved and the checkout remains registered.`,
           );
         }

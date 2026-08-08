@@ -28,6 +28,12 @@ impl App {
                     question.custom_answer = false;
                     question.editor.clear();
                 }
+                KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    question.editor.insert_newline();
+                }
+                KeyCode::Char('j' | 'J') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    question.editor.insert_newline();
+                }
                 KeyCode::Enter => {
                     let value = question.editor.text().trim().to_owned();
                     if value.is_empty() {
@@ -42,7 +48,7 @@ impl App {
                 KeyCode::Home => question.editor.move_home(),
                 KeyCode::End => question.editor.move_end(),
                 KeyCode::Char('u' | 'U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    question.editor.clear();
+                    question.editor.delete_to_line_start();
                 }
                 KeyCode::Char(character)
                     if !key
@@ -60,16 +66,16 @@ impl App {
         match update_choice_navigation(key, &mut question.selected, &enabled) {
             ChoiceNavAction::Handled => return Vec::new(),
             ChoiceNavAction::Cancel => {
+                if question.workspace_trust_prompt {
+                    self.state.question = None;
+                    return Vec::new();
+                }
                 question.replying = true;
                 self.state.run_state = RunState::Aborting;
                 return vec![AppEffect::Abort];
             }
             ChoiceNavAction::Confirm(_) => {}
             ChoiceNavAction::Unhandled => return Vec::new(),
-                if question.workspace_trust_prompt {
-                    self.state.question = None;
-                    return Vec::new();
-                }
         }
 
         let Some(current) = question.current_question() else {
@@ -93,12 +99,6 @@ impl App {
         value: String,
         option_id: Option<String>,
     ) -> Vec<AppEffect> {
-        let Some(question) = self.state.question.as_mut() else {
-            return Vec::new();
-        };
-        let Some(current) = question.current_question() else {
-            return Vec::new();
-        };
         if self
             .state
             .question
@@ -114,6 +114,12 @@ impl App {
             self.state.question = None;
             return Vec::new();
         }
+        let Some(question) = self.state.question.as_mut() else {
+            return Vec::new();
+        };
+        let Some(current) = question.current_question() else {
+            return Vec::new();
+        };
         question.answers.push(QuestionAnswer {
             question_id: current.id.clone(),
             value,
@@ -269,7 +275,7 @@ impl App {
                 KeyCode::Home => filter.move_home(),
                 KeyCode::End => filter.move_end(),
                 KeyCode::Char('u' | 'U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    filter.clear();
+                    filter.delete_to_line_start();
                 }
                 KeyCode::Char(character)
                     if !key
@@ -385,6 +391,18 @@ impl App {
                 }
 
                 match key.code {
+                    KeyCode::Enter
+                        if key.modifiers.contains(KeyModifiers::SHIFT)
+                            && prompt.kind != AuthPromptKind::Secret =>
+                    {
+                        prompt.editor.insert_newline();
+                    }
+                    KeyCode::Char('j' | 'J')
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && prompt.kind != AuthPromptKind::Secret =>
+                    {
+                        prompt.editor.insert_newline();
+                    }
                     KeyCode::Enter => {
                         let value = prompt.editor.take();
                         if value.is_empty() {
@@ -407,7 +425,7 @@ impl App {
                     KeyCode::Home => prompt.editor.move_home(),
                     KeyCode::End => prompt.editor.move_end(),
                     KeyCode::Char('u' | 'U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        prompt.editor.clear();
+                        prompt.editor.delete_to_line_start();
                     }
                     KeyCode::Char(character)
                         if !key

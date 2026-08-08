@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { JsonObject } from "../protocol/validation.ts";
+import { TODO_ENTRY_TYPE, TodoStore } from "../features/todos/store.ts";
 import {
   PiExtensionFactory,
   type PiExtensionPort,
@@ -45,6 +46,16 @@ function createFactory(overrides: Partial<PiExtensionPort> = {}) {
       onSessionActivated: () => {
         calls.push("plans.onSessionActivated");
         return null;
+      },
+    },
+    todos: {
+      replace: () => {
+        calls.push("todos.replace");
+        return { action: "updated", todos: [] };
+      },
+      onSessionActivated: () => {
+        calls.push("todos.onSessionActivated");
+        return [];
       },
     },
     context: {
@@ -108,12 +119,88 @@ function createFactory(overrides: Partial<PiExtensionPort> = {}) {
   return { calls, events, pi };
 }
 
-test("registers the three control tools", () => {
+test("registers the control tools", () => {
   const { pi } = createFactory();
   assert.deepEqual(
     pi.tools.map((tool) => tool.name).sort(),
-    ["ask_user", "delegate_task", "submit_plan"],
+    ["ask_user", "delegate_task", "submit_plan", "todo_write"],
   );
+});
+
+test("todo_write replaces the list and appends a nabla.todo entry", async () => {
+  const { pi } = createFactory({ todos: new TodoStore() });
+  const tool = pi.tools.find((tool) => tool.name === "todo_write")!;
+  const result = (await tool.execute(
+    "t1",
+    {
+      todos: [
+        { content: "Build", status: "in_progress" },
+        { content: "Test", status: "pending" },
+      ],
+    },
+    undefined,
+  )) as { content: Array<{ text: string }> };
+  assert.ok(result.content[0].text.includes('"action":"created"'));
+  assert.ok(result.content[0].text.includes('"in_progress"'));
+  assert.equal(pi.entries.length, 1);
+  assert.equal(pi.entries[0].type, TODO_ENTRY_TYPE);
+  assert.deepEqual(pi.entries[0].entry, [
+    { content: "Build", status: "in_progress" },
+    { content: "Test", status: "pending" },
+  ]);
+});
+
+test("todo_write rejects invalid lists without appending", async () => {
+  const { pi } = createFactory({ todos: new TodoStore() });
+  const tool = pi.tools.find((tool) => tool.name === "todo_write")!;
+  await assert.rejects(
+    tool.execute(
+      "t1",
+      {
+        todos: [
+          { content: "a", status: "in_progress" },
+          { content: "b", status: "in_progress" },
+        ],
+      },
+      undefined,
+    ) as Promise<unknown>,
+    /at most one/u,
+  );
+  assert.equal(pi.entries.length, 0);
+});
+
+test("todo_write with an empty list clears and appends an empty entry", async () => {
+  const { pi } = createFactory({ todos: new TodoStore() });
+  const tool = pi.tools.find((tool) => tool.name === "todo_write")!;
+  const result = (await tool.execute("t1", { todos: [] }, undefined)) as {
+    content: Array<{ text: string }>;
+  };
+  assert.equal(result.content[0].text, '{"action":"created","todos":[]}');
+  assert.deepEqual(pi.entries, [{ type: TODO_ENTRY_TYPE, entry: [] }]);
+});
+
+test("session_start restores the todo list from the session branch", () => {
+  const store = new TodoStore();
+  const { pi } = createFactory({ todos: store });
+  pi.handlers.get("session_start")?.(
+    {},
+    {
+      sessionManager: {
+        getSessionId: () => "s1",
+        getBranch: () => [
+          {
+            type: "custom",
+            customType: TODO_ENTRY_TYPE,
+            data: [{ content: "Build", status: "in_progress" }],
+          },
+        ],
+      },
+      getContextUsage: () => undefined,
+    },
+  );
+  assert.deepEqual(store.current(), [
+    { content: "Build", status: "in_progress" },
+  ]);
 });
 
 test("submit_plan is rejected outside plan mode", async () => {
@@ -187,6 +274,7 @@ test("session, context, and permission hooks route to service ports", async () =
   );
   assert.ok(calls.includes("context.onRuntimeSessionStart"));
   assert.ok(calls.includes("plans.onSessionActivated"));
+  assert.ok(calls.includes("todos.onSessionActivated"));
   assert.ok(calls.includes("context.filter"));
   assert.ok(calls.includes("context.publish"));
   assert.ok(calls.includes("permissions.authorizeTool"));

@@ -12,11 +12,7 @@ pub(crate) fn status_row(view: &SceneViewModel, width: u16, animation_frame: u8)
         .actual_percent
         .map(|percent| format!("ctx {percent:.0}%"))
         .unwrap_or_else(|| "ctx —".to_owned());
-    let left = format!(
-        "{} · thinking {}",
-        view.model_label(),
-        view.session.thinking_level
-    );
+    let left = format!("{} · {}", view.model_label(), view.session.thinking_level);
     let mut right_parts = Vec::new();
     if view.run_state.is_busy() {
         right_parts.push(spinner(animation_frame).to_owned());

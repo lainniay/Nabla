@@ -80,6 +80,8 @@ export const InvalidationKeySchema = Type.Object({
   value: Type.String(),
 });
 
+export type InvalidationKey = Static<typeof InvalidationKeySchema>;
+
 export const GrantProposalSchema = Type.Object({
   scope: Type.Union([
     Type.Literal("once"),
@@ -93,3 +95,4 @@ export const GrantProposalSchema = Type.Object({
 });
 
 export type GrantProposal = Static<typeof GrantProposalSchema>;
+export type GrantBundle = GrantProposal;

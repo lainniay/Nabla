@@ -166,6 +166,7 @@ mod tests {
                 filesystem: FilesystemProfile::default(),
                 network: crate::sandbox::NetworkProfile::Deny,
                 protected_paths: vec![],
+                unix_sockets: Default::default(),
             },
             environment: BTreeMap::new(),
         };
@@ -188,6 +189,7 @@ mod tests {
                 filesystem: FilesystemProfile::default(),
                 network: crate::sandbox::NetworkProfile::Deny,
                 protected_paths: vec![],
+                unix_sockets: Default::default(),
             },
             environment: BTreeMap::new(),
         };

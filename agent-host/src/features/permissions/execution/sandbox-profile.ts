@@ -3,6 +3,10 @@ import { resolve, sep } from "node:path";
 
 import type { PermissionIntent } from "../model.ts";
 import type { SandboxCapability } from "./sandbox-capability.ts";
+import {
+  EMPTY_SANDBOX_CONFIG,
+  type SandboxConfig,
+} from "./sandbox-config.ts";
 
 export interface SandboxExecutionProfile {
   mode: SandboxCapability["mode"];
@@ -13,6 +17,10 @@ export interface SandboxExecutionProfile {
     denyWrite: string[];
   };
   network: "blocked" | "allowed";
+  unixSockets: {
+    allow: string[];
+    deny: string[];
+  };
 }
 
 export interface ExecutionPermit {
@@ -30,6 +38,7 @@ export function buildSandboxProfile(
   intent: PermissionIntent,
   cwd: string,
   capability: SandboxCapability,
+  sandboxConfig: SandboxConfig = EMPTY_SANDBOX_CONFIG,
 ): SandboxExecutionProfile {
   if (capability.mode !== "enforced") {
     return {
@@ -41,10 +50,18 @@ export function buildSandboxProfile(
         denyWrite: CREDENTIAL_PATHS,
       },
       network: "blocked",
+      unixSockets: {
+        allow: [],
+        deny: [],
+      },
     };
   }
 
-  const readWrite = new Set([resolve(cwd), tmpdir()]);
+  const readWrite = new Set([
+    resolve(cwd),
+    tmpdir(),
+    ...sandboxConfig.writableRoots.map((path) => resolve(path)),
+  ]);
   const denyRead = new Set(CREDENTIAL_PATHS);
   const denyWrite = new Set(CREDENTIAL_PATHS);
   let network: "blocked" | "allowed" = "blocked";
@@ -77,5 +94,9 @@ export function buildSandboxProfile(
       denyWrite: [...denyWrite],
     },
     network,
+    unixSockets: {
+      allow: sandboxConfig.unixSockets.allow.map((path) => resolve(path)),
+      deny: sandboxConfig.unixSockets.deny.map((path) => resolve(path)),
+    },
   };
 }

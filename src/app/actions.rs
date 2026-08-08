@@ -78,7 +78,6 @@ impl App {
                 | LocalCommand::Trust(_)
                 | LocalCommand::Permissions(_)
                 | LocalCommand::Model(_)
-                | LocalCommand::Thinking(_)
                 | LocalCommand::Agents(_)
                 | LocalCommand::Agent(_)
                 | LocalCommand::New(_)
@@ -209,15 +208,6 @@ impl App {
                     provider: provider.to_owned(),
                     model_id: model_id.to_owned(),
                 }]
-            }
-            LocalCommand::Thinking(argument) => {
-                let Some(level) = argument else {
-                    self.state.selection_panel = Some(SelectionPanelState::thinking(
-                        &self.state.session.thinking_level,
-                    ));
-                    return Vec::new();
-                };
-                vec![AppEffect::SetThinking(level)]
             }
             LocalCommand::Agents(argument) => {
                 let Some(argument) = argument else {

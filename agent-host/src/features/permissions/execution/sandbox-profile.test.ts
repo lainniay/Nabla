@@ -67,4 +67,20 @@ test("workspace and tmpdir are always writable", () => {
   const profile = buildSandboxProfile(intent([]), "/workspace", enforced);
   assert.ok(profile.filesystem.readWrite.includes("/workspace"));
   assert.ok(profile.filesystem.readWrite.includes(tmpdir()));
+  assert.deepEqual(profile.unixSockets, { allow: [], deny: [] });
+});
+
+test("configured writable roots and unix sockets flow into the profile", () => {
+  const profile = buildSandboxProfile(intent([]), "/workspace", enforced, {
+    writableRoots: ["/srv/nabla-cache"],
+    unixSockets: {
+      allow: ["/var/run/nabla.sock"],
+      deny: ["/workspace/.env.sock"],
+    },
+  });
+  assert.ok(profile.filesystem.readWrite.includes(resolve("/srv/nabla-cache")));
+  assert.deepEqual(profile.unixSockets, {
+    allow: [resolve("/var/run/nabla.sock")],
+    deny: [resolve("/workspace/.env.sock")],
+  });
 });

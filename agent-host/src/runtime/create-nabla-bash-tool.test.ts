@@ -13,6 +13,7 @@ const profile: SandboxExecutionProfile = {
   backend: "native",
   filesystem: { readWrite: ["/workspace"], denyRead: [], denyWrite: [] },
   network: "blocked",
+  unixSockets: { allow: [], deny: [] },
 };
 
 test("bash tool authorizes once, runs through sandbox operations, and finishes once", async () => {

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Socket } from "node:net";
 
-import type { JsonObject } from "../protocol/validation.ts";
+import { errorMessage, type JsonObject } from "../protocol/validation.ts";
 import { JsonlDecoder, MAX_CONTROL_FRAME_BYTES } from "./jsonl-decoder.ts";
 import { OutboundWriter } from "./outbound-writer.ts";
 import { FrameTooLargeError } from "./transport-errors.ts";
@@ -59,7 +59,7 @@ export class ControlConnection {
     } catch (error) {
       this.send({
         type: "host_protocol_error",
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       if (error instanceof FrameTooLargeError) {
         setImmediate(() => this.destroy());

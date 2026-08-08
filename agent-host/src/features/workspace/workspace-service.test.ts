@@ -8,6 +8,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import type { HarnessConfig } from "./config.ts";
+import { EMPTY_SANDBOX_CONFIG } from "../permissions/execution/sandbox-config.ts";
 import type { RuntimeAccess } from "../../runtime/runtime-access.ts";
 import type { JsonObject } from "../../protocol/validation.ts";
 import { WorkspaceService } from "./workspace-service.ts";
@@ -31,6 +32,7 @@ const config: HarnessConfig = {
       instructions: [],
     },
   },
+  sandbox: EMPTY_SANDBOX_CONFIG,
   diagnostics: [],
 };
 

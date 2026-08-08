@@ -1,7 +1,7 @@
 import type { OperationContext } from "../app/operation-scope.ts";
 import { CommandLanes } from "./command-lanes.ts";
 import type { CommandDefinition } from "./command-definition.ts";
-import type { JsonObject } from "./validation.ts";
+import { errorMessage, type JsonObject } from "./validation.ts";
 
 export interface RouteResult {
   id: string | undefined;
@@ -65,7 +65,7 @@ export class CommandRouter {
           type: "response",
           command: rawType,
           success: false,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         };
       }
       try {
@@ -83,7 +83,7 @@ export class CommandRouter {
           type: "response",
           command: rawType,
           success: false,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         };
       }
     });

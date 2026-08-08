@@ -662,6 +662,7 @@ test("permit consumption and completion record the execution lifecycle", async (
       backend: "none",
       filesystem: { readWrite: [], denyRead: [], denyWrite: [] },
       network: "blocked",
+      unixSockets: { allow: [], deny: [] },
     };
     assert.equal(
       kernel.consume(

@@ -1,4 +1,8 @@
-import { isJsonObject, type JsonObject } from "../protocol/validation.ts";
+import {
+  errorMessage,
+  isJsonObject,
+  type JsonObject,
+} from "../protocol/validation.ts";
 import {
   FrameTooLargeError,
   JsonlParseError,
@@ -51,7 +55,7 @@ export class JsonlDecoder {
       parsed = JSON.parse(line);
     } catch (error) {
       throw new JsonlParseError(
-        error instanceof Error ? error.message : String(error),
+        errorMessage(error),
       );
     }
     if (!isJsonObject(parsed)) {

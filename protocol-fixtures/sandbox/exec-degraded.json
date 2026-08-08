@@ -11,7 +11,11 @@
       "denyWrite": []
     },
     "network": "deny",
-    "protectedPaths": []
+    "protectedPaths": [],
+    "unixSockets": {
+      "allow": [],
+      "deny": []
+    }
   },
   "environment": {}
 }

@@ -3,7 +3,7 @@ use crate::state::{ToolStatus, TranscriptItem};
 use view_model::SceneViewModel;
 
 use super::{
-    text::wrap_text,
+    text::{cells_width, wrap_text},
     types::{CellStyle, StyledCell, VisualRow},
 };
 
@@ -44,12 +44,6 @@ pub(crate) fn input_border_row(
     let mut row = composer_border_row(left, right, width, style);
     row.component_id = id.to_owned();
     row
-}
-
-pub(crate) fn cells_width(cells: &[StyledCell]) -> u16 {
-    cells
-        .iter()
-        .fold(0u16, |total, cell| total.saturating_add(cell.width))
 }
 
 pub(crate) fn composer_border_row(

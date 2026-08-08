@@ -1,7 +1,7 @@
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { AuthPromptQueue } from "../../auth-prompts.ts";
-import type { JsonObject } from "../../protocol/validation.ts";
+import { asError, type JsonObject } from "../../protocol/validation.ts";
 
 type AuthInteraction = Parameters<ModelRuntime["login"]>[2];
 type AuthPrompt = Parameters<AuthInteraction["prompt"]>[0];
@@ -123,7 +123,7 @@ export class AuthService {
           });
         })
         .catch((error) => {
-          reject(error instanceof Error ? error : new Error(String(error)));
+          reject(asError(error));
         })
         .finally(() => {
           if (this.activeFlow === flow) this.activeFlow = undefined;

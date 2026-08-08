@@ -2,6 +2,7 @@ import {
   ModelRuntime,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { homedir } from "node:os";
 
 import { ContextBudgetManager } from "../features/context/engine.ts";
 import type { ContextSnapshot } from "../features/context/model.ts";
@@ -11,29 +12,34 @@ import {
 } from "../features/workspace/config.ts";
 import { PlanStore } from "../features/plans/store.ts";
 import { PlanController } from "../features/plans/plan-controller.ts";
+import { TodoStore } from "../features/todos/store.ts";
 import { HostDiagnostics } from "../diagnostics/host-diagnostics.ts";
 import { ControlServer } from "../transport/control-server.ts";
 import { CommandRouter } from "../protocol/command-router.ts";
-import { HostEventPublisher } from "../protocol/host-event-publisher.ts";
-import type { HostEvent } from "../protocol/contracts.ts";
+import {
+  HostEventPublisher,
+  type EventSink,
+} from "../protocol/host-event-publisher.ts";
+import type { ActiveAgentSnapshot, HostEvent } from "../protocol/contracts.ts";
 import type { JsonObject } from "../protocol/validation.ts";
 import { RuntimeSupervisor } from "../runtime/runtime-supervisor.ts";
-import { RuntimeHolder } from "../runtime/runtime-holder.ts";
+import type { SessionRuntimePort } from "../runtime/runtime-access.ts";
 import { createSessionRuntimeFactory } from "../runtime/session-runtime-factory.ts";
 import { sessionActivation } from "../runtime/session-activation.ts";
 import { expandHomePath } from "../runtime/path-utils.ts";
 import { PiExtensionFactory } from "../runtime/pi-extension-factory.ts";
-import {
-  ConnectionState,
-  EventRoute,
-  SubagentStateSource,
-} from "./composition-ports.ts";
+import { Deferred } from "./composition-ports.ts";
 import { InteractionBroker } from "../features/interactions/interaction-broker.ts";
 import { ModelService } from "../features/models/model-service.ts";
 import { AuthService } from "../features/auth/auth-service.ts";
 import { WorkspaceService } from "../features/workspace/workspace-service.ts";
 import { BootstrapService } from "../features/bootstrap/bootstrap-service.ts";
 import { PermissionService } from "../features/permissions/permission-service.ts";
+import {
+  JsonlPermissionAuditLog,
+  type PermissionAuditSink,
+} from "../features/permissions/audit-log.ts";
+import { WorkspaceGrantStore } from "../features/permissions/approvals/workspace-store.ts";
 import { SessionService } from "../features/sessions/session-service.ts";
 import { SessionBrowserService } from "../features/sessions/session-browser-service.ts";
 import { TreeService } from "../features/sessions/tree-service.ts";
@@ -61,6 +67,8 @@ export interface CreateHostAppOptions {
   modelRuntime?: ModelRuntime;
   supervisor?: RuntimeSupervisor;
   integrations?: IntegrationService;
+  auditLog?: PermissionAuditSink;
+  workspaceStore?: WorkspaceGrantStore;
 }
 
 export async function createHostApp(
@@ -86,13 +94,38 @@ export async function createHostApp(
   const diagnostics = new HostDiagnostics();
 
   // Late-bound ports assembled before their owners exist.
-  const runtimeAccess = new RuntimeHolder();
-  const connection = new ConnectionState();
-  const eventRoute = new EventRoute();
-  const events = new HostEventPublisher(eventRoute.sink);
+  const runtimeDeferred = new Deferred<SessionRuntimePort>();
+  const runtimeAccess: SessionRuntimePort = {
+    current: () => runtimeDeferred.get().current(),
+    requireIdle: (operation) => runtimeDeferred.get().requireIdle(operation),
+    sessionGeneration: () => runtimeDeferred.get().sessionGeneration(),
+    newSession: (options) => runtimeDeferred.get().newSession(options),
+    switchSession: (sessionPath, options) =>
+      runtimeDeferred.get().switchSession(sessionPath, options),
+  };
+  const connectionDeferred = new Deferred<ControlServer>();
+  const connection = {
+    hasConnection: () => connectionDeferred.get().hasConnection(),
+    isCurrent: (context: Parameters<ControlServer["isCurrent"]>[0]) =>
+      connectionDeferred.get().isCurrent(context),
+  };
+  const eventRoute = new Deferred<EventSink>();
+  const events = new HostEventPublisher((event) => eventRoute.get()(event));
   const send = (event: JsonObject) =>
     events.publish(event as unknown as HostEvent);
-  const subagentState = new SubagentStateSource();
+  const subagentStateDeferred = new Deferred<{
+    activeSnapshots(): ActiveAgentSnapshot[];
+    pendingSnapshots(): ActiveAgentSnapshot[];
+  }>();
+  const subagentState = {
+    snapshot: () => {
+      const source = subagentStateDeferred.get();
+      return {
+        active: source.activeSnapshots(),
+        pending: source.pendingSnapshots(),
+      };
+    },
+  };
   const interactions = new InteractionBroker();
 
   // Modules.
@@ -137,6 +170,16 @@ export async function createHostApp(
     publish: publishContext,
   };
   const plans = new PlanController(planStore, modelRuntime, runtimeAccess, send);
+  const todos = new TodoStore();
+  const workspace = new WorkspaceService(
+    runtimeAccess,
+    modelRuntime,
+    send,
+    startupConfig,
+    () => subagentState.snapshot(),
+    () => connection.hasConnection(),
+    (session) => plans.reapply(session),
+  );
   const permissions = new PermissionService(
     interactions,
     send,
@@ -148,15 +191,15 @@ export async function createHostApp(
         runtimeAccess.current().session.sessionManager.getCwd(),
     },
     { capability: () => rustSandboxBackend.capability },
-  );
-  const workspace = new WorkspaceService(
-    runtimeAccess,
-    modelRuntime,
-    send,
-    startupConfig,
-    () => subagentState.snapshot(),
-    () => connection.hasConnection(),
-    (session) => plans.reapply(session),
+    {
+      auditLog:
+        options.auditLog ??
+        new JsonlPermissionAuditLog(process.env.NABLA_HOME ?? homedir()),
+      workspaceStore:
+        options.workspaceStore ??
+        new WorkspaceGrantStore(process.env.NABLA_HOME ?? homedir()),
+      sandboxConfig: () => workspace.configValue().sandbox,
+    },
   );
   const integrations =
     options.integrations ??
@@ -205,6 +248,7 @@ export async function createHostApp(
   const extensionFactory = new PiExtensionFactory({
     planMode: plans,
     plans,
+    todos,
     context,
     interactions,
     subagents,
@@ -280,8 +324,8 @@ export async function createHostApp(
         workspace,
       }),
     );
-  runtimeAccess.bind(runtime);
-  subagentState.bind(subagents);
+  runtimeDeferred.bind(runtime);
+  subagentStateDeferred.bind(subagents);
 
   const control = new ControlServer(socketPath, router, {
     onConnectionReplaced: () => {
@@ -295,7 +339,7 @@ export async function createHostApp(
       browser.closeAll();
     },
   });
-  connection.bind(control);
+  connectionDeferred.bind(control);
   eventRoute.bind((event) => control.send(event));
 
   return new HostAppImpl(

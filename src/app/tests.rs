@@ -849,28 +849,8 @@ fn agent_picker_completes_a_profile_without_starting_it() {
 }
 
 #[test]
-fn model_and_thinking_commands_use_the_shared_selection_panel() {
+fn model_command_opens_model_then_thinking_selection_panels() {
     let mut app = App::new(state());
-    app.state.editor.replace("/thinking".to_owned());
-
-    assert!(app.update(press(KeyCode::Enter)).is_empty());
-    assert_eq!(app.state.active_modal_kind(), Some(UiModalKind::Selection));
-    let thinking = app.state.selection_panel.as_ref().unwrap();
-    assert_eq!(thinking.title, "Select thinking level");
-    assert_eq!(thinking.options.len(), THINKING_LEVELS.len());
-    assert_eq!(thinking.selected, 0);
-
-    app.update(press(KeyCode::Tab));
-    assert_eq!(app.state.selection_panel.as_ref().unwrap().selected, 1);
-    assert_eq!(
-        app.update(press(KeyCode::Enter)),
-        vec![AppEffect::SetThinking("minimal".to_owned())]
-    );
-    assert!(app.state.selection_panel.is_none());
-    app.update(AppEvent::Command(CommandEvent::ThinkingSetFinished(Ok(
-        json!({"level": "minimal"}),
-    ))));
-    assert_eq!(app.state.session.thinking_level, "minimal");
 
     app.state.editor.replace("/model".to_owned());
     assert_eq!(
@@ -914,6 +894,17 @@ fn model_and_thinking_commands_use_the_shared_selection_panel() {
         }]
     );
     assert!(app.state.selection_panel.is_none());
+
+    app.update(AppEvent::Command(CommandEvent::ModelSetFinished(Ok(
+        json!({"provider": "provider-b", "id": "model-b", "name": "Model B"}),
+    ))));
+    assert_eq!(
+        app.state.session.model,
+        Some(json!({"provider": "provider-b", "id": "model-b", "name": "Model B"}))
+    );
+    let thinking = app.state.selection_panel.as_ref().unwrap();
+    assert_eq!(thinking.title, "Select thinking level");
+    assert_eq!(thinking.kind, SelectionPanelKind::Thinking);
 }
 
 #[test]
@@ -1530,7 +1521,7 @@ fn login_provider_secret_prompt_and_completion_stay_inside_auth_state() {
     app.update(press(KeyCode::Char('s')));
     app.update(press(KeyCode::Char('k')));
 
-    let effects = app.update(press(KeyCode::Enter));
+    let effects = app.update(press_with(KeyCode::Enter, KeyModifiers::SHIFT));
     assert!(matches!(
         effects.as_slice(),
         [AppEffect::AuthReply {
@@ -2214,8 +2205,8 @@ fn command_navigation_reaches_candidates_beyond_the_visible_window() {
     let mut app = App::new(state());
     app.state.editor.insert_text("/");
 
-    assert_eq!(app.state().command_candidates().len(), 15);
-    for _ in 0..14 {
+    assert_eq!(app.state().command_candidates().len(), 14);
+    for _ in 0..13 {
         app.update(press(KeyCode::Tab));
     }
     assert_eq!(
@@ -2557,7 +2548,7 @@ fn new_resume_and_tree_are_local_commands_without_user_transcript_items() {
 }
 
 #[test]
-fn session_browser_switches_scope_and_confirms_a_missing_working_directory() {
+fn session_browser_confirms_a_missing_working_directory() {
     let mut app = App::new(state());
     app.state.editor.insert_text("/resume");
     app.update(press(KeyCode::Enter));
@@ -2584,18 +2575,6 @@ fn session_browser_switches_scope_and_confirms_a_missing_working_directory() {
     assert_eq!(app.state.session_browser.as_ref().unwrap().selected, 1);
     app.update(press_with(KeyCode::Tab, KeyModifiers::SHIFT));
     assert_eq!(app.state.session_browser.as_ref().unwrap().selected, 0);
-    assert_eq!(
-        app.update(press(KeyCode::Char('w'))),
-        vec![AppEffect::QuerySessionBrowser {
-            browser_id: "browser-1".to_owned(),
-            scope: SessionScope::All,
-            query: String::new(),
-            sort_mode: SessionSortMode::Threaded,
-            named_only: false,
-            offset: 0,
-            generation: 1,
-        }]
-    );
     app.update(press(KeyCode::Down));
     assert!(app.update(press(KeyCode::Enter)).is_empty());
     assert!(
@@ -2883,7 +2862,7 @@ fn delayed_pi_delta_from_the_previous_session_is_ignored() {
 }
 
 #[test]
-fn tree_browser_supports_pi_filters_copy_summary_and_abort_flow() {
+fn tree_browser_supports_pi_filters_summary_and_abort_flow() {
     let mut app = App::new(state());
     app.state.editor.insert_text("/tree");
     app.update(press(KeyCode::Enter));
@@ -2920,12 +2899,6 @@ fn tree_browser_supports_pi_filters_copy_summary_and_abort_flow() {
     );
 
     app.update(press(KeyCode::Up));
-    assert_eq!(
-        app.update(press_with(KeyCode::Char('x'), KeyModifiers::CONTROL)),
-        vec![AppEffect::CopyTreeEntry {
-            entry_id: "branch".to_owned(),
-        }]
-    );
     assert!(app.update(press(KeyCode::Enter)).is_empty());
     app.update(press(KeyCode::Char('2')));
     assert_eq!(
@@ -3228,4 +3201,188 @@ fn alternate_search_focus_uses_unicode_editor_and_two_stage_escape() {
 
     app.update(press(KeyCode::Esc));
     assert!(app.state.transcript_viewer.is_none());
+}
+
+#[test]
+fn paste_multiline_text_into_prompt_does_not_submit() {
+    let mut app = App::new(state());
+    let pasted = "fn main() {\n    todo!()\n}";
+
+    assert!(
+        app.update(AppEvent::Terminal(TerminalEvent::Paste(pasted.to_owned())))
+            .is_empty()
+    );
+    assert_eq!(app.state.editor.text(), pasted);
+    assert_eq!(app.state.run_state, RunState::Idle);
+    assert!(app.state().transcript.is_empty());
+}
+
+#[test]
+fn paste_multiline_text_while_streaming_does_not_steer() {
+    let mut app = App::new(state());
+    app.state.run_state = RunState::Running;
+    app.state.session.is_streaming = true;
+    let pasted = "fn main() {\n    todo!()\n}";
+
+    assert!(
+        app.update(AppEvent::Terminal(TerminalEvent::Paste(pasted.to_owned())))
+            .is_empty()
+    );
+    assert_eq!(app.state.editor.text(), pasted);
+    assert!(app.state().transcript.is_empty());
+}
+
+#[test]
+fn shift_enter_inserts_newline_instead_of_accepting_file_completion() {
+    let completion = || FileCompletionState {
+        query: "src".to_owned(),
+        token_range: 0..4,
+        generation: 1,
+        candidates: vec![crate::file_references::FileCandidate {
+            path: "src/lib.rs".to_owned(),
+            basename: "lib.rs".to_owned(),
+            parent: "src".to_owned(),
+            size: 0,
+        }],
+        selected: 0,
+        loading: false,
+        error: None,
+    };
+
+    let mut app = App::new(state());
+    app.state.editor.insert_text("@src");
+    app.state.file_completion = Some(completion());
+    assert!(app.update(press(KeyCode::Enter)).is_empty());
+    assert_eq!(app.state.editor.text(), "@src/lib.rs ");
+    assert!(app.state().transcript.is_empty());
+
+    let mut app = App::new(state());
+    app.state.editor.insert_text("@src");
+    app.state.file_completion = Some(completion());
+    assert!(
+        app.update(press_with(KeyCode::Enter, KeyModifiers::SHIFT))
+            .is_empty()
+    );
+    assert_eq!(app.state.editor.text(), "@src\n");
+    assert!(app.state.file_completion.is_none());
+    assert!(app.state().transcript.is_empty());
+}
+
+#[test]
+fn custom_question_answers_support_shift_enter_and_ctrl_j_newlines() {
+    let mut app = App::new(state());
+    app.update(AppEvent::Host(RpcEvent {
+        kind: "question_request".to_owned(),
+        payload: json!({
+            "requestId": "question-1",
+            "questions": [
+                {
+                    "id": "scope",
+                    "prompt": "Which scope?",
+                    "options": [{"id": "small", "label": "Small"}]
+                }
+            ]
+        }),
+    }));
+
+    app.update(press(KeyCode::Down));
+    app.update(press(KeyCode::Enter));
+    assert!(app.state.question.as_ref().unwrap().custom_answer);
+
+    app.update(press(KeyCode::Char('a')));
+    app.update(press_with(KeyCode::Enter, KeyModifiers::SHIFT));
+    app.update(press_with(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    app.update(press(KeyCode::Char('b')));
+    assert_eq!(app.state.question.as_ref().unwrap().editor.text(), "a\n\nb");
+
+    let effects = app.update(press(KeyCode::Enter));
+    assert!(matches!(
+        effects.as_slice(),
+        [AppEffect::ReplyQuestions {
+            request_id,
+            answers,
+        }] if request_id == "question-1"
+            && answers.len() == 1
+            && answers[0].value == "a\n\nb"
+            && answers[0].option_id.is_none()
+    ));
+}
+
+#[test]
+fn auth_text_prompts_support_shift_enter_and_ctrl_j_newlines() {
+    let mut app = App::new(state());
+    app.state.editor.insert_text("/login");
+    app.update(press(KeyCode::Enter));
+    app.update(AppEvent::Command(CommandEvent::AuthProvidersFinished(Ok(
+        vec![AuthProvider {
+            id: "test".to_owned(),
+            name: "Test Provider".to_owned(),
+            configured: false,
+            configured_type: None,
+            configured_source: None,
+            methods: vec![AuthMethod {
+                kind: "api_key".to_owned(),
+                label: "API key".to_owned(),
+                available: true,
+            }],
+        }],
+    ))));
+    let effects = app.update(press(KeyCode::Enter));
+    assert!(matches!(effects.as_slice(), [AppEffect::AuthLogin { .. }]));
+    let AuthState::Running(flow) = &app.state().auth_state else {
+        panic!("expected active auth flow");
+    };
+    let flow_id = flow.id.clone();
+
+    app.update(AppEvent::Host(RpcEvent {
+        kind: "auth_prompt".to_owned(),
+        payload: json!({
+            "type": "auth_prompt",
+            "flowId": flow_id,
+            "promptId": "prompt-1",
+            "promptType": "text",
+            "message": "Enter token"
+        }),
+    }));
+
+    app.update(press(KeyCode::Char('a')));
+    assert!(
+        app.update(press_with(KeyCode::Enter, KeyModifiers::SHIFT))
+            .is_empty()
+    );
+    assert!(
+        app.update(press_with(KeyCode::Char('j'), KeyModifiers::CONTROL))
+            .is_empty()
+    );
+    app.update(press(KeyCode::Char('b')));
+    let AuthState::Running(flow) = &app.state().auth_state else {
+        panic!("expected active auth flow");
+    };
+    assert_eq!(
+        flow.prompt.as_ref().expect("text prompt").editor.text(),
+        "a\n\nb"
+    );
+
+    let effects = app.update(press(KeyCode::Enter));
+    assert!(matches!(
+        effects.as_slice(),
+        [AppEffect::AuthReply {
+            prompt_id,
+            value,
+            ..
+        }] if prompt_id == "prompt-1" && value.expose() == "a\n\nb"
+    ));
+}
+
+#[test]
+fn ctrl_u_deletes_only_the_current_line_in_the_prompt() {
+    let mut app = App::new(state());
+    app.state.editor.insert_text("first\nsecond");
+
+    assert!(
+        app.update(press_with(KeyCode::Char('u'), KeyModifiers::CONTROL))
+            .is_empty()
+    );
+    assert_eq!(app.state.editor.text(), "first\n");
+    assert!(app.state().transcript.is_empty());
 }

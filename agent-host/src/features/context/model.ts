@@ -1,75 +1,34 @@
 import type { ContextEvent } from "@earendil-works/pi-coding-agent";
 
 import type { PlanArtifact } from "../plans/model.ts";
+import type {
+  CompactionRecord,
+  CompactionReason,
+  ContextCategory,
+  ContextCategoryEstimate,
+  ContextConsumer,
+  ContextPolicy,
+  ContextPruneEstimate,
+  ContextSnapshot,
+  ContextUsageState,
+  PruneReason,
+} from "../../protocol/schemas/context.ts";
 
 export type AgentMessage = ContextEvent["messages"][number];
 export type JsonObject = Record<string, unknown>;
 
-export type PruneReason = "hard_limit" | "history_budget" | "superseded";
-export type ContextUsageState = "actual" | "estimated" | "recalculating";
-
-export interface ContextPolicy {
-  enabled: boolean;
-  recentToolResultTokens: number;
-  minimumBatchSavingsTokens: number;
-  minimumToolResultTokens: number;
-  successToolResultLimitTokens: number;
-  searchToolResultLimitTokens: number;
-  errorToolResultLimitTokens: number;
-}
-
-export interface ContextCategoryEstimate {
-  category: "user" | "assistant" | "toolResult" | "other";
-  messageCount: number;
-  estimatedTokens: number;
-}
-
-export interface ContextConsumer {
-  category: ContextCategoryEstimate["category"];
-  label: string;
-  estimatedTokens: number;
-  toolCallId?: string;
-}
-
-export interface ContextPruneEstimate {
-  reason: PruneReason;
-  count: number;
-  estimatedTokensSaved: number;
-}
-
-export interface CompactionRecord {
-  reason: "manual" | "threshold" | "overflow";
-  firstKeptEntryId: string;
-  tokensBefore: number;
-  estimatedTokensAfter: number | null;
-  tokensSaved: number | null;
-  savedPercent: number | null;
-  fileCount: number;
-  readFileCount: number;
-  modifiedFileCount: number;
-}
-
-export interface ContextSnapshot {
-  scopeId?: string;
-  revision: number;
-  usageState: ContextUsageState;
-  actualTokens: number | null;
-  actualPercent: number | null;
-  contextWindow: number | null;
-  estimatedUnfilteredTokens: number;
-  estimatedNextRequestTokens: number;
-  categories: ContextCategoryEstimate[];
-  estimatedSystemToolOtherTokens: number | null;
-  estimatedPrunedThisRequestTokens: number;
-  estimatedCurrentlyPrunableTokens: number;
-  estimatedCumulativeAvoidedTokens: number;
-  pruning: ContextPruneEstimate[];
-  topConsumers: ContextConsumer[];
-  compactionCount: number;
-  recentCompactions: CompactionRecord[];
-  policy: ContextPolicy;
-  epoch: number;
-}
+export type {
+  CompactionRecord,
+  CompactionReason,
+  ContextCategory,
+  ContextCategoryEstimate,
+  ContextConsumer,
+  ContextPolicy,
+  ContextPruneEstimate,
+  ContextSnapshot,
+  ContextUsageState,
+  PruneReason,
+} from "../../protocol/schemas/context.ts";
 
 export interface ContextActiveState {
   planMode: boolean;

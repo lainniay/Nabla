@@ -10,6 +10,7 @@ import {
   type ThinkingLevel,
 } from "../permissions/shell/rules.ts";
 import type { HarnessConfig } from "../workspace/config.ts";
+import { EMPTY_SANDBOX_CONFIG } from "../permissions/execution/sandbox-config.ts";
 import {
   isJsonObject as isRecord,
   stringArray,
@@ -100,6 +101,7 @@ export const DEFAULT_CONFIG: HarnessConfig = {
   trustedWorkspaces: [],
   allowedProjectExtensions: [],
   profiles: DEFAULT_PROFILES,
+  sandbox: EMPTY_SANDBOX_CONFIG,
   diagnostics: [],
 };
 

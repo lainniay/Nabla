@@ -171,7 +171,7 @@ impl App {
                     KeyCode::Home => viewer.search_query.move_home(),
                     KeyCode::End => viewer.search_query.move_end(),
                     KeyCode::Char('u' | 'U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        viewer.search_query.clear();
+                        viewer.search_query.delete_to_line_start();
                         refresh = true;
                     }
                     KeyCode::Char(character)
